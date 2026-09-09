@@ -114,6 +114,21 @@ class SwapScript(unittest.TestCase):
         self.assertNotEqual(parent, os.path.dirname(parent),
                             "the swap script must never land in the filesystem root")
 
+    def test_a_shallow_staging_path_does_not_walk_up_to_the_root(self):
+        # This is the case the guard exists for, and the one the deepened
+        # fixture above no longer reaches. write_swap_script goes two
+        # directories up from `staged`; from "/tmp/xyz" that is "/", and the
+        # script was written into the filesystem root. Without the guard this
+        # test fails; the fixture-based one above passes either way.
+        shallow = tempfile.mkdtemp()                      # one level deep
+        self.assertEqual(os.path.dirname(os.path.dirname(os.path.abspath(shallow))),
+                         os.sep, "fixture assumption: tmpdir must be one level deep")
+        script = app.write_swap_script(shallow, self.target, "/bin/true")
+        parent = os.path.dirname(os.path.abspath(script))
+        self.assertNotEqual(parent, os.sep,
+                            f"swap script landed in the filesystem root: {script}")
+        self.assertTrue(os.access(parent, os.W_OK))
+
     def test_written_and_runnable(self):
         self.assertTrue(os.path.isfile(self.script))
         if not app.sys.platform.startswith("win"):
@@ -156,8 +171,12 @@ class LiveRepository(unittest.TestCase):
             self.releases = self._api("releases")
         except Exception as exc:
             self.skipTest(f"GitHub unreachable: {exc}")
+        self.releases = [r for r in self.releases
+                         if not r.get("draft") and not r.get("prerelease")]
         if not self.releases:
-            self.skipTest("no releases published")
+            # A repository with nothing but prereleases is a legitimate state,
+            # not a broken updater.
+            self.skipTest("no published non-prerelease releases")
 
     def test_resolves_the_highest_version(self):
         # GitHub's own /releases/latest is ordered by creation time, not by

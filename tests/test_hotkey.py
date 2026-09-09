@@ -90,6 +90,66 @@ class Matching(unittest.TestCase):
 
 
 @needs_display
+class Watcher(unittest.TestCase):
+    """
+    HotkeyWatcher without synthesising key presses.
+
+    The slow sweep covers it end to end, but that one is excluded from the
+    pull-request suite, which left the arming and debounce logic untested on
+    every PR. Driving _press/_release directly is deterministic and instant.
+    """
+
+    def setUp(self):
+        self.hits = []
+        self.watcher = app.HotkeyWatcher(hotkey({"ctrl"}, [kb.Key.f6]),
+                                         lambda: self.hits.append(1))
+        # Deliberately not started: no listener, no display interaction, just
+        # the state machine.
+
+    def press(self, *keys):
+        for key in keys:
+            self.watcher._press(key)
+
+    def release(self, *keys):
+        for key in keys:
+            self.watcher._release(key)
+
+    def test_fires_on_the_complete_chord(self):
+        self.press(kb.Key.ctrl, kb.Key.f6)
+        self.assertEqual(len(self.hits), 1)
+
+    def test_does_not_fire_without_the_modifier(self):
+        self.press(kb.Key.f6)
+        self.assertEqual(self.hits, [])
+
+    def test_does_not_fire_with_an_extra_modifier(self):
+        self.press(kb.Key.ctrl, kb.Key.shift, kb.Key.f6)
+        self.assertEqual(self.hits, [])
+
+    def test_holding_does_not_repeat(self):
+        self.press(kb.Key.ctrl, kb.Key.f6)
+        self.press(kb.Key.f6, kb.Key.f6)      # auto-repeat
+        self.assertEqual(len(self.hits), 1)
+
+    def test_rearms_after_release(self):
+        self.watcher.DEBOUNCE_S = 0           # timing is not what is under test
+        self.press(kb.Key.ctrl, kb.Key.f6)
+        self.release(kb.Key.f6)
+        self.press(kb.Key.f6)
+        self.assertEqual(len(self.hits), 2)
+
+    def test_debounce_suppresses_an_immediate_second_fire(self):
+        self.press(kb.Key.ctrl, kb.Key.f6)
+        self.release(kb.Key.f6)
+        self.press(kb.Key.f6)                 # inside the 250 ms window
+        self.assertEqual(len(self.hits), 1)
+
+    def test_left_and_right_modifiers_are_interchangeable(self):
+        self.press(kb.Key.ctrl_r, kb.Key.f6)
+        self.assertEqual(len(self.hits), 1)
+
+
+@needs_display
 class Recorder(unittest.TestCase):
     def drive(self, keys):
         rec = app.HotkeyRecorder()

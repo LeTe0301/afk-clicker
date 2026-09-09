@@ -83,7 +83,12 @@ def selftest():
     Hotkey({"ctrl"}, [_record(kb.KeyCode.from_char("h"))]).label()
     Hotkey(set(), [_record(kb.Key.f6), _record(kb.Key.f7)]).label()
     tk.Tk().destroy()                             # Tcl/Tk actually bundled
-    Store(os.devnull).save()                      # config path logic is sane
+    # A real temp file, not os.devnull: Store.save() writes to a sibling and
+    # os.replace()s it into place, so as root this replaced the /dev/null
+    # device node with a regular file.
+    with tempfile.TemporaryDirectory() as probe:
+        Store(os.path.join(probe, "settings.json")).save()
+    config_path()                                 # path logic is sane
     return 0
 
 

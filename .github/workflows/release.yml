@@ -4,6 +4,12 @@ name: Release
 # then publication. Driven by a release/{version} branch -- pushing a tag no
 # longer publishes anything, so nothing reaches the Releases page without a
 # person approving it.
+# One release at a time per branch. Two overlapping runs would race to create
+# the same tag, and the loser publishes half a release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     branches: ["release/**"]
@@ -43,13 +49,15 @@ jobs:
           # Shape-check it. Everything downstream builds a tag and a filename
           # out of this, and `release/../../x` or `release/hotfix/0.4.1` would
           # otherwise flow straight through.
-          case "$V" in
-            [0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "::error::'$V' is not a MAJOR.MINOR.PATCH version"; exit 1 ;;
-          esac
-          if ! printf %s "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::'$V' is not a MAJOR.MINOR.PATCH version"; exit 1
-          fi
+          # python -c, not grep: grep matches line by line, so a value like
+          # "0.4.0<newline>anything" satisfied ^...$ on its first line and the
+          # rest rode along into the tag and the filenames.
+          python3 - "$V" <<'CHECK'
+          import re, sys
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", sys.argv[1]):
+              print(f"::error::{sys.argv[1]!r} is not a MAJOR.MINOR.PATCH version")
+              sys.exit(1)
+          CHECK
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Releasing $V"
 
@@ -71,10 +79,15 @@ jobs:
       - name: The version in the code must match the branch
         # A release branch that ships a binary reporting a different version
         # breaks the in-app updater's comparison, quietly and permanently.
+        #
+        # Through env, like the version job: an expression inside run: is
+        # pasted in as text before the shell parses the line.
+        env:
+          WANT: ${{ needs.version.outputs.version }}
         run: |
           CODE=$(python -c "import re;print(re.search(r'__version__ = \"([^\"]+)\"', open('afk_clicker.py').read()).group(1))")
-          if [ "$CODE" != "${{ needs.version.outputs.version }}" ]; then
-            echo "::error::afk_clicker.py says $CODE, the release is ${{ needs.version.outputs.version }}"
+          if [ "$CODE" != "$WANT" ]; then
+            echo "::error::afk_clicker.py says $CODE, the release is $WANT"
             exit 1
           fi
           echo "version $CODE matches"
@@ -191,7 +204,9 @@ jobs:
         working-directory: artifacts
         run: sha256sum * | tee SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      # Pinned to a commit: this action holds the only write token in the
+      # pipeline, and a moving tag is a moving supply chain.
+      - uses: softprops/action-gh-release@v2.0.8
         with:
           tag_name: v${{ needs.version.outputs.version }}
           # Without this the tag is created on the default branch instead of

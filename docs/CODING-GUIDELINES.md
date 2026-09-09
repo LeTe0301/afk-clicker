@@ -35,9 +35,10 @@ Watch for shadowing. The Tk widget class `Button` once shadowed pynput's mouse
 Anything read from disk or typed by a user is untrusted.
 
 - `_num()` never trusts an entry box at click time.
-- `Hotkey.from_json` **validates** instead of wrapping the parse in
-  `try/except`: `{"keys": "nope"}` raises nothing at all, because iterating a
-  string yields characters and builds a plausible hotkey out of garbage.
+- Parsing stored structures **validates** instead of wrapping the parse in
+  `try/except`. `{"keys": "nope"}` raises nothing at all: iterating a string
+  yields characters, and a naive parser builds a plausible object out of
+  garbage. Check the shape and the types, then decide.
 - A corrupt config starts from defaults; it never blocks startup.
 
 ## Failure behaviour

@@ -62,6 +62,11 @@ class Sidebar(UITestCase):
         self.assertEqual(set(self.ui.items), {"minecraft", "global"})
 
     def test_running_dot_and_follow(self):
+        # _poll_games runs on a timer and calls _mark_running with whatever is
+        # really on screen. On a slower runner it landed between these lines
+        # and reset _seen_running, so the follow never happened. Pin the
+        # starting state instead of racing it.
+        self.ui._seen_running = set()
         self.ui._mark_running({"minecraft"})
         self.root.update()
         self.assertTrue(self.ui.items["minecraft"].running)
@@ -72,6 +77,7 @@ class Sidebar(UITestCase):
     def test_a_hand_picked_profile_is_not_overridden(self):
         # Following the game once is helpful; doing it every five seconds
         # would fight the user.
+        self.ui._seen_running = set()
         self.ui._mark_running({"minecraft"})
         self.ui._select("global")
         self.ui._mark_running({"minecraft"})
@@ -185,8 +191,15 @@ class ClickLoop(UITestCase):
         self.ui.button_name.set("left")
         self.ui.click_ms.var.set("200")
         self.ui.jitter_ms.var.set("0")
-        gaps = self._gaps(1.3)
-        self.assertLess(abs(sum(gaps) / len(gaps) - 0.2), 0.08)
+        gaps = sorted(self._gaps(1.6))
+        # The median, not the mean. A shared runner throws in the occasional
+        # long gap, which drags a mean far enough that the bound has to be
+        # loosened until a systematically slow loop fits inside it too. The
+        # median ignores those spikes, so it can stay tight enough to catch
+        # one: 0.27 s (35% slow) fails this, 0.2 s with a few stalls does not.
+        median = gaps[len(gaps) // 2]
+        self.assertLess(abs(median - 0.2), 0.035,
+                        f"median gap {median:.3f}s for a 200 ms interval")
 
     def test_jitter_widens_the_spread(self):
         # Relative, not absolute. A shared CI runner adds scheduling delays of
