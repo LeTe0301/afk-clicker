@@ -1,21 +1,42 @@
-name: Build Windows executable
+name: Build
 
 # Two ways in:
-#   - push a tag like v1.0.0  -> builds and publishes a Release with the .zip
-#   - run it by hand from the Actions tab -> builds and leaves an artifact
-# Either way the build happens on a real Windows runner, because PyInstaller
-# cannot cross-compile: a Windows .exe can only be produced on Windows.
+#   - push a tag like v1.1.0 -> builds all three platforms and publishes a
+#     Release with the archives attached
+#   - run it by hand from the Actions tab -> same builds, left as artifacts
+#
+# One job per operating system because PyInstaller cannot cross-compile: it
+# freezes the interpreter it is running on, so a Windows .exe can only be made
+# on Windows, a Mach-O app only on macOS, an ELF binary only on Linux.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write        # required to create the release and attach the asset
+  contents: write        # required to create the release and attach the assets
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      # Never let one platform's failure hide the other two: a broken macOS
+      # runner should still leave a usable Windows build behind.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: AFK-Farm-Clicker-windows-x64.zip
+          # Not ubuntu-latest on purpose. PyInstaller links against the build
+          # host's glibc, so a binary built on the newest Ubuntu refuses to
+          # start on anything older. Building on the oldest supported runner
+          # gives the widest compatibility. If GitHub retires this label the
+          # job fails with an unknown-runner error -- swap it for the oldest
+          # ubuntu-* still offered.
+          - os: ubuntu-22.04
+            asset: AFK-Farm-Clicker-linux-x86_64.tar.gz
+          - os: macos-latest
+            asset: AFK-Farm-Clicker-macos-arm64.zip
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -23,67 +44,108 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Tk is not a pip package -- PyInstaller can only bundle what the
+      # interpreter can already import, and a build without it produces an
+      # executable that dies on the first window.
+      - name: Verify tkinter is available
+        run: python -c "import tkinter, sys; print('tkinter', tkinter.TkVersion)"
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pynput keyboard
+          pip install pyinstaller pynput
 
-      # --windowed  : Tk app, so no console window behind it
+      # --windowed  : no console window behind the GUI (a .app bundle on macOS)
       # --noupx     : UPX compression is a major antivirus red flag, and this
-      #               program already looks suspicious to scanners (global
-      #               keyboard hook + synthetic mouse input)
-      # --hidden-import : pynput and keyboard resolve their platform backend at
-      #               import time, so PyInstaller's static analysis never sees
-      #               the Windows ones and would ship a build that dies on
-      #               launch with ImportError
-      # Deliberately not --onefile: it unpacks to %TEMP% on every start, which
-      # is slower and the single biggest antivirus trigger.
+      #               program already looks suspicious to scanners -- it hooks
+      #               the keyboard globally and synthesises mouse input
+      # --hidden-import : pynput resolves its platform backend at import time,
+      #               so PyInstaller's static analysis never sees it and would
+      #               ship a build that dies at launch with ImportError
+      # Deliberately not --onefile: it unpacks to a temp directory on every
+      # start, which is slower and the single biggest antivirus trigger.
       - name: Build
         run: >
           pyinstaller --noconfirm --clean
           --name "AFK Farm Clicker"
           --windowed
           --noupx
-          --hidden-import pynput.mouse._win32
           --hidden-import pynput.keyboard._win32
-          --hidden-import keyboard._winkeyboard
+          --hidden-import pynput.mouse._win32
+          --hidden-import pynput.keyboard._xorg
+          --hidden-import pynput.mouse._xorg
+          --hidden-import pynput.keyboard._darwin
+          --hidden-import pynput.mouse._darwin
           afk_clicker.py
 
-      - name: Smoke test the build
-        # Catches the classic PyInstaller failure -- a missing hidden import
-        # only shows up at launch, and a release nobody can start is worse
-        # than no release. Start it, give Tk a moment, check it is still alive.
+      # --selftest touches every lazily-resolved backend and exits. Without it
+      # a missing hidden import is invisible until a user double-clicks and
+      # nothing happens, because a --windowed build has no console to print to.
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $exe = "dist/AFK Farm Clicker/AFK Farm Clicker.exe"
-          $p = Start-Process -FilePath $exe -PassThru
-          Start-Sleep -Seconds 8
-          if ($p.HasExited) {
-            Write-Error "The built program exited on its own (code $($p.ExitCode)) - broken build."
-            exit 1
-          }
-          Stop-Process -Id $p.Id -Force
-          Write-Host "Launched and stayed alive."
+          $p = Start-Process -FilePath "dist/AFK Farm Clicker/AFK Farm Clicker.exe" `
+                             -ArgumentList "--selftest" -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "selftest exited $($p.ExitCode)" }
+          "selftest passed"
 
-      - name: Package
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+          xvfb-run -a "dist/AFK Farm Clicker/AFK Farm Clicker" --selftest
+
+      - name: Smoke test (macOS)
+        if: runner.os == 'macOS'
+        # Run the binary inside the bundle directly: `open` returns immediately
+        # and would tell us nothing about the exit status.
+        run: "'dist/AFK Farm Clicker.app/Contents/MacOS/AFK Farm Clicker' --selftest"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "dist/AFK Farm Clicker/*" -DestinationPath "AFK-Farm-Clicker-windows.zip"
+        run: Compress-Archive -Path "dist/AFK Farm Clicker/*" -DestinationPath "${{ matrix.asset }}"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf "${{ matrix.asset }}" -C dist "AFK Farm Clicker"
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        # ditto, not zip: it preserves the bundle's symlinks and permission
+        # bits, which a plain zip mangles into an app Finder refuses to open.
+        run: ditto -c -k --keepParent "dist/AFK Farm Clicker.app" "${{ matrix.asset }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: AFK-Farm-Clicker-windows
-          path: AFK-Farm-Clicker-windows.zip
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: AFK-Farm-Clicker-windows.zip
+          files: ${{ matrix.asset }}
           body: |
-            Download **AFK-Farm-Clicker-windows.zip**, unpack it anywhere and run
-            `AFK Farm Clicker.exe`. No Python needed.
+            Download the archive for your system, unpack it anywhere and run it.
+            No Python needed.
 
-            Windows Defender may flag it — that is a false positive and normal for
-            this kind of program: a global keyboard hook plus synthetic mouse
-            clicks is exactly what the heuristics look for. Add the folder under
+            | System | File |
+            |---|---|
+            | Windows 10/11 | `AFK-Farm-Clicker-windows-x64.zip` |
+            | Linux (glibc 2.35+, X11) | `AFK-Farm-Clicker-linux-x86_64.tar.gz` |
+            | macOS (Apple Silicon) | `AFK-Farm-Clicker-macos-arm64.zip` |
+
+            **Windows** — Defender may flag it. That is a false positive and
+            normal here: a global keyboard hook plus synthetic mouse clicks is
+            exactly the pattern the heuristics look for. Add the folder under
             Windows Security → Virus & threat protection → Exclusions.
+
+            **Linux** — needs an **X11** session. Wayland does not let an
+            application see keys sent to other windows, so the hotkey cannot
+            work there; the window opens but never toggles.
+
+            **macOS** — unsigned, so the first launch needs right-click → Open.
+            Then grant **Accessibility** permission under System Settings →
+            Privacy & Security, or the hotkey and the clicking stay dead.

@@ -12,8 +12,8 @@ in-progress eat. An autoclicker attacking every ~0.5 s would restart the eat
 forever and you would still starve. So EAT mode stops clicking, holds right
 mouse for long enough to finish the food, then resumes.
 
-Requires: pynput, keyboard   ->   pip install pynput keyboard
-Prebuilt Windows binaries: see the Releases page.
+Requires: pynput   ->   pip install pynput
+Prebuilt binaries for Windows, Linux and macOS: see the Releases page.
 """
 
 import sys
@@ -22,7 +22,7 @@ import time
 import tkinter as tk
 from tkinter import font as tkfont
 
-import keyboard
+from pynput import keyboard as kb
 from pynput.mouse import Button, Controller
 
 # ── palette ───────────────────────────────────────────────────────────────
@@ -46,8 +46,30 @@ DEFAULT_EAT_HOLD_S = 2.0
 # One content width for the whole column. Everything -- the status pill, the
 # cards, the segmented control -- is measured off this so nothing nests
 # inward by a few pixels and breaks the vertical edge the eye follows.
+if sys.platform == "darwin":
+    HOTKEY_HELP = "Grant Accessibility permission, then reopen"
+elif sys.platform.startswith("linux"):
+    HOTKEY_HELP = "Needs an X11 session (Wayland blocks global keys)"
+else:
+    HOTKEY_HELP = "Could not register the hotkey"
+
 CONTENT_W = 304
 CARD_INNER_W = CONTENT_W - 2 - 24        # 1px border each side, 12px padding
+
+
+def selftest():
+    """
+    CI entry point. A --windowed build has no console, so a missing hidden
+    import does not show up as a traceback -- it shows up as "I double-clicked
+    it and nothing happened", on the user's machine, after release. Touch every
+    lazily-resolved platform backend here so the build fails in CI instead.
+    """
+    Controller()                                  # pynput mouse backend
+    kb.Listener(on_press=lambda k: False)         # pynput keyboard backend
+    Hotkey({"ctrl"}, kb.KeyCode.from_char("h")).label()
+    Hotkey(set(), kb.Key.f6).label()
+    tk.Tk().destroy()                             # Tcl/Tk actually bundled
+    return 0
 
 
 def enable_dpi_awareness():
@@ -67,6 +89,114 @@ def enable_dpi_awareness():
             ctypes.windll.user32.SetProcessDPIAware()       # older Windows
         except Exception:
             pass
+
+
+# ── hotkey plumbing ───────────────────────────────────────────────────────
+# pynput, not the `keyboard` package. `keyboard` is Windows/Linux only and
+# needs root on Linux, which would have made the macOS build pointless: it
+# would install cleanly and then never respond to the hotkey at all. pynput
+# speaks all three platforms, and its mouse half was already a dependency --
+# so this removes a dependency rather than adding one.
+#
+
+_MOD_BASES = ("ctrl", "alt", "shift", "cmd")
+_MOD_ORDER = {"ctrl": 0, "altgr": 1, "alt": 2, "shift": 3, "cmd": 4}
+
+
+def _mod_base(key):
+    """ctrl_l and ctrl_r are one modifier; AltGr is emphatically not Alt."""
+    if not isinstance(key, kb.Key):
+        return None
+    if key.name == "alt_gr":
+        return "altgr"
+    base = key.name.split("_")[0]
+    return base if base in _MOD_BASES else None
+
+
+class Hotkey:
+    """
+    A recorded key combination, matched against the raw event.
+
+    Not pynput's GlobalHotKeys: that matches on Listener.canonical(), which
+    routes character keys back through the keyboard layout. Under test every
+    named key (F1-F20, Home, Space, arrows, ...) matched reliably and no
+    character key ever did -- the combination simply never registered. Matching
+    the raw event on its character *or* its virtual key code avoids that layer
+    completely, and it is the better behaviour anyway: the hotkey then fires on
+    the physical key you recorded, not on whatever that position happens to
+    mean after a layout switch.
+    """
+
+    __slots__ = ("mods", "char", "vk", "name")
+
+    def __init__(self, mods, key):
+        self.mods = frozenset(mods)
+        self.name = key.name if isinstance(key, kb.Key) else None
+        self.char = (key.char.lower() if getattr(key, "char", None) else None)
+        self.vk = getattr(key, "vk", None)
+
+    def matches(self, key, held):
+        if held != self.mods:
+            return False
+        if self.name is not None:
+            return isinstance(key, kb.Key) and key.name == self.name
+        if self.char and getattr(key, "char", None):
+            return key.char.lower() == self.char
+        # No character (dead key, exotic layout) -- the virtual key still works.
+        return self.vk is not None and getattr(key, "vk", None) == self.vk
+
+    def label(self):
+        parts = sorted(self.mods, key=lambda m: _MOD_ORDER.get(m, 9))
+        parts = ["AltGr" if m == "altgr" else m.title() for m in parts]
+        if self.name:
+            parts.append(self.name.replace("_", " ").title())
+        elif self.char:
+            # Uppercasing is only safe when it round-trips: "ß".upper() is
+            # "SS", and Turkish dotless "ı".upper() is "I" -- a different key.
+            # Where it does not come back, show the key as it actually is.
+            upper = self.char.upper()
+            parts.append(upper if upper.lower() == self.char else self.char)
+        else:
+            parts.append(f"Key {self.vk}")
+        return " + ".join(parts)
+
+
+class HotkeyWatcher:
+    """One listener that owns modifier state and fires on a match."""
+
+    def __init__(self, hotkey, callback):
+        self.hotkey = hotkey
+        self.callback = callback
+        self.held = set()
+        self.armed = True          # re-arm on release, so holding does not repeat
+        self.listener = kb.Listener(on_press=self._press, on_release=self._release)
+
+    def start(self):
+        self.listener.start()
+        self.listener.wait()
+
+    def stop(self):
+        self.listener.stop()
+
+    @property
+    def running(self):
+        return self.listener.running
+
+    def _press(self, key):
+        mod = _mod_base(key)
+        if mod:
+            self.held.add(mod)
+            return
+        if self.armed and self.hotkey.matches(key, self.held):
+            self.armed = False
+            self.callback()
+
+    def _release(self, key):
+        mod = _mod_base(key)
+        if mod:
+            self.held.discard(mod)
+        else:
+            self.armed = True
 
 
 def round_rect(cv, x1, y1, x2, y2, r, **kw):
@@ -238,7 +368,8 @@ class AfkAutoclicker:
 
         self.mouse = Controller()
         self.hotkey = None
-        self.registered_hotkey = None      # what is actually bound in `keyboard`
+        self.registered_hotkey = None      # what is actually bound
+        self.hk_listener = None            # HotkeyWatcher, once one is applied
         self.running = False
         self.worker = None
         self.capture_thread = None
@@ -312,47 +443,72 @@ class AfkAutoclicker:
         self.capture_thread.start()
 
     def capture_hotkey(self):
-        pressed = set()
-        while True:
-            event = keyboard.read_event(suppress=False)
-            if event.event_type == keyboard.KEY_DOWN:
-                if event.name == "esc":
-                    self._ui(self._show_hotkey, self.registered_hotkey)
-                    return
-                pressed.add(event.name)
-            elif event.event_type == keyboard.KEY_UP:
-                pressed.discard(event.name)
-                continue
+        held = set()
+        captured = {}
 
-            modifiers = {"ctrl", "shift", "alt"} & pressed
-            regular = pressed - {"ctrl", "shift", "alt"}
-            if regular:
-                key = sorted(regular)[0]
-                self.hotkey = "+".join(sorted(modifiers) + [key]) if modifiers else key
-                self._ui(self._hotkey_captured)
-                return
+        def on_press(key):
+            if key == kb.Key.esc:
+                return False                       # cancel, keep the old binding
+            mod = _mod_base(key)
+            if mod:
+                held.add(mod)
+                return None                        # a modifier alone is not a hotkey
+            captured["hotkey"] = Hotkey(held, key)
+            return False
+
+        def on_release(key):
+            mod = _mod_base(key)
+            if mod:
+                held.discard(mod)
+            return None
+
+        try:
+            with kb.Listener(on_press=on_press, on_release=on_release) as listener:
+                listener.join()
+        except Exception as exc:                   # no X11, or macOS denied access
+            self._ui(self._hotkey_error, str(exc))
+            return
+
+        if "hotkey" in captured:
+            self.hotkey = captured["hotkey"]
+            self._ui(self._hotkey_captured)
+        else:
+            self._ui(self._show_hotkey, self.registered_hotkey)
 
     def _show_hotkey(self, active):
-        self.hotkey_label.config(text=active or "Not set", fg=INK if active else MUTED)
+        self.hotkey_label.config(text=active.label() if active else "Not set",
+                                 fg=INK if active else MUTED)
 
     def _hotkey_captured(self):
-        self.hotkey_label.config(text=f"{self.hotkey}   · not applied", fg=ACCENT)
+        self.hotkey_label.config(text=f"{self.hotkey.label()}   · not applied",
+                                 fg=ACCENT)
         self.apply_button.set_enabled(True)
+
+    def _hotkey_error(self, detail):
+        # On Wayland pynput has no way to see global keys, and on macOS the app
+        # needs Accessibility permission. Both surface here as a failed listener,
+        # and both are fixable by the user -- so say which, do not just die.
+        self.hotkey_label.config(text=HOTKEY_HELP, fg=BAD)
+        print(f"hotkey listener failed: {detail}", file=sys.stderr)
 
     def apply_hotkey(self):
         if not self.hotkey:
             return
-        # Without this the old binding stays live and both keys toggle the clicker.
-        if self.registered_hotkey:
-            try:
-                keyboard.remove_hotkey(self.registered_hotkey)
-            except (KeyError, ValueError):
-                pass
-        keyboard.add_hotkey(self.hotkey, self.toggle)
+        # Without this the old watcher stays live and both keys toggle the clicker.
+        if self.hk_listener is not None:
+            self.hk_listener.stop()
+            self.hk_listener = None
+        try:
+            self.hk_listener = HotkeyWatcher(self.hotkey, self.toggle)
+            self.hk_listener.start()
+        except Exception as exc:
+            self.hk_listener = None
+            self._hotkey_error(exc)
+            return
         self.registered_hotkey = self.hotkey
-        self.hotkey_label.config(text=self.hotkey, fg=INK)
+        self.hotkey_label.config(text=self.hotkey.label(), fg=INK)
         self.apply_button.set_enabled(False)
-        self.status.set("OFF", BAD, f"{self.hotkey} to toggle")
+        self.status.set("OFF", BAD, f"{self.hotkey.label()} toggles")
 
     # ---------- run control ----------
 
@@ -434,6 +590,8 @@ class AfkAutoclicker:
 
     def on_close(self):
         self.stop()
+        if self.hk_listener is not None:
+            self.hk_listener.stop()
         if self.worker and self.worker.is_alive():
             self.worker.join(timeout=2.0)   # let it run its own release first
         self._release_right()          # never leave a mouse button stuck down
@@ -441,6 +599,8 @@ class AfkAutoclicker:
 
 
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
     enable_dpi_awareness()
     root = tk.Tk()
     # Segoe UI is the Windows system face; falling back keeps Linux usable.
