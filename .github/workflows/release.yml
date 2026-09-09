@@ -1,0 +1,89 @@
+name: Build Windows executable
+
+# Two ways in:
+#   - push a tag like v1.0.0  -> builds and publishes a Release with the .zip
+#   - run it by hand from the Actions tab -> builds and leaves an artifact
+# Either way the build happens on a real Windows runner, because PyInstaller
+# cannot cross-compile: a Windows .exe can only be produced on Windows.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # required to create the release and attach the asset
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pynput keyboard
+
+      # --windowed  : Tk app, so no console window behind it
+      # --noupx     : UPX compression is a major antivirus red flag, and this
+      #               program already looks suspicious to scanners (global
+      #               keyboard hook + synthetic mouse input)
+      # --hidden-import : pynput and keyboard resolve their platform backend at
+      #               import time, so PyInstaller's static analysis never sees
+      #               the Windows ones and would ship a build that dies on
+      #               launch with ImportError
+      # Deliberately not --onefile: it unpacks to %TEMP% on every start, which
+      # is slower and the single biggest antivirus trigger.
+      - name: Build
+        run: >
+          pyinstaller --noconfirm --clean
+          --name "AFK Farm Clicker"
+          --windowed
+          --noupx
+          --hidden-import pynput.mouse._win32
+          --hidden-import pynput.keyboard._win32
+          --hidden-import keyboard._winkeyboard
+          afk_clicker.py
+
+      - name: Smoke test the build
+        # Catches the classic PyInstaller failure -- a missing hidden import
+        # only shows up at launch, and a release nobody can start is worse
+        # than no release. Start it, give Tk a moment, check it is still alive.
+        shell: pwsh
+        run: |
+          $exe = "dist/AFK Farm Clicker/AFK Farm Clicker.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          if ($p.HasExited) {
+            Write-Error "The built program exited on its own (code $($p.ExitCode)) - broken build."
+            exit 1
+          }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "Launched and stayed alive."
+
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path "dist/AFK Farm Clicker/*" -DestinationPath "AFK-Farm-Clicker-windows.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AFK-Farm-Clicker-windows
+          path: AFK-Farm-Clicker-windows.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AFK-Farm-Clicker-windows.zip
+          body: |
+            Download **AFK-Farm-Clicker-windows.zip**, unpack it anywhere and run
+            `AFK Farm Clicker.exe`. No Python needed.
+
+            Windows Defender may flag it — that is a false positive and normal for
+            this kind of program: a global keyboard hook plus synthetic mouse
+            clicks is exactly what the heuristics look for. Add the folder under
+            Windows Security → Virus & threat protection → Exclusions.
