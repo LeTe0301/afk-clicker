@@ -22,6 +22,7 @@ import queue
 import shutil
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 import zipfile
 import random
@@ -334,8 +335,18 @@ def is_newer(tag, current=__version__):
     return _version_tuple(tag) > _version_tuple(current)
 
 
+class NoReleases(Exception):
+    """The repository exists but has nothing published yet."""
+
+
 def latest_release(timeout=10):
-    """The newest published release, or None if GitHub cannot be reached."""
+    """
+    The newest published release.
+
+    Raises NoReleases on a 404 so the caller can say "nothing published" rather
+    than "GitHub unreachable" -- they are different problems and only one of
+    them is worth retrying.
+    """
     request = urllib.request.Request(
         f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
         headers={"Accept": "application/vnd.github+json",
@@ -343,6 +354,10 @@ def latest_release(timeout=10):
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise NoReleases from exc
+        return None
     except Exception:
         return None
 
@@ -1097,7 +1112,11 @@ class AfkAutoclicker:
         threading.Thread(target=self._check_worker, daemon=True).start()
 
     def _check_worker(self):
-        release = latest_release()
+        try:
+            release = latest_release()
+        except NoReleases:
+            self._ui(self._set_update_state, "No releases published yet", True)
+            return
         if release is None:
             self._ui(self._set_update_state, "GitHub unreachable", True, BAD)
             return
