@@ -165,11 +165,22 @@ class SwapScript(unittest.TestCase):
         self.assertFalse(
             os.path.commonpath([staged, target]) in (staged, target),
             "the staging tree and the target must not contain one another")
-        # And the destructive step must name the target, never the source.
+        # And the destructive step must be aimed at the target.
+        #
+        # "staged must not appear on a destructive line" was the wrong rule:
+        # robocopy /MIR is the copy *and* the prune in one command, so the
+        # source legitimately appears on it. What matters is the direction --
+        # /MIR mirrors the first argument onto the second and only ever deletes
+        # in the second.
         for line in body.splitlines():
-            if "-delete" in line or "/MIR" in line or line.strip().startswith("rm -rf"):
-                self.assertNotIn(staged, line,
-                                 f"destructive step touches the staging tree: {line}")
+            stripped = line.strip()
+            if "/MIR" in stripped:
+                self.assertLess(stripped.index(staged), stripped.index(target),
+                                f"robocopy would mirror the target onto the staging tree: {stripped}")
+            elif "-delete" in stripped or stripped.startswith("rm -rf"):
+                self.assertIn(target, stripped)
+                self.assertNotIn(staged, stripped,
+                                 f"destructive step touches the staging tree: {stripped}")
 
     def test_the_script_copies_and_relaunches(self):
         # The wait loop was asserted; the two steps that make it an update
