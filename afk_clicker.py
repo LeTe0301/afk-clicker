@@ -16,6 +16,16 @@ Requires: pynput   ->   pip install pynput
 Prebuilt binaries for Windows, Linux and macOS: see the Releases page.
 """
 
+import json
+import os
+import queue
+import shutil
+import tarfile
+import tempfile
+import urllib.request
+import zipfile
+import random
+import subprocess
 import sys
 import threading
 import time
@@ -23,7 +33,9 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 from pynput import keyboard as kb
-from pynput.mouse import Button, Controller
+# Imported under a different name: the Tk widget class below is also called
+# Button, and the shadowing turned every mouse action into an AttributeError.
+from pynput.mouse import Button as MouseButton, Controller
 
 # ── palette ───────────────────────────────────────────────────────────────
 # Two greys, not one: the window sits a shade darker than the cards on it, so
@@ -53,7 +65,8 @@ elif sys.platform.startswith("linux"):
 else:
     HOTKEY_HELP = "Could not register the hotkey"
 
-CONTENT_W = 304
+SIDEBAR_W = 208
+CONTENT_W = 452
 CARD_INNER_W = CONTENT_W - 2 - 24        # 1px border each side, 12px padding
 
 
@@ -66,9 +79,10 @@ def selftest():
     """
     Controller()                                  # pynput mouse backend
     kb.Listener(on_press=lambda k: False)         # pynput keyboard backend
-    Hotkey({"ctrl"}, kb.KeyCode.from_char("h")).label()
-    Hotkey(set(), kb.Key.f6).label()
+    Hotkey({"ctrl"}, [_record(kb.KeyCode.from_char("h"))]).label()
+    Hotkey(set(), [_record(kb.Key.f6), _record(kb.Key.f7)]).label()
     tk.Tk().destroy()                             # Tcl/Tk actually bundled
+    Store(os.devnull).save()                      # config path logic is sane
     return 0
 
 
@@ -102,6 +116,11 @@ def enable_dpi_awareness():
 _MOD_BASES = ("ctrl", "alt", "shift", "cmd")
 _MOD_ORDER = {"ctrl": 0, "altgr": 1, "alt": 2, "shift": 3, "cmd": 4}
 
+# Three non-modifier keys, on top of any number of modifiers. Beyond three a
+# chord stops being something a keyboard can reliably deliver anyway: most
+# membrane boards ghost past two simultaneous keys in the same matrix row.
+MAX_CHORD = 3
+
 
 def _mod_base(key):
     """ctrl_l and ctrl_r are one modifier; AltGr is emphatically not Alt."""
@@ -113,62 +132,138 @@ def _mod_base(key):
     return base if base in _MOD_BASES else None
 
 
+def _record(key):
+    """
+    Everything we know about one physical key, as a plain tuple.
+
+    All three fields are kept because none of them is reliable alone: a named
+    key has no char, a dead key has no char either, and on X11 the vk is the
+    keysym, so it changes when Shift is held. Matching on any of the three that
+    is present accepts the key however the platform chose to describe it.
+    """
+    if isinstance(key, kb.Key):
+        return (key.name, getattr(key.value, "vk", None), None)
+    char = getattr(key, "char", None)
+    return (None, getattr(key, "vk", None), char.lower() if char else None)
+
+
+def _same_key(a, b):
+    name_a, vk_a, ch_a = a
+    name_b, vk_b, ch_b = b
+    if name_a or name_b:
+        return name_a == name_b
+    if vk_a is not None and vk_b is not None and vk_a == vk_b:
+        return True
+    return ch_a is not None and ch_a == ch_b
+
+
+def _key_label(rec):
+    name, vk, char = rec
+    if name:
+        return name.replace("_", " ").title()
+    if char:
+        # Uppercasing is only safe when it round-trips: "ß".upper() is "SS",
+        # and Turkish dotless "ı".upper() is "I" -- a different key.
+        upper = char.upper()
+        return upper if upper.lower() == char else char
+    return f"Key {vk}"
+
+
 class Hotkey:
     """
-    A recorded key combination, matched against the raw event.
+    A recorded combination: a set of modifiers plus one to three other keys,
+    all held at the same time. Order does not matter -- a chord is a chord.
 
-    Not pynput's GlobalHotKeys: that matches on Listener.canonical(), which
-    routes character keys back through the keyboard layout. Under test every
-    named key (F1-F20, Home, Space, arrows, ...) matched reliably and no
-    character key ever did -- the combination simply never registered. Matching
-    the raw event on its character *or* its virtual key code avoids that layer
-    completely, and it is the better behaviour anyway: the hotkey then fires on
-    the physical key you recorded, not on whatever that position happens to
-    mean after a layout switch.
+    Not pynput's GlobalHotKeys. That matches on Listener.canonical(), which
+    routes character keys back through the keyboard layout; measured with
+    synthesised presses, every named key matched and no character key ever did.
+    Matching the raw event instead also means the hotkey fires on the physical
+    key you recorded, not on whatever that position means after a layout switch.
     """
 
-    __slots__ = ("mods", "char", "vk", "name")
+    __slots__ = ("mods", "keys")
 
-    def __init__(self, mods, key):
+    def __init__(self, mods, records):
         self.mods = frozenset(mods)
-        self.name = key.name if isinstance(key, kb.Key) else None
-        self.char = (key.char.lower() if getattr(key, "char", None) else None)
-        self.vk = getattr(key, "vk", None)
+        self.keys = tuple(records[:MAX_CHORD])
 
-    def matches(self, key, held):
-        if held != self.mods:
+    def matches(self, held_mods, held_keys):
+        if held_mods != self.mods:
             return False
-        if self.name is not None:
-            return isinstance(key, kb.Key) and key.name == self.name
-        if self.char and getattr(key, "char", None):
-            return key.char.lower() == self.char
-        # No character (dead key, exotic layout) -- the virtual key still works.
-        return self.vk is not None and getattr(key, "vk", None) == self.vk
+        return all(any(_same_key(spec, rec) for rec in held_keys)
+                   for spec in self.keys)
 
     def label(self):
-        parts = sorted(self.mods, key=lambda m: _MOD_ORDER.get(m, 9))
-        parts = ["AltGr" if m == "altgr" else m.title() for m in parts]
-        if self.name:
-            parts.append(self.name.replace("_", " ").title())
-        elif self.char:
-            # Uppercasing is only safe when it round-trips: "ß".upper() is
-            # "SS", and Turkish dotless "ı".upper() is "I" -- a different key.
-            # Where it does not come back, show the key as it actually is.
-            upper = self.char.upper()
-            parts.append(upper if upper.lower() == self.char else self.char)
+        mods = sorted(self.mods, key=lambda m: _MOD_ORDER.get(m, 9))
+        parts = ["AltGr" if m == "altgr" else m.title() for m in mods]
+        return " + ".join(parts + [_key_label(r) for r in self.keys])
+
+
+class HotkeyRecorder:
+    """
+    Collects a chord. Recording ends when every key is let go, so pressing
+    Ctrl+Shift+K and releasing records all three -- there is no "done" button
+    to reach for while holding a combination down.
+    """
+
+    def __init__(self):
+        self.mods = set()
+        self.records = []
+        self._held = []
+        self._held_mods = set()
+        self.cancelled = False
+
+    def press(self, key):
+        if key == kb.Key.esc and not self.records:
+            self.cancelled = True
+            return False
+        mod = _mod_base(key)
+        if mod:
+            self._held_mods.add(mod)
+            self.mods.add(mod)
+            return None
+        rec = _record(key)
+        if not any(_same_key(rec, h) for h in self._held):
+            self._held.append(rec)
+        if (len(self.records) < MAX_CHORD
+                and not any(_same_key(rec, r) for r in self.records)):
+            self.records.append(rec)
+        return None
+
+    def release(self, key):
+        mod = _mod_base(key)
+        if mod:
+            self._held_mods.discard(mod)
         else:
-            parts.append(f"Key {self.vk}")
-        return " + ".join(parts)
+            rec = _record(key)
+            self._held = [h for h in self._held if not _same_key(h, rec)]
+        # Everything let go and something was captured -> that was the chord.
+        if not self._held and not self._held_mods and self.records:
+            return False
+        return None
+
+    def result(self):
+        if self.cancelled or not self.records:
+            return None
+        return Hotkey(self.mods, self.records)
 
 
 class HotkeyWatcher:
-    """One listener that owns modifier state and fires on a match."""
+    """One listener that owns the held-key state and fires on a full match."""
+
+    # A start/stop toggle nobody needs to flip twice inside a quarter second.
+    # Beyond guarding against a fumbled double-tap this absorbs duplicated key
+    # events, which X11 emits for auto-repeat when detectable-autorepeat is off
+    # (a repeat arrives as release-then-press, i.e. a complete chord again).
+    DEBOUNCE_S = 0.25
 
     def __init__(self, hotkey, callback):
         self.hotkey = hotkey
         self.callback = callback
-        self.held = set()
+        self.mods = set()
+        self.keys = []
         self.armed = True          # re-arm on release, so holding does not repeat
+        self._last_fire = 0.0
         self.listener = kb.Listener(on_press=self._press, on_release=self._release)
 
     def start(self):
@@ -185,18 +280,352 @@ class HotkeyWatcher:
     def _press(self, key):
         mod = _mod_base(key)
         if mod:
-            self.held.add(mod)
-            return
-        if self.armed and self.hotkey.matches(key, self.held):
+            self.mods.add(mod)
+        else:
+            rec = _record(key)
+            if not any(_same_key(rec, h) for h in self.keys):
+                self.keys.append(rec)
+        if self.armed and self.hotkey.matches(self.mods, self.keys):
             self.armed = False
-            self.callback()
+            now = time.monotonic()
+            if now - self._last_fire >= self.DEBOUNCE_S:
+                self._last_fire = now
+                self.callback()
 
     def _release(self, key):
         mod = _mod_base(key)
         if mod:
-            self.held.discard(mod)
+            self.mods.discard(mod)
         else:
+            rec = _record(key)
+            self.keys = [h for h in self.keys if not _same_key(h, rec)]
+        # Re-arm as soon as the chord is no longer complete, so holding it does
+        # not retrigger but pressing it again does.
+        if not self.hotkey.matches(self.mods, self.keys):
             self.armed = True
+
+
+# Deliberately below 1.0: the interface and the per-game settings format are
+# still moving, and semver reserves 1.0.0 for the point where they stop. Until
+# then only the minor and patch parts advance.
+__version__ = "0.3.0"
+GITHUB_REPO = "LeTe0301/afk-clicker"
+
+# Which release asset belongs to which platform. Keep in step with the
+# archive names the build workflow produces.
+ASSET_SUFFIX = {
+    "win32": "windows-x64.zip",
+    "linux": "linux-x86_64.tar.gz",
+    "darwin": "macos-arm64.zip",
+}
+
+
+def _version_tuple(tag):
+    """'v1.2.0' -> (1, 2, 0). Unparseable parts sort as 0 rather than crash."""
+    parts = str(tag).lstrip("vV").split(".")
+    out = []
+    for part in parts[:4]:
+        digits = "".join(c for c in part if c.isdigit())
+        out.append(int(digits) if digits else 0)
+    return tuple(out)
+
+
+def is_newer(tag, current=__version__):
+    return _version_tuple(tag) > _version_tuple(current)
+
+
+def latest_release(timeout=10):
+    """The newest published release, or None if GitHub cannot be reached."""
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+        headers={"Accept": "application/vnd.github+json",
+                 "User-Agent": f"AFKFarmClicker/{__version__}"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except Exception:
+        return None
+
+
+def pick_asset(release):
+    """The download for this platform, by the suffix the workflow names it."""
+    suffix = ASSET_SUFFIX.get(sys.platform if sys.platform in ASSET_SUFFIX
+                              else "linux")
+    for asset in (release or {}).get("assets", []):
+        if asset.get("name", "").endswith(suffix):
+            return asset
+    return None
+
+
+def is_frozen():
+    """True inside a PyInstaller build -- only then is there anything to swap."""
+    return getattr(sys, "frozen", False)
+
+
+def install_root():
+    """
+    The directory the updater replaces.
+
+    On macOS sys.executable sits inside Contents/MacOS, but the thing that has
+    to be swapped is the whole .app bundle, or Finder ends up with a half
+    updated application.
+    """
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    marker = ".app" + os.sep + "Contents" + os.sep + "MacOS"
+    if sys.platform == "darwin" and marker in exe_dir:
+        return exe_dir[:exe_dir.index(marker) + 4]
+    return exe_dir
+
+
+def download_and_stage(asset, on_progress=None):
+    """
+    Fetch the release archive and unpack it into a staging directory.
+
+    Staged next to the installation rather than inside it: the swap script has
+    to delete the old contents wholesale, and it must not be deleting the very
+    files it is copying from.
+    """
+    workdir = tempfile.mkdtemp(prefix="afkclicker-update-")
+    archive = os.path.join(workdir, asset["name"])
+    request = urllib.request.Request(
+        asset["browser_download_url"],
+        headers={"User-Agent": f"AFKFarmClicker/{__version__}"})
+    with urllib.request.urlopen(request, timeout=60) as response, \
+            open(archive, "wb") as out:
+        total = int(response.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = response.read(64 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            done += len(chunk)
+            if on_progress and total:
+                on_progress(done / total)
+
+    staged = os.path.join(workdir, "staged")
+    os.makedirs(staged, exist_ok=True)
+    if archive.endswith(".zip"):
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(staged)
+    else:
+        with tarfile.open(archive) as tf:
+            tf.extractall(staged)
+
+    # The Linux and macOS archives keep their top-level folder; flatten it so
+    # every platform hands the swap script the same shape.
+    entries = os.listdir(staged)
+    if len(entries) == 1 and os.path.isdir(os.path.join(staged, entries[0])):
+        staged = os.path.join(staged, entries[0])
+    return staged
+
+
+def write_swap_script(staged, target, relaunch):
+    """
+    A tiny script that waits for this process to exit, replaces the install
+    directory and starts the new build. It has to be an external process: a
+    program cannot overwrite its own running executable on Windows, and on any
+    platform deleting the code you are executing is asking for trouble.
+    """
+    pid = os.getpid()
+    workdir = os.path.dirname(os.path.dirname(staged)) or tempfile.gettempdir()
+    if sys.platform == "win32":
+        path = os.path.join(workdir, "apply-update.cmd")
+        script = f'''@echo off
+:wait
+tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
+if not errorlevel 1 (
+  timeout /t 1 /nobreak >nul
+  goto wait
+)
+robocopy "{staged}" "{target}" /MIR /NFL /NDL /NJH /NJS /NC /NS >nul
+start "" "{relaunch}"
+'''
+    else:
+        path = os.path.join(workdir, "apply-update.sh")
+        script = f'''#!/bin/sh
+while kill -0 {pid} 2>/dev/null; do sleep 1; done
+rm -rf "{target}."*  2>/dev/null
+find "{target}" -mindepth 1 -delete 2>/dev/null
+cp -a "{staged}/." "{target}/"
+"{relaunch}" &
+'''
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(script)
+    if sys.platform != "win32":
+        os.chmod(path, 0o755)
+    return path
+
+
+# ── per-game settings, on disk ────────────────────────────────────────────
+# Every game keeps its own clicker configuration, so switching from Minecraft
+# to something else does not mean re-typing an interval. Stored as one JSON
+# file in the platform's usual config location -- next to the executable would
+# break the moment the program lands in Program Files.
+
+APP_DIR_NAME = "AFKFarmClicker"
+
+
+def config_path():
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, APP_DIR_NAME, "settings.json")
+    if sys.platform == "darwin":
+        return os.path.expanduser(f"~/Library/Application Support/{APP_DIR_NAME}/settings.json")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "afk-farm-clicker", "settings.json")
+
+
+class Store:
+    """Load once, save on change. A corrupt file is replaced, never fatal."""
+
+    def __init__(self, path=None):
+        self.path = path or config_path()
+        self.data = {"games": {}, "hotkey": None, "selected": None}
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                self.data.update({k: v for k, v in loaded.items() if k in self.data})
+        except (OSError, ValueError):
+            pass                      # missing or damaged -> start from defaults
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.data, fh, indent=2)
+            os.replace(tmp, self.path)     # atomic: never leave a half-written file
+        except OSError:
+            pass                           # read-only home is not worth crashing over
+
+    def game(self, game_id):
+        return self.data["games"].setdefault(game_id, {})
+
+    def put_game(self, game_id, values):
+        self.data["games"][game_id] = values
+        self.save()
+
+
+# ── game profiles ─────────────────────────────────────────────────────────
+# A profile is what the program should look like for one game. Only Minecraft
+# carries real tuning here, because that is the only game whose numbers I can
+# actually vouch for -- inventing plausible-sounding intervals for other games
+# would be worse than offering none. Adding one is a dict: give it window-title
+# fragments to recognise, a default interval, and whether the eating panel
+# applies.
+
+PROFILES = [
+    {
+        "id": "minecraft",
+        "name": "Minecraft",
+        "titles": ("minecraft",),
+        "eating": True,
+        "note": "510 ms is Rays Works' figure — faster breaks the sword sweep.",
+        "defaults": {"click_ms": 510, "jitter_ms": 0, "autostop_min": 0,
+                     "button": "left", "eat_mode": "pause",
+                     "eat_every": 75, "eat_hold": 2.0},
+    },
+    {
+        "id": "global",
+        "name": "Global",
+        "titles": (),                 # never auto-detected; the fallback
+        "eating": False,
+        "note": "Applies when nothing more specific is selected.",
+        "defaults": {"click_ms": 250, "jitter_ms": 0, "autostop_min": 0,
+                     "button": "left", "eat_mode": "off",
+                     "eat_every": 75, "eat_hold": 2.0},
+    },
+]
+GENERIC_DEFAULTS = dict(PROFILES[-1]["defaults"])
+
+
+def make_profile(game_id, name, title_fragment):
+    """A game the user added from whatever window was in front."""
+    return {"id": game_id, "name": name, "titles": (title_fragment.lower(),),
+            "eating": False, "note": "Added from the active window.",
+            "defaults": dict(GENERIC_DEFAULTS), "custom": True}
+
+
+
+
+def _window_titles():
+    """
+    Every visible window title, which is how the game gets recognised.
+
+    Titles rather than process names on purpose: on Windows Minecraft is
+    `javaw.exe`, which is also every other Java program on the machine, while
+    the window is reliably called "Minecraft <version>".
+    """
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        titles = []
+        user32 = ctypes.windll.user32
+        proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def collect(hwnd, _lparam):
+            if user32.IsWindowVisible(hwnd):
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buf, length + 1)
+                    titles.append(buf.value)
+            return True
+
+        user32.EnumWindows(proto(collect), 0)
+        return titles
+
+    if sys.platform == "darwin":
+        out = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get name of every process '
+             'whose background only is false'],
+            capture_output=True, text=True, timeout=5)
+        return [t.strip() for t in out.stdout.split(",") if t.strip()]
+
+    # X11. python-xlib is already installed as a pynput dependency, so this
+    # costs nothing extra.
+    from Xlib import display as xdisplay
+    disp = xdisplay.Display()
+    titles = []
+
+    def walk(window, depth=0):
+        if depth > 4:
+            return
+        try:
+            name = window.get_wm_name()
+            if name:
+                titles.append(name if isinstance(name, str) else name.decode("utf-8", "replace"))
+            for child in window.query_tree().children:
+                walk(child, depth + 1)
+        except Exception:
+            pass
+
+    walk(disp.screen().root)
+    disp.close()
+    return titles
+
+
+def detect_running(profiles):
+    """Ids of every profile whose title fragment is currently on screen."""
+    try:
+        haystack = " | ".join(_window_titles()).lower()
+    except Exception:
+        return set()
+    return {p["id"] for p in profiles
+            if p["titles"] and any(f in haystack for f in p["titles"])}
+
+
+def foreground_title():
+    """Best guess at what the user is playing, for 'add this game'."""
+    try:
+        titles = [t for t in _window_titles() if t and t.strip()]
+    except Exception:
+        return None
+    # The frontmost window is last in X11's tree walk and first from EnumWindows.
+    return (titles[0] if sys.platform == "win32" else titles[-1]) if titles else None
 
 
 def round_rect(cv, x1, y1, x2, y2, r, **kw):
@@ -254,6 +683,9 @@ class Button(tk.Canvas):
         self.primary = primary
         self._paint()
 
+    def set_text(self, text):
+        self.itemconfig(self.label, text=text)
+
 
 class Segmented(tk.Canvas):
     """A segmented control -- the modern replacement for a column of radios."""
@@ -308,10 +740,10 @@ class StatusPill(tk.Canvas):
         self.s = s
         w, h = int(width * s), int(height * s)
         self.shape = round_rect(self, 1, 1, w - 1, h - 1, 12 * s, fill=CARD, outline=LINE)
-        self.dot = self.create_oval(22 * s, h / 2 - 5 * s, 32 * s, h / 2 + 5 * s,
+        self.dot = self.create_oval(20 * s, h / 2 - 4.5 * s, 29 * s, h / 2 + 4.5 * s,
                                     fill=BAD, outline="")
-        self.text = self.create_text(46 * s, h / 2, anchor="w", text="OFF", fill=INK,
-                                     font=("Segoe UI", int(14 * s), "bold"))
+        self.text = self.create_text(42 * s, h / 2, anchor="w", text="OFF", fill=INK,
+                                     font=("Segoe UI", int(11.5 * s), "bold"))
         self.hint = self.create_text(w - 20 * s, h / 2, anchor="e", text="", fill=MUTED,
                                      font=("Segoe UI", int(8.5 * s)))
 
@@ -321,31 +753,21 @@ class StatusPill(tk.Canvas):
         self.itemconfig(self.hint, text=hint)
 
 
-class Field(tk.Frame):
-    """Label on the left, right-aligned value, unit suffix -- reads like a spec sheet."""
-
-    def __init__(self, parent, label, default, unit, s):
-        super().__init__(parent, bg=CARD)
-        self.s = s
-        tk.Label(self, text=label, bg=CARD, fg=MUTED, anchor="w",
-                 font=("Segoe UI", int(9.5 * s))).pack(side="left")
-        tk.Label(self, text=unit, bg=CARD, fg=MUTED, width=4, anchor="w",
-                 font=("Segoe UI", int(9 * s))).pack(side="right")
-        self.var = tk.StringVar(value=str(default))
-        wrap = tk.Frame(self, bg=LINE, padx=1, pady=1)
-        wrap.pack(side="right", padx=(0, int(10 * s)))
-        entry = tk.Entry(wrap, textvariable=self.var, width=6, bg=BG, fg=INK,
-                         relief="flat", insertbackground=ACCENT, justify="right",
-                         font=("Consolas", int(10 * s)), highlightthickness=0)
-        entry.pack(ipady=int(4 * s), ipadx=int(5 * s))
-        # A focus ring is the cheapest way to make a flat field feel alive.
-        entry.bind("<FocusIn>", lambda e: wrap.config(bg=ACCENT))
-        entry.bind("<FocusOut>", lambda e: wrap.config(bg=LINE))
+def fmt_num(value):
+    """510.0 -> "510". Values round-trip through float() on save, and a field
+    that reads back "510.0" after a restart looks like a bug to the user."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(number)) if number.is_integer() else str(number)
 
 
-def section(parent, text, s):
-    tk.Label(parent, text=text.upper(), bg=BG, fg=MUTED, anchor="w",
-             font=("Segoe UI", int(8 * s), "bold")).pack(fill="x", pady=(int(14 * s), int(6 * s)))
+def section(parent, text, s, top=14):
+    label = tk.Label(parent, text=text.upper(), bg=BG, fg=MUTED, anchor="w",
+                     font=("Segoe UI", int(8 * s), "bold"))
+    label.pack(fill="x", pady=(int(top * s), int(6 * s)))
+    return label
 
 
 def card(parent, s):
@@ -356,68 +778,409 @@ def card(parent, s):
     return inner
 
 
+class GameItem(tk.Canvas):
+    """One row in the sidebar: a state dot, the name, and a hover/selected fill."""
+
+    def __init__(self, parent, profile, on_click, s, width=SIDEBAR_W - 16, height=38):
+        super().__init__(parent, bg=BG, highlightthickness=0, cursor="hand2",
+                         width=int(width * s), height=int(height * s))
+        self.profile = profile
+        self.on_click = on_click
+        self.selected = False
+        self.running = False
+        w, h = int(width * s), int(height * s)
+        self.shape = round_rect(self, 1, 1, w - 1, h - 1, 8 * s, fill=BG, outline="")
+        self.dot = self.create_oval(12 * s, h / 2 - 3.5 * s, 19 * s, h / 2 + 3.5 * s,
+                                    fill=LINE, outline="")
+        self.text = self.create_text(30 * s, h / 2, anchor="w", text=profile["name"],
+                                     fill=MUTED, font=("Segoe UI", int(9.5 * s)))
+        self.bind("<Enter>", lambda e: self._paint(hover=True))
+        self.bind("<Leave>", lambda e: self._paint())
+        self.bind("<Button-1>", lambda e: self.on_click(self.profile["id"]))
+        self._paint()
+
+    def set_state(self, selected=None, running=None):
+        if selected is not None:
+            self.selected = selected
+        if running is not None:
+            self.running = running
+        self._paint()
+
+    def _paint(self, hover=False):
+        fill = CARD_HI if self.selected else (CARD if hover else BG)
+        self.itemconfig(self.shape, fill=fill)
+        self.itemconfig(self.text, fill=INK if (self.selected or self.running) else MUTED)
+        self.itemconfig(self.dot, fill=OK if self.running else LINE)
+
+
+class Row(tk.Frame):
+    """Label on the left, control on the right -- the NVIDIA settings-table look."""
+
+    def __init__(self, parent, label, s, hint=None):
+        super().__init__(parent, bg=CARD)
+        text = tk.Frame(self, bg=CARD)
+        text.pack(side="left", fill="x", expand=True)
+        tk.Label(text, text=label, bg=CARD, fg=INK, anchor="w",
+                 font=("Segoe UI", int(9.5 * s))).pack(fill="x")
+        if hint:
+            tk.Label(text, text=hint, bg=CARD, fg=MUTED, anchor="w",
+                     font=("Segoe UI", int(8 * s))).pack(fill="x")
+        self.control = tk.Frame(self, bg=CARD)
+        self.control.pack(side="right")
+
+
+class NumBox(tk.Frame):
+    """A right-aligned number with its unit, sized to sit in a Row."""
+
+    def __init__(self, parent, default, unit, s, width=6):
+        super().__init__(parent, bg=CARD)
+        tk.Label(self, text=unit, bg=CARD, fg=MUTED, width=4, anchor="w",
+                 font=("Segoe UI", int(9 * s))).pack(side="right")
+        self.var = tk.StringVar(value=str(default))
+        wrap = tk.Frame(self, bg=LINE, padx=1, pady=1)
+        wrap.pack(side="right", padx=(0, int(8 * s)))
+        entry = tk.Entry(wrap, textvariable=self.var, width=width, bg=BG, fg=INK,
+                         relief="flat", insertbackground=ACCENT, justify="right",
+                         font=("Consolas", int(10 * s)), highlightthickness=0)
+        entry.pack(ipady=int(4 * s), ipadx=int(5 * s))
+        entry.bind("<FocusIn>", lambda e: wrap.config(bg=ACCENT))
+        entry.bind("<FocusOut>", lambda e: wrap.config(bg=LINE))
+
+
 class AfkAutoclicker:
-    def __init__(self, root):
+    def __init__(self, root, store=None):
         self.root = root
         self.s = s = root.tk.call("tk", "scaling") / 1.333  # 1.0 at 96 dpi
+        self.store = store if store is not None else Store()
 
         root.title("AFK Farm Clicker")
         root.config(bg=BG)
         root.resizable(False, False)
+        # Both panes turn off geometry propagation to hold their widths, which
+        # means nothing is left to tell the window how tall to be -- without an
+        # explicit size the body collapses to zero height and only the header
+        # shows.
+        root.geometry(f"{int((SIDEBAR_W + 1 + CONTENT_W) * s)}x{int(690 * s)}")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.mouse = Controller()
         self.hotkey = None
-        self.registered_hotkey = None      # what is actually bound
-        self.hk_listener = None            # HotkeyWatcher, once one is applied
+        self.registered_hotkey = None
+        self.hk_listener = None
         self.running = False
         self.worker = None
         self.capture_thread = None
         self.right_held = False
+        self.settings = {}
+        self._pending = None
+        self._ui_queue = queue.SimpleQueue()
+        self._loading = False          # suppress saves while filling the form
 
+        self.profiles = list(PROFILES)
+        for saved in self.store.data.get("games", {}).values():
+            meta = saved.get("_profile")
+            if meta and not any(p["id"] == meta["id"] for p in self.profiles):
+                self.profiles.append(make_profile(meta["id"], meta["name"],
+                                                  meta["title"]))
+        self.by_id = {p["id"]: p for p in self.profiles}
+        self.current = self.store.data.get("selected") or "global"
+        if self.current not in self.by_id:
+            self.current = "global"
+
+        # ── header ──
+        header = tk.Frame(root, bg=CARD, height=int(52 * s))
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Label(header, text="AFK Farm Clicker", bg=CARD, fg=INK,
+                 font=("Segoe UI", int(12 * s), "bold")).pack(side="left",
+                                                              padx=int(16 * s))
+        self.status = StatusPill(header, s, width=250, height=36)
+        self.status.config(bg=CARD)
+        self.status.pack(side="right", padx=int(14 * s))
+
+        shell = tk.Frame(root, bg=BG)
+        shell.pack(fill="both", expand=True)
+
+        # ── sidebar ──
+        side = tk.Frame(shell, bg=BG, width=int(SIDEBAR_W * s))
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        self.count_label = tk.Label(side, text="GAMES", bg=BG, fg=MUTED, anchor="w",
+                                    font=("Segoe UI", int(8 * s), "bold"))
+        self.count_label.pack(fill="x", padx=int(14 * s), pady=(int(14 * s), int(6 * s)))
+        self.list_frame = tk.Frame(side, bg=BG)
+        self.list_frame.pack(fill="both", expand=True, padx=int(8 * s))
+        self.items = {}
+        self._rebuild_list()
+        Button(side, "Add current game", self.add_current_game, s,
+               width=SIDEBAR_W - 28).pack(pady=(int(12 * s), int(4 * s)))
+        self.update_button = Button(side, "Check for updates", self.check_update, s,
+                                    width=SIDEBAR_W - 28)
+        self.update_button.pack(pady=(0, int(6 * s)))
+        self.version_label = tk.Label(side, text=f"v{__version__}", bg=BG, fg=MUTED,
+                                      font=("Segoe UI", int(8 * s)))
+        self.version_label.pack(pady=(0, int(10 * s)))
+
+        tk.Frame(shell, bg=LINE, width=1).pack(side="left", fill="y")
+
+        # ── content ──
+        self.content = tk.Frame(shell, bg=BG, width=int(CONTENT_W * s))
+        self.content.pack(side="left", fill="both", expand=True)
+        self.content.pack_propagate(False)
+        self._build_content(s)
+
+        self._select(self.current, persist=False)
+        self._timers = []
+        self._sync_settings()
+        self._drain_ui()
+        self._poll_games()
+
+    # ---------- content pane ----------
+
+    def _build_content(self, s):
         pad = int(16 * s)
-        body = tk.Frame(root, bg=BG)
-        body.pack(padx=pad, pady=pad, fill="both", expand=True)
+        body = tk.Frame(self.content, bg=BG)
+        body.pack(fill="both", expand=True, padx=pad, pady=pad)
 
-        tk.Label(body, text="AFK Farm Clicker", bg=BG, fg=INK, anchor="w",
-                 font=("Segoe UI", int(15 * s), "bold")).pack(fill="x")
-        tk.Label(body, text="Drowned / copper reinforcement farm", bg=BG, fg=MUTED,
-                 anchor="w", font=("Segoe UI", int(9 * s))).pack(fill="x", pady=(0, int(12 * s)))
+        title = tk.Frame(body, bg=BG)
+        title.pack(fill="x")
+        self.game_title = tk.Label(title, text="", bg=BG, fg=INK, anchor="w",
+                                   font=("Segoe UI", int(14 * s), "bold"))
+        self.game_title.pack(side="left")
+        self.game_state = tk.Label(title, text="", bg=BG, fg=MUTED, anchor="e",
+                                   font=("Segoe UI", int(9 * s)))
+        self.game_state.pack(side="right")
+        self.game_note = tk.Label(body, text="", bg=BG, fg=MUTED, anchor="w",
+                                  justify="left", wraplength=int((CONTENT_W - 32) * s),
+                                  font=("Segoe UI", int(8.5 * s)))
+        self.game_note.pack(fill="x", pady=(int(2 * s), int(12 * s)))
 
-        self.status = StatusPill(body, s)
-        self.status.pack()
-
-        section(body, "Hotkey", s)
+        section(body, "Hotkey  ·  shared by every game", s, top=0)
         hk = card(body, s)
-        self.hotkey_label = tk.Label(hk, text="Not set", bg=CARD, fg=MUTED, anchor="w",
-                                     font=("Consolas", int(10 * s)), wraplength=int(250 * s))
-        self.hotkey_label.pack(fill="x", pady=(0, int(8 * s)))
-        row = tk.Frame(hk, bg=CARD)
+        row = Row(hk, "Toggle", s)
         row.pack(fill="x")
-        self.record_button = Button(row, "Record", self.register_hotkey, s, width=124)
-        self.record_button.pack(side="left")
-        self.apply_button = Button(row, "Apply", self.apply_hotkey, s, width=124, primary=True)
+        self.hotkey_label = tk.Label(row.control, text="Not set", bg=CARD, fg=MUTED,
+                                     font=("Consolas", int(10 * s)))
+        self.hotkey_label.pack(side="right", padx=(0, int(8 * s)))
+        btns = tk.Frame(hk, bg=CARD)
+        btns.pack(fill="x", pady=(int(8 * s), 0))
+        Button(btns, "Record", self.register_hotkey, s, width=124).pack(side="left")
+        self.apply_button = Button(btns, "Apply", self.apply_hotkey, s, width=124,
+                                   primary=True)
         self.apply_button.pack(side="right")
         self.apply_button.set_enabled(False)
 
         section(body, "Clicking", s)
         cl = card(body, s)
-        self.click_ms = Field(cl, "Interval", DEFAULT_CLICK_MS, "ms", s)
-        self.click_ms.pack(fill="x")
+        r = Row(cl, "Interval", s); r.pack(fill="x")
+        self.click_ms = NumBox(r.control, DEFAULT_CLICK_MS, "ms", s)
+        self.click_ms.pack()
+        r = Row(cl, "Random jitter", s, hint="spreads the rhythm so it is not exact")
+        r.pack(fill="x", pady=(int(6 * s), 0))
+        self.jitter_ms = NumBox(r.control, 0, "±ms", s); self.jitter_ms.pack()
+        r = Row(cl, "Auto-stop", s, hint="0 means never"); r.pack(fill="x", pady=(int(6 * s), 0))
+        self.autostop_min = NumBox(r.control, 0, "min", s); self.autostop_min.pack()
+        r = Row(cl, "Mouse button", s); r.pack(fill="x", pady=(int(8 * s), 0))
+        self.button_name = tk.StringVar(value="left")
+        Segmented(r.control, [("left", "Left"), ("right", "Right"), ("middle", "Mid")],
+                  self.button_name, s, width=180).pack()
 
-        section(body, "Eating", s)
-        ea = card(body, s)
-        self.eat_mode = tk.StringVar(value="pause")
-        Segmented(ea, [("pause", "Pause & eat"), ("hold", "Hold RMB"), ("off", "Off")],
+        self.eat_section = section(body, "Eating", s)
+        self.eat_card_inner = card(body, s)
+        self.eat_card = self.eat_card_inner.master
+        self.eat_mode = tk.StringVar(value="off")
+        Segmented(self.eat_card_inner,
+                  [("pause", "Pause & eat"), ("hold", "Hold RMB"), ("off", "Off")],
                   self.eat_mode, s).pack(pady=(0, int(8 * s)))
-        self.eat_every = Field(ea, "Eat every", DEFAULT_EAT_EVERY_S, "s", s)
-        self.eat_every.pack(fill="x")
-        self.eat_hold = Field(ea, "Hold for", DEFAULT_EAT_HOLD_S, "s", s)
-        self.eat_hold.pack(fill="x", pady=(int(4 * s), 0))
+        r = Row(self.eat_card_inner, "Eat every", s); r.pack(fill="x")
+        self.eat_every = NumBox(r.control, DEFAULT_EAT_EVERY_S, "s", s); self.eat_every.pack()
+        r = Row(self.eat_card_inner, "Hold for", s); r.pack(fill="x", pady=(int(6 * s), 0))
+        self.eat_hold = NumBox(r.control, DEFAULT_EAT_HOLD_S, "s", s); self.eat_hold.pack()
 
-        tk.Label(body, text="Rotten flesh takes 1.6 s — a click cancels the eat.",
-                 bg=BG, fg=MUTED, anchor="w",
-                 font=("Segoe UI", int(8 * s))).pack(fill="x", pady=(int(12 * s), 0))
+        # Any edit belongs to the selected game, so persist as it happens.
+        for var in (self.click_ms.var, self.jitter_ms.var, self.autostop_min.var,
+                    self.button_name, self.eat_mode, self.eat_every.var,
+                    self.eat_hold.var):
+            var.trace_add("write", lambda *_a: self._persist())
+
+    # ---------- game list ----------
+
+    def _rebuild_list(self):
+        for widget in self.list_frame.winfo_children():
+            widget.destroy()
+        self.items = {}
+        for profile in self.profiles:
+            item = GameItem(self.list_frame, profile, self._select, self.s)
+            item.pack(fill="x", pady=int(1 * self.s))
+            self.items[profile["id"]] = item
+        self.count_label.config(text=f"GAMES   {len(self.profiles)}")
+
+    def _select(self, game_id, persist=True):
+        self.current = game_id
+        profile = self.by_id[game_id]
+        for gid, item in self.items.items():
+            item.set_state(selected=(gid == game_id))
+        self.game_title.config(text=profile["name"])
+        self.game_note.config(text=profile["note"])
+
+        # Fill the form from this game's saved values, defaults where absent.
+        self._loading = True
+        values = dict(profile["defaults"])
+        values.update({k: v for k, v in self.store.game(game_id).items()
+                       if not k.startswith("_")})
+        self.click_ms.var.set(fmt_num(values["click_ms"]))
+        self.jitter_ms.var.set(fmt_num(values["jitter_ms"]))
+        self.autostop_min.var.set(fmt_num(values["autostop_min"]))
+        self.button_name.set(values["button"])
+        self.eat_every.var.set(fmt_num(values["eat_every"]))
+        self.eat_hold.var.set(fmt_num(values["eat_hold"]))
+        self.eat_mode.set(values["eat_mode"] if profile["eating"] else "off")
+        self._loading = False
+
+        # The eating panel is Minecraft's, not everyone's -- hide it rather than
+        # leave a dead control sitting there for games it means nothing to.
+        if profile["eating"]:
+            self.eat_section.pack(fill="x", pady=(int(14 * self.s), int(6 * self.s)))
+            self.eat_card.pack(fill="x")
+        else:
+            self.eat_section.pack_forget()
+            self.eat_card.pack_forget()
+
+        if persist:
+            self.store.data["selected"] = game_id
+            self.store.save()
+        self._persist()
+
+    def _persist(self):
+        if self._loading:
+            return
+        profile = self.by_id[self.current]
+        values = {
+            "click_ms": self._num(self.click_ms, profile["defaults"]["click_ms"], 50),
+            "jitter_ms": self._num(self.jitter_ms, 0, 0),
+            "autostop_min": self._num(self.autostop_min, 0, 0),
+            "button": self.button_name.get(),
+            "eat_mode": self.eat_mode.get(),
+            "eat_every": self._num(self.eat_every, DEFAULT_EAT_EVERY_S, 5),
+            "eat_hold": self._num(self.eat_hold, DEFAULT_EAT_HOLD_S, 0.5),
+        }
+        if profile.get("custom"):
+            values["_profile"] = {"id": profile["id"], "name": profile["name"],
+                                  "title": profile["titles"][0]}
+        self.store.put_game(self.current, values)
+
+    def add_current_game(self):
+        def scan():
+            title = foreground_title()
+            self._ui(self._add_game, title)
+        threading.Thread(target=scan, daemon=True).start()
+
+    def _add_game(self, title):
+        if not title:
+            self.game_state.config(text="no window found", fg=BAD)
+            return
+        name = title.strip()[:28]
+        game_id = "custom:" + name.lower()
+        if game_id in self.by_id:
+            self._select(game_id)
+            return
+        profile = make_profile(game_id, name, name)
+        self.profiles.append(profile)
+        self.by_id[game_id] = profile
+        self._rebuild_list()
+        self._select(game_id)
+
+    # ---------- updates ----------
+
+    def check_update(self):
+        self._set_update_state("Checking…", enabled=False)
+        threading.Thread(target=self._check_worker, daemon=True).start()
+
+    def _check_worker(self):
+        release = latest_release()
+        if release is None:
+            self._ui(self._set_update_state, "GitHub unreachable", True, BAD)
+            return
+        tag = release.get("tag_name", "")
+        if not is_newer(tag):
+            self._ui(self._set_update_state, f"Up to date · {__version__}", True)
+            return
+        asset = pick_asset(release)
+        if asset is None:
+            self._ui(self._set_update_state, f"{tag}: no build for this OS", True, BAD)
+            return
+        self._pending = (tag, asset)
+        self._ui(self._offer_update, tag)
+
+    def _offer_update(self, tag):
+        self.update_button.set_text(f"Install {tag}")
+        self.update_button.set_primary(True)
+        self.update_button.set_enabled(True)
+        self.update_button.command = self.install_update
+        self.version_label.config(text=f"v{__version__} → {tag}", fg=ACCENT)
+
+    def install_update(self):
+        if not is_frozen():
+            # From source there is nothing to swap, and silently doing nothing
+            # would look like a broken button.
+            self._set_update_state("Run `git pull` — not a build", True, BAD)
+            return
+        self._set_update_state("Downloading… 0%", enabled=False)
+        threading.Thread(target=self._install_worker, daemon=True).start()
+
+    def _install_worker(self):
+        tag, asset = self._pending
+        try:
+            staged = download_and_stage(
+                asset,
+                on_progress=lambda f: self._ui(self._set_update_state,
+                                               f"Downloading… {f * 100:.0f}%", False))
+            target = install_root()
+            if not os.access(target, os.W_OK):
+                self._ui(self._set_update_state, "Install folder is read-only", True, BAD)
+                return
+            script = write_swap_script(staged, target, sys.executable)
+        except Exception as exc:
+            self._ui(self._set_update_state, f"Update failed: {exc}"[:40], True, BAD)
+            return
+        self._ui(self._quit_for_update, script)
+
+    def _quit_for_update(self, script):
+        self._set_update_state("Restarting…", enabled=False)
+        if sys.platform == "win32":
+            subprocess.Popen(["cmd", "/c", script],
+                             creationflags=0x00000008 | 0x00000200)  # DETACHED | NEW_GROUP
+        else:
+            subprocess.Popen(["/bin/sh", script], start_new_session=True)
+        self.on_close()
+
+    def _set_update_state(self, text, enabled=True, colour=None):
+        self.update_button.set_text(text)
+        self.update_button.set_enabled(enabled)
+        if colour:
+            self.version_label.config(text=text, fg=colour)
+
+    def _poll_games(self):
+        def scan():
+            self._ui(self._mark_running, detect_running(self.profiles))
+        threading.Thread(target=scan, daemon=True).start()
+        self._timers.append(self.root.after(5000, self._poll_games))
+
+    def _mark_running(self, running_ids):
+        for gid, item in self.items.items():
+            item.set_state(running=(gid in running_ids))
+        # Follow the game the first time it appears, then leave the choice
+        # alone: silently overriding a hand-picked profile every five seconds
+        # would be maddening.
+        fresh = running_ids - getattr(self, "_seen_running", set())
+        self._seen_running = running_ids
+        if fresh and self.current not in running_ids:
+            self._select(sorted(fresh)[0])
+        # Only now, so the label describes the game that ended up selected.
+        if self.current in running_ids:
+            self.game_state.config(text="running", fg=OK)
+        else:
+            self.game_state.config(text="not detected", fg=MUTED)
 
     # ---------- helpers ----------
 
@@ -429,48 +1192,72 @@ class AfkAutoclicker:
             return fallback
 
     def _ui(self, fn, *args):
-        """Tk is not thread-safe; marshal every widget update onto the main loop."""
-        self.root.after(0, fn, *args)
+        """
+        Hand a widget update to the main thread.
+
+        Not root.after() -- that is itself a Tk call, and calling it from a
+        worker raises "main thread is not in main loop". A plain queue drained
+        by _drain_ui() keeps every Tk touch on the thread that owns it.
+        """
+        self._ui_queue.put((fn, args))
+
+    def _drain_ui(self):
+        while True:
+            try:
+                fn, args = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn(*args)
+            except tk.TclError:
+                return                      # window is going away
+        self._timers.append(self.root.after(40, self._drain_ui))
+
+    def _sync_settings(self):
+        """
+        Snapshot every control into a plain dict for the worker thread.
+
+        Reading a StringVar from another thread is the same unsupported Tk
+        access as above; it happens to work while the main loop is spinning and
+        raises when it is not. The worker reads this dict instead, so the
+        clicking thread never touches Tk at all.
+        """
+        try:
+            self.settings = {
+                "click_ms": self._num(self.click_ms, DEFAULT_CLICK_MS, 50),
+                "jitter_ms": self._num(self.jitter_ms, 0, 0),
+                "autostop_min": self._num(self.autostop_min, 0, 0),
+                "button": self.button_name.get(),
+                "eat_mode": self.eat_mode.get(),
+                "eat_every": self._num(self.eat_every, DEFAULT_EAT_EVERY_S, 5),
+                "eat_hold": self._num(self.eat_hold, DEFAULT_EAT_HOLD_S, 0.5),
+            }
+        except tk.TclError:
+            return
+        self._timers.append(self.root.after(200, self._sync_settings))
 
     # ---------- hotkey ----------
 
     def register_hotkey(self):
         if self.capture_thread and self.capture_thread.is_alive():
             return
-        self.hotkey_label.config(text="Press any key…  (Esc cancels)", fg=ACCENT)
+        self.hotkey_label.config(text="Press up to 3 keys, then let go…", fg=ACCENT)
         self.hotkey = None
         self.capture_thread = threading.Thread(target=self.capture_hotkey, daemon=True)
         self.capture_thread.start()
 
     def capture_hotkey(self):
-        held = set()
-        captured = {}
-
-        def on_press(key):
-            if key == kb.Key.esc:
-                return False                       # cancel, keep the old binding
-            mod = _mod_base(key)
-            if mod:
-                held.add(mod)
-                return None                        # a modifier alone is not a hotkey
-            captured["hotkey"] = Hotkey(held, key)
-            return False
-
-        def on_release(key):
-            mod = _mod_base(key)
-            if mod:
-                held.discard(mod)
-            return None
-
+        rec = HotkeyRecorder()
         try:
-            with kb.Listener(on_press=on_press, on_release=on_release) as listener:
+            with kb.Listener(on_press=rec.press, on_release=rec.release) as listener:
                 listener.join()
         except Exception as exc:                   # no X11, or macOS denied access
             self._ui(self._hotkey_error, str(exc))
             return
 
-        if "hotkey" in captured:
-            self.hotkey = captured["hotkey"]
+        hotkey = rec.result()
+        if hotkey is not None:
+            self.hotkey = hotkey
             self._ui(self._hotkey_captured)
         else:
             self._ui(self._show_hotkey, self.registered_hotkey)
@@ -529,13 +1316,15 @@ class AfkAutoclicker:
             if self.worker.is_alive():
                 return                     # refuse rather than double-click
         self.running = True
-        self._ui(self.status.set, "RUNNING", OK, self.registered_hotkey or "")
+        self._ui(self.status.set, "RUNNING", OK,
+                 self.registered_hotkey.label() if self.registered_hotkey else "")
         self.worker = threading.Thread(target=self.loop, daemon=True)
         self.worker.start()
 
     def stop(self):
         self.running = False
-        self._ui(self.status.set, "OFF", BAD, self.registered_hotkey or "")
+        self._ui(self.status.set, "OFF", BAD,
+                 self.registered_hotkey.label() if self.registered_hotkey else "")
 
     def _sleep(self, seconds):
         """Interruptible sleep, so toggling off reacts immediately."""
@@ -546,49 +1335,78 @@ class AfkAutoclicker:
 
     def _release_right(self):
         if self.right_held:
-            self.mouse.release(Button.right)
+            self.mouse.release(MouseButton.right)
             self.right_held = False
+
+    CLICK_BUTTON = {"left": MouseButton.left, "right": MouseButton.right,
+                    "middle": MouseButton.middle}
 
     def loop(self):
         try:
-            last_meal = time.monotonic()
+            started = last_meal = time.monotonic()
             while self.running:
+                # Auto-stop is a safety net, not a feature: an autoclicker left
+                # running against an empty farm is the thing that gets an
+                # account flagged, and the thing that is still clicking when you
+                # come back to the desk. 0 keeps the old always-on behaviour.
+                cfg = self.settings
+                limit = cfg.get("autostop_min", 0)
+                if limit and time.monotonic() - started >= limit * 60:
+                    self._ui(self.status.set, "STOPPED", MUTED, f"auto-stop after {limit:g} min")
+                    self.running = False
+                    break
                 # Re-read every pass, like the numeric fields already are:
                 # picking the mode up once meant switching the control did
                 # nothing until you toggled the clicker off and on again.
-                mode = self.eat_mode.get()
-                interval = self._num(self.click_ms, DEFAULT_CLICK_MS, 50) / 1000.0
+                mode = cfg.get("eat_mode", "off")
+                interval = cfg.get("click_ms", DEFAULT_CLICK_MS) / 1000.0
+                jitter = cfg.get("jitter_ms", 0) / 1000.0
+                if jitter:
+                    # Spread around the set interval, never below the 50 ms
+                    # floor the field itself enforces.
+                    interval = max(0.05, interval + random.uniform(-jitter, jitter))
+                button = self.CLICK_BUTTON.get(cfg.get("button", "left"), MouseButton.left)
 
                 if mode == "hold":
                     if not self.right_held:
-                        self.mouse.press(Button.right)
+                        self.mouse.press(MouseButton.right)
                         self.right_held = True
                 elif self.right_held:
                     # Left "hold" (or switched to off) -- do not leave the
                     # button down, that keeps blocking/eating forever.
                     self._release_right()
 
-                if mode == "pause":
-                    every = self._num(self.eat_every, DEFAULT_EAT_EVERY_S, 5)
+                if mode == "pause" and button is MouseButton.left:
+                    every = cfg.get("eat_every", DEFAULT_EAT_EVERY_S)
                     if time.monotonic() - last_meal >= every:
                         self._ui(self.status.set, "EATING", ACCENT, "clicks paused")
-                        hold = self._num(self.eat_hold, DEFAULT_EAT_HOLD_S, 0.5)
-                        self.mouse.press(Button.right)
+                        hold = cfg.get("eat_hold", DEFAULT_EAT_HOLD_S)
+                        self.mouse.press(MouseButton.right)
                         self.right_held = True
                         self._sleep(hold)          # no left-clicks here, or the eat cancels
                         self._release_right()
                         last_meal = time.monotonic()
                         if not self.running:
                             break
-                        self._ui(self.status.set, "RUNNING", OK, self.registered_hotkey or "")
+                        self._ui(self.status.set, "RUNNING", OK,
+                 self.registered_hotkey.label() if self.registered_hotkey else "")
 
-                self.mouse.click(Button.left)
+                self.mouse.click(button)
                 if not self._sleep(interval):
                     break
         finally:
             self._release_right()
 
     def on_close(self):
+        self._persist()
+        # Pending after() callbacks fire into a destroyed interpreter and Tcl
+        # reports them as "invalid command name". Cancel them first.
+        for job in getattr(self, "_timers", []):
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._timers = []
         self.stop()
         if self.hk_listener is not None:
             self.hk_listener.stop()
