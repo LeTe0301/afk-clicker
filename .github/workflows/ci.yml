@@ -9,6 +9,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Supersede an in-flight run when a branch is pushed again; the old result is
+# about code nobody has any more.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -16,15 +22,18 @@ jobs:
   test:
     # The suite used to run on Linux only, which left the Windows and macOS
     # code paths -- %APPDATA%, the .app bundle nesting, file:// URLs on a
-    # drive path -- covered by nothing but a build. macOS is allowed to fail
-    # for now: pynput's listener needs Accessibility permission, which a CI
-    # runner cannot grant, so a red result there is not necessarily the code.
+    # drive path -- covered by nothing but a build.
+    #
+    # macOS is a required leg, not continue-on-error. That flag was here for
+    # Accessibility permission a runner cannot grant, but the two failures it
+    # actually absorbed were real cross-platform bugs, and it reported the run
+    # green with the job red -- which is the failure mode a test matrix exists
+    # to prevent.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     steps:
       - uses: actions/checkout@v4
 

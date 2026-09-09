@@ -21,7 +21,9 @@ if errorlevel 1 (
 echo.
 echo === Installing build dependencies ===
 py -m pip install --upgrade pip
-py -m pip install --upgrade pyinstaller pynput
+REM Pinned to the same versions the release pipeline uses, so a local
+REM build cannot differ from the published one.
+py -m pip install --upgrade "pyinstaller==6.11.1" "pynput==1.7.7"
 if errorlevel 1 (
     echo.
     echo   Dependency install failed -- see the error above.

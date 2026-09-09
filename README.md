@@ -102,12 +102,16 @@ virtuellen Tastencode. Der Hotkey feuert damit auf der physischen Taste, die du
 aufgenommen hast, und nicht auf dem, was diese Position nach einem
 Layout-Wechsel bedeutet.
 
-Nachgemessen mit synthetisierten Tastendrücken: 70 Akkord-/Modifier-Kombinationen
-feuern genau einmal, 22 Beinahe-Treffer bleiben still, alle Permutationen eines
-Akkords zählen gleich. Abgedeckt sind alle Funktions- und Navigationstasten,
-sämtliche ASCII-Zeichen, die Metazeichen `+ < >` und Zeichen aus deutschen,
-französischen, spanischen, nordischen, polnischen, tschechischen, türkischen,
-ungarischen und isländischen Layouts.
+Nachgemessen mit synthetisierten Tastendrücken in `tests/test_chords_slow.py`:
+**30 Akkord-/Modifier-Kombinationen** feuern genau einmal, **6 Beinahe-Treffer**
+bleiben still, alle Permutationen eines Akkords zählen gleich, Halten löst
+einmal aus. Abgedeckt sind Funktionstasten, Zeichentasten, das Metazeichen `+`
+und Umlaute.
+
+Die ursprüngliche Entwicklung lief über eine breitere Einmal-Messung — alle
+ASCII-Zeichen, `< >` und Layouts von Polnisch bis Isländisch. Die ist nicht Teil
+der Suite; hier stehen nur die Zahlen, die bei jedem Release tatsächlich
+nachgefahren werden.
 
 ## Selbst bauen
 
