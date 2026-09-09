@@ -1,37 +1,80 @@
-name: Build
+name: Release
 
-# Two ways in:
-#   - push a tag like v1.1.0 -> builds all three platforms and publishes a
-#     Release with the archives attached
-#   - run it by hand from the Actions tab -> same builds, left as artifacts
-#
-# One job per operating system because PyInstaller cannot cross-compile: it
-# freezes the interpreter it is running on, so a Windows .exe can only be made
-# on Windows, a Mach-O app only on macOS, an ELF binary only on Linux.
+# The release pipeline: every test, then all three builds, then a manual gate,
+# then publication. Driven by a release/{version} branch -- pushing a tag no
+# longer publishes anything, so nothing reaches the Releases page without a
+# person approving it.
 on:
   push:
-    tags: ["v*"]
+    branches: ["release/**"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v (e.g. 0.4.0)"
+        required: true
 
 permissions:
-  contents: write        # required to create the release and attach the assets
+  contents: write        # create the tag and the release
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+    steps:
+      - id: pick
+        # release/0.4.0 -> 0.4.0, or whatever workflow_dispatch was given.
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            V="${{ inputs.version }}"
+          else
+            V="${GITHUB_REF_NAME#release/}"
+          fi
+          echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+          echo "Releasing $V"
+
+  test:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install pynput
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+
+      - name: The version in the code must match the branch
+        # A release branch that ships a binary reporting a different version
+        # breaks the in-app updater's comparison, quietly and permanently.
+        run: |
+          CODE=$(python -c "import re;print(re.search(r'__version__ = \"([^\"]+)\"', open('afk_clicker.py').read()).group(1))")
+          if [ "$CODE" != "${{ needs.version.outputs.version }}" ]; then
+            echo "::error::afk_clicker.py says $CODE, the release is ${{ needs.version.outputs.version }}"
+            exit 1
+          fi
+          echo "version $CODE matches"
+
+      # AFK_SLOW_TESTS pulls in the synthetic key-press sweep: every chord and
+      # modifier combination, near-misses, ordering, debounce. Minutes of
+      # runtime, which is why it is here and not on every push.
+      - name: Full test suite, including the slow chord sweep
+        env:
+          AFK_SLOW_TESTS: "1"
+        run: xvfb-run -a python -m unittest discover -s tests -t . -v
+
   build:
+    needs: [version, test]
     strategy:
-      # Never let one platform's failure hide the other two: a broken macOS
-      # runner should still leave a usable Windows build behind.
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             asset: AFK-Farm-Clicker-windows-x64.zip
-          # Not ubuntu-latest on purpose. PyInstaller links against the build
-          # host's glibc, so a binary built on the newest Ubuntu refuses to
-          # start on anything older. Building on the oldest supported runner
-          # gives the widest compatibility. If GitHub retires this label the
-          # job fails with an unknown-runner error -- swap it for the oldest
-          # ubuntu-* still offered.
+          # Not ubuntu-latest: PyInstaller links the build host's glibc, so a
+          # binary built on the newest Ubuntu refuses to start on older ones.
           - os: ubuntu-22.04
             asset: AFK-Farm-Clicker-linux-x86_64.tar.gz
           - os: macos-latest
@@ -39,31 +82,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      # Tk is not a pip package -- PyInstaller can only bundle what the
-      # interpreter can already import, and a build without it produces an
-      # executable that dies on the first window.
-      - name: Verify tkinter is available
-        run: python -c "import tkinter, sys; print('tkinter', tkinter.TkVersion)"
-
-      - name: Install dependencies
-        run: |
+      - run: python -c "import tkinter; print('tkinter', tkinter.TkVersion)"
+      - run: |
           python -m pip install --upgrade pip
           pip install pyinstaller pynput
 
-      # --windowed  : no console window behind the GUI (a .app bundle on macOS)
-      # --noupx     : UPX compression is a major antivirus red flag, and this
-      #               program already looks suspicious to scanners -- it hooks
-      #               the keyboard globally and synthesises mouse input
-      # --hidden-import : pynput resolves its platform backend at import time,
-      #               so PyInstaller's static analysis never sees it and would
-      #               ship a build that dies at launch with ImportError
-      # Deliberately not --onefile: it unpacks to a temp directory on every
-      # start, which is slower and the single biggest antivirus trigger.
       - name: Build
         run: >
           pyinstaller --noconfirm --clean
@@ -78,9 +104,9 @@ jobs:
           --hidden-import pynput.mouse._darwin
           afk_clicker.py
 
-      # --selftest touches every lazily-resolved backend and exits. Without it
-      # a missing hidden import is invisible until a user double-clicks and
-      # nothing happens, because a --windowed build has no console to print to.
+      # --selftest touches every lazily-resolved backend. Without it a missing
+      # hidden import is invisible until a user double-clicks and nothing
+      # happens, because a --windowed build has no console.
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -88,7 +114,6 @@ jobs:
           $p = Start-Process -FilePath "dist/AFK Farm Clicker/AFK Farm Clicker.exe" `
                              -ArgumentList "--selftest" -PassThru -Wait
           if ($p.ExitCode -ne 0) { throw "selftest exited $($p.ExitCode)" }
-          "selftest passed"
 
       - name: Smoke test (Linux)
         if: runner.os == 'Linux'
@@ -98,8 +123,6 @@ jobs:
 
       - name: Smoke test (macOS)
         if: runner.os == 'macOS'
-        # Run the binary inside the bundle directly: `open` returns immediately
-        # and would tell us nothing about the exit status.
         run: "'dist/AFK Farm Clicker.app/Contents/MacOS/AFK Farm Clicker' --selftest"
 
       - name: Package (Windows)
@@ -113,8 +136,8 @@ jobs:
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        # ditto, not zip: it preserves the bundle's symlinks and permission
-        # bits, which a plain zip mangles into an app Finder refuses to open.
+        # ditto, not zip: it keeps the bundle's symlinks and permission bits,
+        # which a plain zip mangles into an app Finder refuses to open.
         run: ditto -c -k --keepParent "dist/AFK Farm Clicker.app" "${{ matrix.asset }}"
 
       - uses: actions/upload-artifact@v4
@@ -122,14 +145,29 @@ jobs:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
 
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    # The manual gate. Configure Settings -> Environments -> release with
+    # "Required reviewers"; the job then waits for an approval before anything
+    # reaches the Releases page. Without that setting it simply runs through.
+    environment: release
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          files: ${{ matrix.asset }}
+          path: artifacts
+          merge-multiple: true
+
+      - run: ls -la artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          name: v${{ needs.version.outputs.version }}
+          files: artifacts/*
           body: |
             Download the archive for your system, unpack it anywhere and run it.
-            No Python needed.
+            No Python needed. The program updates itself from then on.
 
             | System | File |
             |---|---|
@@ -137,15 +175,13 @@ jobs:
             | Linux (glibc 2.35+, X11) | `AFK-Farm-Clicker-linux-x86_64.tar.gz` |
             | macOS (Apple Silicon) | `AFK-Farm-Clicker-macos-arm64.zip` |
 
-            **Windows** — Defender may flag it. That is a false positive and
-            normal here: a global keyboard hook plus synthetic mouse clicks is
-            exactly the pattern the heuristics look for. Add the folder under
-            Windows Security → Virus & threat protection → Exclusions.
+            **Windows** — Defender may flag it. False positive, and normal here:
+            a global keyboard hook plus synthetic mouse clicks is exactly the
+            heuristic pattern. Add the folder under Windows Security → Virus &
+            threat protection → Exclusions.
 
-            **Linux** — needs an **X11** session. Wayland does not let an
-            application see keys sent to other windows, so the hotkey cannot
-            work there; the window opens but never toggles.
+            **Linux** — needs an X11 session. Wayland does not let an
+            application observe keys sent to other windows.
 
-            **macOS** — unsigned, so the first launch needs right-click → Open.
-            Then grant **Accessibility** permission under System Settings →
-            Privacy & Security, or the hotkey and the clicking stay dead.
+            **macOS** — unsigned, so the first launch needs right-click → Open,
+            then grant Accessibility permission.
