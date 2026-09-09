@@ -3,6 +3,7 @@ import json
 import os
 import tarfile
 import tempfile
+import pathlib
 import unittest
 import urllib.error
 import urllib.request
@@ -36,8 +37,19 @@ class AssetSelection(unittest.TestCase):
         {"name": "AFK-Farm-Clicker-macos-arm64.zip", "browser_download_url": "m"},
     ]}
 
-    def test_picks_something_for_this_platform(self):
-        self.assertIsNotNone(app.pick_asset(self.RELEASE))
+    def test_picks_the_asset_matching_this_platform(self):
+        expected = {"win32": "w", "darwin": "m"}.get(app.sys.platform, "l")
+        picked = app.pick_asset(self.RELEASE)
+        self.assertIsNotNone(picked)
+        # Assert *which* one. Merely asserting "not None" passed even with the
+        # selection hard-coded to the wrong platform.
+        self.assertEqual(picked["browser_download_url"], expected)
+
+    def test_a_release_without_our_platform_yields_none(self):
+        others = {"win32": "linux-x86_64.tar.gz"}.get(app.sys.platform, "windows-x64.zip")
+        self.assertIsNone(app.pick_asset(
+            {"assets": [{"name": "AFK-Farm-Clicker-" + others,
+                         "browser_download_url": "x"}]}))
 
     def test_empty_and_missing(self):
         self.assertIsNone(app.pick_asset({"assets": []}))
@@ -71,28 +83,55 @@ class Staging(unittest.TestCase):
             with self.subTest(kind=kind):
                 archive = self._archive(kind)
                 staged = app.download_and_stage(
+                    # as_uri(), not "file://" + path: a Windows drive path is
+                    # not a valid file URL.
                     {"name": "x-" + suffix,
-                     "browser_download_url": "file://" + archive})
-                self.assertTrue(os.path.isfile(os.path.join(staged, "marker.txt")))
+                     "browser_download_url": pathlib.Path(archive).as_uri()})
+                marker = os.path.join(staged, "marker.txt")
+                self.assertTrue(os.path.isfile(marker))
+                # Check the content, not merely that a file exists -- the old
+                # assertion passed for an empty extraction of the wrong tree.
+                with open(marker, encoding="utf-8") as fh:
+                    self.assertEqual(fh.read(), "hello")
+                self.assertFalse(os.path.isdir(os.path.join(staged, "AFK Farm Clicker")),
+                                 "the top-level folder should have been flattened away")
 
 
 @needs_display
 class SwapScript(unittest.TestCase):
     def setUp(self):
-        self.staged = tempfile.mkdtemp()
+        # Mirror what download_and_stage produces: <workdir>/staged/<tree>.
+        # A one-level-deep path made write_swap_script walk up to "/" and the
+        # test wrote apply-update.sh into the filesystem root.
+        workdir = tempfile.mkdtemp()
+        self.staged = os.path.join(workdir, "staged", "AFK Farm Clicker")
+        os.makedirs(self.staged)
         self.target = tempfile.mkdtemp()
         self.script = app.write_swap_script(self.staged, self.target, "/bin/true")
+
+    def test_written_inside_the_working_directory_not_the_root(self):
+        parent = os.path.dirname(os.path.abspath(self.script))
+        self.assertNotEqual(parent, os.path.dirname(parent),
+                            "the swap script must never land in the filesystem root")
 
     def test_written_and_runnable(self):
         self.assertTrue(os.path.isfile(self.script))
         if not app.sys.platform.startswith("win"):
             self.assertTrue(os.access(self.script, os.X_OK))
 
-    def test_waits_for_this_process(self):
+    def test_waits_for_this_process_rather_than_killing_it(self):
         body = open(self.script, encoding="utf-8").read()
         self.assertIn(str(os.getpid()), body)
         self.assertIn(self.staged, body)
         self.assertIn(self.target, body)
+        # Naming the pid is not enough: the script must *poll* for the process
+        # to exit. Signalling it would kill the very program being updated.
+        if app.sys.platform == "win32":
+            self.assertIn("tasklist", body)
+        else:
+            self.assertIn("kill -0", body)
+        for lethal in ("kill -9", "kill -15", "kill -TERM", "taskkill"):
+            self.assertNotIn(lethal, body)
 
     def test_staging_lives_outside_the_target(self):
         # The script deletes the target wholesale; it must not be deleting the

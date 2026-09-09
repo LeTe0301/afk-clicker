@@ -14,7 +14,18 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# Only X11 needs DISPLAY. Windows and macOS have a window server either way,
+# and treating them as headless would skip the entire suite there.
 HEADLESS = sys.platform.startswith("linux") and not os.environ.get("DISPLAY")
+
+# Fail closed. A suite that skips everything and exits 0 is worse than no
+# suite: it reports "OK (skipped=57)" and a pipeline believes it. On CI a
+# missing display is a broken job, not a reason to pass.
+if HEADLESS and os.environ.get("CI"):
+    raise RuntimeError(
+        "No X display on CI. pynput cannot import without one and the suite "
+        "would skip every test while exiting 0. Run it under xvfb-run.")
+
 needs_display = unittest.skipIf(HEADLESS, "no X display; run under xvfb-run")
 
 if not HEADLESS:
