@@ -194,6 +194,41 @@ class Hotkey:
         return all(any(_same_key(spec, rec) for rec in held_keys)
                    for spec in self.keys)
 
+    def to_json(self):
+        return {"mods": sorted(self.mods), "keys": [list(k) for k in self.keys]}
+
+    @classmethod
+    def from_json(cls, blob):
+        """
+        None for anything malformed -- a damaged setting must not block startup.
+
+        Checked rather than wrapped in try/except: {"keys": "nope"} raises
+        nothing at all, because iterating a string hands back characters and
+        builds a plausible-looking hotkey out of garbage.
+        """
+        if not isinstance(blob, dict):
+            return None
+        raw, mods = blob.get("keys"), blob.get("mods", [])
+        if not isinstance(raw, (list, tuple)) or not raw:
+            return None
+        if not isinstance(mods, (list, tuple)):
+            return None
+        records = []
+        for entry in raw:
+            if not isinstance(entry, (list, tuple)) or not 1 <= len(entry) <= 3:
+                return None
+            name, vk, char = (list(entry) + [None, None, None])[:3]
+            if not (name is None or isinstance(name, str)):
+                return None
+            if not (vk is None or isinstance(vk, int)):
+                return None
+            if not (char is None or isinstance(char, str)):
+                return None
+            if name is None and vk is None and char is None:
+                return None
+            records.append((name, vk, char))
+        return cls([m for m in mods if isinstance(m, str)], records)
+
     def label(self):
         mods = sorted(self.mods, key=lambda m: _MOD_ORDER.get(m, 9))
         parts = ["AltGr" if m == "altgr" else m.title() for m in mods]
@@ -448,7 +483,12 @@ def write_swap_script(staged, target, relaunch):
     platform deleting the code you are executing is asking for trouble.
     """
     pid = os.getpid()
-    workdir = os.path.dirname(os.path.dirname(staged)) or tempfile.gettempdir()
+    # Two levels up from the staged tree is the temp working directory that
+    # download_and_stage created. Guard it: with a shallow `staged` this walks
+    # up to "/" and the script would be written to the filesystem root.
+    workdir = os.path.dirname(os.path.dirname(os.path.abspath(staged)))
+    if not workdir or os.path.dirname(workdir) == workdir or not os.access(workdir, os.W_OK):
+        workdir = tempfile.mkdtemp(prefix="afkclicker-update-")
     if sys.platform == "win32":
         path = os.path.join(workdir, "apply-update.cmd")
         script = f'''@echo off
@@ -949,6 +989,11 @@ class AfkAutoclicker:
         self.content.pack_propagate(False)
         self._build_content(s)
 
+        saved = Hotkey.from_json(self.store.data.get("hotkey") or {})
+        if saved is not None:
+            self.hotkey = saved
+            self.apply_hotkey()
+
         self._select(self.current, persist=False)
         self._timers = []
         self._sync_settings()
@@ -1317,6 +1362,8 @@ class AfkAutoclicker:
             self._hotkey_error(exc)
             return
         self.registered_hotkey = self.hotkey
+        self.store.data["hotkey"] = self.hotkey.to_json()
+        self.store.save()
         self.hotkey_label.config(text=self.hotkey.label(), fg=INK)
         self.apply_button.set_enabled(False)
         self.status.set("OFF", BAD, f"{self.hotkey.label()} toggles")

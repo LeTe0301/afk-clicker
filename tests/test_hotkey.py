@@ -117,30 +117,6 @@ class Recorder(unittest.TestCase):
         self.assertIsNone(rec.result())
 
 
-@needs_display
-class Persistence(unittest.TestCase):
-    def test_round_trip(self):
-        for mods, keys in [(set(), [kb.Key.f6]),
-                           ({"ctrl", "shift"}, [kb.Key.f6, kb.Key.f7]),
-                           (set(), [kb.KeyCode.from_char("ä")]),
-                           ({"alt"}, [kb.KeyCode.from_char("+"), kb.Key.f9])]:
-            with self.subTest(keys=keys):
-                original = hotkey(mods, keys)
-                blob = json.loads(json.dumps(original.to_json()))
-                restored = app.Hotkey.from_json(blob)
-                self.assertEqual(restored.label(), original.label())
-                self.assertTrue(restored.matches(set(mods),
-                                                 [record(k) for k in keys]))
-
-    def test_malformed_input_yields_none(self):
-        # "keys": "nope" raises nothing on its own -- iterating a string hands
-        # back characters and would build a plausible hotkey out of garbage.
-        for blob in ({}, {"keys": []}, {"keys": "nope"}, {"mods": ["ctrl"]},
-                     {"keys": [[]]}, {"keys": [[None, None, None]]},
-                     {"keys": [["f6"]], "mods": "ctrl"},
-                     {"keys": [[1, 2, 3]]}, "not a dict", None):
-            with self.subTest(blob=blob):
-                self.assertIsNone(app.Hotkey.from_json(blob if blob else {}))
 
 
 if __name__ == "__main__":

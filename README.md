@@ -121,16 +121,44 @@ Jobs im Workflow.
 
 ## Release bauen lassen
 
+**Ein Tag veröffentlicht nichts mehr.** Releases laufen über einen
+`release/{version}`-Branch:
+
 ```
-git tag v0.4.0
-git push github v0.4.0
+git switch -c release/0.4.0
+git push github release/0.4.0
 ```
 
-Baut alle drei Plattformen und hängt die Archive an ein Release. Ohne Tag lässt
-sich der Workflow im Actions-Tab von Hand starten; das Ergebnis liegt dann als
-Artifact.
+Die Pipeline läuft dann in dieser Reihenfolge:
 
-Jeder Job startet die gebaute Anwendung anschließend mit `--selftest`, das jeden
-verzögert aufgelösten Backend-Import anfasst. Ein fehlender Hidden-Import fällt
-sonst nirgends auf: Eine `--windowed`-Anwendung hat keine Konsole, es passiert
-einfach nichts — beim Nutzer, nach dem Release.
+1. **Vollständige Testsuite**, inklusive des langsamen Tastendruck-Sweeps, den
+   der PR-Durchlauf auslässt.
+2. **Versionsabgleich** — schlägt fehl, wenn `__version__` im Code nicht zum
+   Branchnamen passt. Eine Binärdatei, die eine falsche Version meldet, macht
+   den eingebauten Updater dauerhaft blind für neue Versionen.
+3. **Drei Builds** mit `--selftest` auf jeder Plattform.
+4. **Manuelle Freigabe.** Die Pipeline hält an und wartet. Nichts landet ohne
+   diesen Klick auf der Releases-Seite.
+5. **Veröffentlichung** mit `SHA256SUMS`, getaggt auf genau dem Commit, der
+   getestet wurde.
+
+Das Gate ist ein GitHub-Environment namens `release` mit *Required reviewers*
+(Settings → Environments). **Ohne dieses Environment läuft Schritt 4 einfach
+durch** und die Freigabe existiert nur auf dem Papier.
+
+Ohne Branch lässt sich der Workflow im Actions-Tab von Hand starten; die
+Version wird dann abgefragt und auf `MAJOR.MINOR.PATCH` geprüft.
+
+## Tests
+
+```
+xvfb-run -a python -m unittest discover -s tests -t .
+```
+
+Unter Linux braucht die Suite ein Display: pynput löst sein Backend beim Import
+auf und scheitert ohne X-Server. Auf CI ist das ein Fehler, kein Grund zu
+überspringen — die Suite bricht dort ab, statt „OK (skipped=57)" zu melden und
+eine grüne Pipeline vorzutäuschen.
+
+Der langsame Akkord-Sweep synthetisiert echte Tastendrücke und läuft nur mit
+`AFK_SLOW_TESTS=1`.

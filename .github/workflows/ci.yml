@@ -9,9 +9,22 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # The suite used to run on Linux only, which left the Windows and macOS
+    # code paths -- %APPDATA%, the .app bundle nesting, file:// URLs on a
+    # drive path -- covered by nothing but a build. macOS is allowed to fail
+    # for now: pynput's listener needs Accessibility permission, which a CI
+    # runner cannot grant, so a red result there is not necessarily the code.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,10 +38,23 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pynput
-          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+          pip install "pynput==1.7.7"
+
+      - name: Install a virtual display (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
 
       # pynput resolves its X11 backend at import time and raises without a
-      # display, so the whole suite needs one -- not just the window tests.
-      - name: Run the test suite
+      # display, so on Linux the whole suite needs one -- not just the window
+      # tests. Windows and macOS have a window server either way.
+      - name: Run the test suite (Linux)
+        if: runner.os == 'Linux'
+        env:
+          CI: "true"
         run: xvfb-run -a python -m unittest discover -s tests -t . -v
+
+      - name: Run the test suite (Windows / macOS)
+        if: runner.os != 'Linux'
+        env:
+          CI: "true"
+        run: python -m unittest discover -s tests -t . -v

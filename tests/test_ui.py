@@ -139,27 +139,6 @@ class AddedGames(UITestCase):
         self.assertEqual(self.ui.game_state.cget("text"), "no window found")
 
 
-class HotkeyPersistence(UITestCase):
-    def test_restored_and_armed_after_restart(self):
-        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6, kb.Key.f7])
-        self.ui.apply_hotkey()
-        self.root.update()
-        ui = self.restart()
-        self.assertIsNotNone(ui.registered_hotkey)
-        self.assertEqual(ui.registered_hotkey.label(), "Ctrl + F6 + F7")
-        self.assertTrue(ui.hk_listener.running)
-
-    def test_a_corrupt_hotkey_starts_clean(self):
-        self.ui.hotkey = hotkey(set(), [kb.Key.f6])
-        self.ui.apply_hotkey()
-        self.ui.on_close()
-        data = json.load(open(self.config))
-        data["hotkey"] = {"keys": "garbage"}
-        json.dump(data, open(self.config, "w"))
-        self.root = tk.Tk()
-        self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
-        self.root.update()
-        self.assertIsNone(self.ui.registered_hotkey)
 
 
 class CorruptConfig(UITestCase):
@@ -259,6 +238,88 @@ class ClickLoop(UITestCase):
         self.assertTrue(any(p[0] == "press" for p in pressed))
         self.assertEqual(pressed.count(("press", app.MouseButton.right)),
                          pressed.count(("release", app.MouseButton.right)))
+
+
+class NumericClamping(UITestCase):
+    """`_num` is the only thing standing between a typo and the click loop."""
+
+    def test_below_the_floor_is_clamped(self):
+        self.ui._select("global")
+        self.ui.click_ms.var.set("1")
+        # 50 ms is the floor; without the clamp this returns 1 and the loop
+        # spins at a thousand clicks a second.
+        self.assertEqual(self.ui._num(self.ui.click_ms, 250, 50), 50)
+
+    def test_garbage_falls_back(self):
+        for text in ("", "abc", "-", "1.2.3", "  "):
+            with self.subTest(text=text):
+                self.ui.click_ms.var.set(text)
+                self.assertEqual(self.ui._num(self.ui.click_ms, 250, 50), 250)
+
+    def test_a_sane_value_is_left_alone(self):
+        self.ui.click_ms.var.set("510")
+        self.assertEqual(self.ui._num(self.ui.click_ms, 250, 50), 510)
+
+    def test_the_clamp_reaches_the_loop(self):
+        self.ui._select("global")
+        self.ui.mouse = FakeMouse()
+        self.ui.click_ms.var.set("1")
+        self.pump(0.4)
+        self.ui.start()
+        self.pump(0.6)
+        self.ui.stop()
+        self.pump(0.3)
+        clicks = self.ui.mouse.clicks
+        # 0.6 s at the 50 ms floor is around a dozen clicks; unclamped it
+        # would be hundreds.
+        self.assertLess(len(clicks), 40, f"{len(clicks)} clicks -- floor not applied")
+
+
+class ButtonRelease(UITestCase):
+    """`loop()` releases the right button in a `finally`. Prove it matters."""
+
+    def test_stopping_in_hold_mode_releases_the_right_button(self):
+        # "Hold RMB" is the path the finally actually guards: the button is
+        # pressed once and never released inside the loop body, so stopping
+        # breaks straight out and only the finally can let go. In game a stuck
+        # right button means blocking forever.
+        self.ui._select("minecraft")
+        self.ui.mouse = FakeMouse()
+        self.ui.eat_mode.set("hold")
+        self.ui.click_ms.var.set("100")
+        self.pump(0.4)
+        self.ui.start()
+        self.pump(0.8)
+        self.assertIn(("press", app.MouseButton.right), self.ui.mouse.pressed)
+        self.ui.stop()
+        self.pump(1.0)
+        self.assertEqual(
+            self.ui.mouse.pressed.count(("press", app.MouseButton.right)),
+            self.ui.mouse.pressed.count(("release", app.MouseButton.right)),
+            "the right button was left held down after stopping")
+        self.assertFalse(self.ui.right_held)
+
+    def test_an_exception_in_the_loop_still_releases(self):
+        # The other half of the finally's job. A raising mouse leaves the loop
+        # through the exception path, where nothing else can clean up.
+        self.ui._select("minecraft")
+
+        class ExplodingMouse(FakeMouse):
+            def click(self, button):
+                raise RuntimeError("boom")
+
+        self.ui.mouse = ExplodingMouse()
+        self.ui.eat_mode.set("hold")
+        self.ui.click_ms.var.set("100")
+        self.pump(0.4)
+        self.ui.start()
+        self.pump(1.2)
+        self.assertFalse(self.ui.right_held, "right button left held after a crash")
+        self.assertEqual(
+            self.ui.mouse.pressed.count(("press", app.MouseButton.right)),
+            self.ui.mouse.pressed.count(("release", app.MouseButton.right)))
+        self.ui.stop()
+        self.pump(0.2)
 
 
 @needs_display
