@@ -15,7 +15,15 @@ class KeyIdentity(unittest.TestCase):
     def test_altgr_is_not_alt(self):
         # On a German layout AltGr produces characters; treating it as Alt
         # would make AltGr+key indistinguishable from Alt+key.
-        self.assertEqual(app._mod_base(kb.Key.alt_gr), "altgr")
+        #
+        # Mac keyboards have no AltGr, and pynput's darwin backend aliases
+        # Key.alt_gr onto Key.alt -- the member's own name is "alt" there, so
+        # there is nothing to keep apart. Assert the distinction only where the
+        # platform actually makes one.
+        if kb.Key.alt_gr.name == "alt_gr":
+            self.assertEqual(app._mod_base(kb.Key.alt_gr), "altgr")
+        else:
+            self.assertEqual(app._mod_base(kb.Key.alt_gr), "alt")
         self.assertEqual(app._mod_base(kb.Key.alt_l), "alt")
 
     def test_plain_keys_are_not_modifiers(self):
