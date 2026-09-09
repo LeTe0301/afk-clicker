@@ -21,7 +21,7 @@ if errorlevel 1 (
 echo.
 echo === Installing build dependencies ===
 py -m pip install --upgrade pip
-py -m pip install --upgrade pyinstaller pynput keyboard
+py -m pip install --upgrade pyinstaller pynput
 if errorlevel 1 (
     echo.
     echo   Dependency install failed -- see the error above.
@@ -33,10 +33,10 @@ echo.
 echo === Building ===
 REM --windowed          : it is a Tk app, so no console window behind it
 REM --noupx             : UPX compression is a major antivirus red flag
-REM --hidden-import ... : pynput and keyboard choose their platform backend at
-REM                       import time, so PyInstaller cannot see the Windows
-REM                       ones by static analysis and would ship a build that
-REM                       dies on launch with ImportError
+REM --hidden-import ... : pynput chooses its platform backend at import time,
+REM                       so PyInstaller cannot see the Windows one by static
+REM                       analysis and would ship a build that dies on launch
+REM                       with ImportError
 REM
 REM Deliberately NOT --onefile: a single .exe unpacks itself into %TEMP% on
 REM every launch, which is slower and is the single biggest trigger for
@@ -49,6 +49,9 @@ REM   --uac-admin
 REM to the line below and rebuild. That makes the program ask for
 REM administrator rights on every start (UAC prompt), which is only needed
 REM when the window you send clicks to is itself running elevated.
+REM
+REM You almost certainly do not need to run this at all -- the Releases page
+REM has a prebuilt .exe. This is only for building from source.
 
 py -m PyInstaller --noconfirm --clean ^
     --name "AFK Farm Clicker" ^
@@ -56,7 +59,6 @@ py -m PyInstaller --noconfirm --clean ^
     --noupx ^
     --hidden-import pynput.mouse._win32 ^
     --hidden-import pynput.keyboard._win32 ^
-    --hidden-import keyboard._winkeyboard ^
     afk_clicker.py
 
 if errorlevel 1 (
