@@ -309,7 +309,7 @@ class HotkeyWatcher:
 # Deliberately below 1.0: the interface and the per-game settings format are
 # still moving, and semver reserves 1.0.0 for the point where they stop. Until
 # then only the minor and patch parts advance.
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 GITHUB_REPO = "LeTe0301/afk-clicker"
 
 # Which release asset belongs to which platform. Keep in step with the
@@ -341,25 +341,30 @@ class NoReleases(Exception):
 
 def latest_release(timeout=10):
     """
-    The newest published release.
+    The highest-versioned published release.
 
-    Raises NoReleases on a 404 so the caller can say "nothing published" rather
-    than "GitHub unreachable" -- they are different problems and only one of
-    them is worth retrying.
+    Not /releases/latest. GitHub picks that one by creation time, not by
+    version, so re-tagging or a build that finishes out of order makes it point
+    at an older release -- observed here reporting v0.1.0 as latest while
+    v0.3.0 was published. Sorting the list by parsed version is the only answer
+    that cannot be surprised by publish order.
     """
     request = urllib.request.Request(
-        f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+        f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30",
         headers={"Accept": "application/vnd.github+json",
                  "User-Agent": f"AFKFarmClicker/{__version__}"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise NoReleases from exc
-        return None
+            releases = json.load(response)
     except Exception:
         return None
+    if not isinstance(releases, list):
+        return None
+    usable = [r for r in releases
+              if not r.get("draft") and not r.get("prerelease") and r.get("tag_name")]
+    if not usable:
+        raise NoReleases
+    return max(usable, key=lambda r: _version_tuple(r["tag_name"]))
 
 
 def pick_asset(release):
