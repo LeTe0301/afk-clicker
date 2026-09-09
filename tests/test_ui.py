@@ -43,11 +43,17 @@ class UITestCase(unittest.TestCase):
             pass
 
     def pump(self, seconds):
-        """Run Tk's loop -- after() work, including the snapshot, only runs here."""
+        """
+        Run Tk's loop -- after() work, including the snapshot, only runs here.
+
+        The sleep is 25 ms rather than 10: a tighter loop spends most of its
+        time holding the GIL inside root.update(), which starves the clicking
+        thread and shows up as an interval that looks slower than it is.
+        """
         end = time.monotonic() + seconds
         while time.monotonic() < end:
             self.root.update()
-            time.sleep(0.01)
+            time.sleep(0.025)
 
     def restart(self):
         self.ui.on_close()

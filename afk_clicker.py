@@ -1428,7 +1428,14 @@ class AfkAutoclicker:
                 self.mouse.click(button)
                 if not self._sleep(interval):
                     break
+        except Exception as exc:
+            # Without this the flag stays set: the window keeps saying RUNNING,
+            # the hotkey thinks it is already on and toggling does nothing,
+            # and no click has happened since the throw.
+            self._ui(self.status.set, "ERROR", BAD, str(exc)[:32])
+            self.running = False
         finally:
+            self.running = False
             self._release_right()
 
     def on_close(self):

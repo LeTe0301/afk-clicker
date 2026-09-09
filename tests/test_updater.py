@@ -5,7 +5,6 @@ import tarfile
 import tempfile
 import pathlib
 import unittest
-import urllib.error
 import urllib.request
 import zipfile
 
@@ -115,17 +114,25 @@ class SwapScript(unittest.TestCase):
                             "the swap script must never land in the filesystem root")
 
     def test_a_shallow_staging_path_does_not_walk_up_to_the_root(self):
-        # This is the case the guard exists for, and the one the deepened
-        # fixture above no longer reaches. write_swap_script goes two
-        # directories up from `staged`; from "/tmp/xyz" that is "/", and the
-        # script was written into the filesystem root. Without the guard this
-        # test fails; the fixture-based one above passes either way.
-        shallow = tempfile.mkdtemp()                      # one level deep
-        self.assertEqual(os.path.dirname(os.path.dirname(os.path.abspath(shallow))),
-                         os.sep, "fixture assumption: tmpdir must be one level deep")
+        # The case the guard exists for, and the one the deepened fixture above
+        # no longer reaches. write_swap_script goes two directories up from
+        # `staged`; when that lands on the filesystem root the script was
+        # written into it.
+        #
+        # The path is constructed rather than taken from mkdtemp: a temp
+        # directory is two levels deep on Linux ("/tmp/x") but far deeper on
+        # Windows ("C:\\Users\\RUNNER~1\\AppData\\Local\\Temp\\x") and macOS
+        # ("/var/folders/.../x"), so the previous version asserted a Linux-only
+        # precondition and failed outright on the other two. It never touches
+        # the disk -- write_swap_script only reads it as a string.
+        root = os.path.abspath(os.sep)
+        shallow = os.path.join(root, "staged", "AFK Farm Clicker")
+        two_up = os.path.dirname(os.path.dirname(shallow))
+        self.assertEqual(two_up, root, "constructed path must sit two below the root")
+
         script = app.write_swap_script(shallow, self.target, "/bin/true")
         parent = os.path.dirname(os.path.abspath(script))
-        self.assertNotEqual(parent, os.sep,
+        self.assertNotEqual(parent, root,
                             f"swap script landed in the filesystem root: {script}")
         self.assertTrue(os.access(parent, os.W_OK))
 
@@ -148,10 +155,34 @@ class SwapScript(unittest.TestCase):
         for lethal in ("kill -9", "kill -15", "kill -TERM", "taskkill"):
             self.assertNotIn(lethal, body)
 
-    def test_staging_lives_outside_the_target(self):
-        # The script deletes the target wholesale; it must not be deleting the
-        # files it is about to copy from.
-        self.assertFalse(self.staged.startswith(self.target))
+    def test_the_script_never_deletes_what_it_copies_from(self):
+        # Comparing two independently created temp directories was tautological
+        # -- they could never overlap, so the assertion held no matter what
+        # write_swap_script did. What matters is the relationship the *script*
+        # sets up between the two paths it was handed.
+        body = open(self.script, encoding="utf-8").read()
+        staged, target = os.path.abspath(self.staged), os.path.abspath(self.target)
+        self.assertFalse(
+            os.path.commonpath([staged, target]) in (staged, target),
+            "the staging tree and the target must not contain one another")
+        # And the destructive step must name the target, never the source.
+        for line in body.splitlines():
+            if "-delete" in line or "/MIR" in line or line.strip().startswith("rm -rf"):
+                self.assertNotIn(staged, line,
+                                 f"destructive step touches the staging tree: {line}")
+
+    def test_the_script_copies_and_relaunches(self):
+        # The wait loop was asserted; the two steps that make it an update
+        # rather than a deletion were not.
+        body = open(self.script, encoding="utf-8").read()
+        self.assertIn(self.staged, body)
+        self.assertIn(self.target, body)
+        if app.sys.platform == "win32":
+            self.assertIn("robocopy", body)
+            self.assertIn("start", body)
+        else:
+            self.assertIn("cp -a", body)
+        self.assertIn("/bin/true", body, "the new build is never started")
 
 
 @needs_display
