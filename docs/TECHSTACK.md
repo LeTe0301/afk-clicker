@@ -55,7 +55,23 @@ host's glibc, so a newer host produces a binary that refuses to start on older
 distributions.
 
 macOS archives are packed with `ditto`, not `zip`, or the bundle's symlinks and
-permission bits are mangled and Finder refuses to open the app.
+permission bits are mangled and Finder refuses to open the app. The smoke test
+runs the binary inside the bundle directly rather than `open`ing the app:
+`open` returns as soon as it has handed off and tells you nothing about the
+exit status.
+
+`fail-fast: false` on the build matrix: a broken macOS runner should still
+leave a usable Windows archive behind, and one platform's failure must not
+hide the other two.
+
+### Pinning
+
+Every build input is pinned to an exact version — `pynput`, `pyinstaller`, and
+the release action, which holds the only write token in the pipeline. A
+floating dependency can change what ships without a single commit here, and
+for a program whose whole job is synthesising input, a changed input backend is
+not a detail. `build.bat` pins the same versions CI does, so a local build
+cannot quietly differ from the published one.
 
 ## Platform limits worth stating plainly
 
