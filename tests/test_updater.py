@@ -194,6 +194,14 @@ class SwapScript(unittest.TestCase):
         else:
             self.assertIn("cp -a", body)
         self.assertIn("/bin/true", body, "the new build is never started")
+        # And it must clear the old installation first. Without this line the
+        # update is a copy-over: every file dropped between releases survives
+        # forever, and nothing else in the suite notices.
+        if app.sys.platform == "win32":
+            self.assertIn("/MIR", body, "robocopy would not prune the old build")
+        else:
+            self.assertIn("-mindepth 1 -delete", body,
+                          "the old installation is never cleared")
 
 
 @needs_display
