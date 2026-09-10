@@ -1,7 +1,7 @@
 """The window: per-game settings, persistence, detection and the click loop."""
 import json
 import os
-import unittest as _unittest_early  # noqa: F401 (decorator built at class scope)
+import threading
 import tempfile
 import time
 import unittest
@@ -36,12 +36,34 @@ class UITestCase(unittest.TestCase):
         self.root = tk.Tk()
         self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
         self.root.update()
+        self.settle()
 
     def tearDown(self):
         try:
             self.ui.on_close()
         except tk.TclError:
             pass
+
+    def settle(self, timeout=5.0):
+        """
+        Wait for the startup game scan to land.
+
+        _poll_games runs on a thread during construction and hands its result
+        to the UI queue; _drain_ui's 40 ms timer then delivers it inside
+        whatever root.update() happens to run next -- including one inside a
+        test, after that test has set the state it is about to assert on.
+        Pinning _seen_running addressed a different assertion and left this.
+
+        _seen_running only exists once _mark_running has run, so it is the
+        signal to wait for rather than a sleep long enough to hope.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.root.update()
+            if hasattr(self.ui, "_seen_running"):
+                return
+            time.sleep(0.02)
+        self.fail("the startup game scan never landed")
 
     def pump(self, seconds):
         """
@@ -69,10 +91,6 @@ class Sidebar(UITestCase):
         self.assertEqual(set(self.ui.items), {"minecraft", "global"})
 
     def test_running_dot_and_follow(self):
-        # _poll_games runs on a timer and calls _mark_running with whatever is
-        # really on screen. On a slower runner it landed between these lines
-        # and reset _seen_running, so the follow never happened. Pin the
-        # starting state instead of racing it.
         self.ui._seen_running = set()
         self.ui._mark_running({"minecraft"})
         self.root.update()
@@ -368,6 +386,8 @@ class ButtonRelease(UITestCase):
 class Selftest(unittest.TestCase):
     def test_selftest_passes(self):
         self.assertEqual(app.selftest(), 0)
+
+
 
 
 if __name__ == "__main__":
