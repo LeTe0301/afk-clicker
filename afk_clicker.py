@@ -16,6 +16,7 @@ Requires: pynput   ->   pip install pynput
 Prebuilt binaries for Windows, Linux and macOS: see the Releases page.
 """
 
+import hashlib
 import json
 import os
 import queue
@@ -488,7 +489,84 @@ def install_root():
     return exe_dir
 
 
-def download_and_stage(asset, on_progress=None):
+CHECKSUM_ASSET = "SHA256SUMS"
+
+
+def pick_checksums(release):
+    for asset in (release or {}).get("assets", []):
+        if asset.get("name") == CHECKSUM_ASSET:
+            return asset
+    return None
+
+
+def fetch_checksums(asset, timeout=30):
+    """
+    The published digests, as {filename: sha256}.
+
+    sha256sum's format is "<hex>  <name>", two spaces, and a leading "*" on the
+    name marks binary mode -- strip it or nothing ever matches.
+    """
+    request = urllib.request.Request(
+        asset["browser_download_url"],
+        headers={"User-Agent": f"AFKFarmClicker/{__version__}"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        text = response.read().decode("utf-8", "replace")
+    sums = {}
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and len(parts[0]) == 64:
+            sums[parts[1].lstrip("*").strip()] = parts[0].lower()
+    return sums
+
+
+def file_digest(path, chunk=1024 * 1024):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(chunk), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+class ChecksumError(Exception):
+    """The download does not match what the release published."""
+
+
+def _safe_names(names, destination):
+    """
+    Reject any archive entry that would land outside the destination.
+
+    zipfile and tarfile both happily write "../../.bashrc": the name is used as
+    given. Publishing digests and then unpacking unsafely would leave open the
+    hole the digests were meant to close.
+    """
+    root = os.path.realpath(destination)
+    for name in names:
+        target = os.path.realpath(os.path.join(root, name))
+        if target != root and not target.startswith(root + os.sep):
+            raise ChecksumError(f"archive entry escapes the staging directory: {name}")
+
+
+def _safe_tar_members(members, destination):
+    """
+    Names plus entry kinds, checked here rather than left to tarfile.
+
+    `extractall(filter="data")` does this from Python 3.12 and is the default
+    from 3.14 -- but on 3.11 the argument does not exist, and falling back to a
+    plain extractall silently restores every hole. Verified: a symlink to
+    /etc/passwd was written to disk. Security that depends on the interpreter
+    the user happens to have is not security, so the check is explicit.
+    """
+    _safe_names([m.name for m in members], destination)
+    for member in members:
+        if member.issym() or member.islnk():
+            raise ChecksumError(f"archive contains a link entry: {member.name}")
+        if member.isdev() or member.isfifo():
+            raise ChecksumError(f"archive contains a device entry: {member.name}")
+        if not (member.isfile() or member.isdir()):
+            raise ChecksumError(f"archive contains an unexpected entry: {member.name}")
+
+
+def download_and_stage(asset, on_progress=None, checksums=None):
     """
     Fetch the release archive and unpack it into a staging directory.
 
@@ -514,14 +592,33 @@ def download_and_stage(asset, on_progress=None):
             if on_progress and total:
                 on_progress(done / total)
 
+    # Verify before unpacking, not after: extraction is the step that puts
+    # attacker-controlled names onto the filesystem.
+    if checksums is not None:
+        expected = checksums.get(asset["name"])
+        if expected is None:
+            raise ChecksumError(f"{asset['name']} is not listed in {CHECKSUM_ASSET}")
+        actual = file_digest(archive)
+        if actual != expected:
+            raise ChecksumError(
+                f"checksum mismatch: expected {expected[:12]}…, got {actual[:12]}…")
+
     staged = os.path.join(workdir, "staged")
     os.makedirs(staged, exist_ok=True)
     if archive.endswith(".zip"):
         with zipfile.ZipFile(archive) as zf:
+            _safe_names(zf.namelist(), staged)
             zf.extractall(staged)
     else:
         with tarfile.open(archive) as tf:
-            tf.extractall(staged)
+            members = tf.getmembers()
+            _safe_tar_members(members, staged)
+            # filter="data" as well where it exists: belt and braces, and it
+            # also strips ownership and permission bits we have no use for.
+            try:
+                tf.extractall(staged, members=members, filter="data")
+            except TypeError:
+                tf.extractall(staged, members=members)
 
     # The Linux and macOS archives keep their top-level folder; flatten it so
     # every platform hands the swap script the same shape.
@@ -1234,7 +1331,7 @@ class AfkAutoclicker:
         if asset is None:
             self._ui(self._set_update_state, f"{tag}: no build for this OS", True, BAD)
             return
-        self._pending = (tag, asset)
+        self._pending = (tag, asset, release)
         self._ui(self._offer_update, tag)
 
     def _offer_update(self, tag):
@@ -1254,10 +1351,18 @@ class AfkAutoclicker:
         threading.Thread(target=self._install_worker, daemon=True).start()
 
     def _install_worker(self):
-        tag, asset = self._pending
+        tag, asset, release = self._pending
         try:
+            sums_asset = pick_checksums(release)
+            if sums_asset is None:
+                # Fail closed. An update that cannot be checked is exactly the
+                # one worth refusing: it downloads code and then runs it.
+                self._ui(self._set_update_state,
+                         f"{tag} publishes no {CHECKSUM_ASSET}", True, BAD)
+                return
+            checksums = fetch_checksums(sums_asset)
             staged = download_and_stage(
-                asset,
+                asset, checksums=checksums,
                 on_progress=lambda f: self._ui(self._set_update_state,
                                                f"Downloading… {f * 100:.0f}%", False))
             target = install_root()
@@ -1265,6 +1370,11 @@ class AfkAutoclicker:
                 self._ui(self._set_update_state, "Install folder is read-only", True, BAD)
                 return
             script = write_swap_script(staged, target, sys.executable)
+        except ChecksumError as exc:
+            # Say what happened. "Update failed" for a digest mismatch reads
+            # like a network problem and invites a retry.
+            self._ui(self._set_update_state, str(exc)[:40], True, BAD)
+            return
         except Exception as exc:
             self._ui(self._set_update_state, f"Update failed: {exc}"[:40], True, BAD)
             return

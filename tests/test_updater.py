@@ -3,6 +3,7 @@ import json
 import os
 import tarfile
 import tempfile
+import hashlib
 import pathlib
 import unittest
 import urllib.request
@@ -94,6 +95,150 @@ class Staging(unittest.TestCase):
                     self.assertEqual(fh.read(), "hello")
                 self.assertFalse(os.path.isdir(os.path.join(staged, "AFK Farm Clicker")),
                                  "the top-level folder should have been flattened away")
+
+
+@needs_display
+class Checksums(unittest.TestCase):
+    """The updater downloads code and then runs it. It must check what it got."""
+
+    def _release(self, names):
+        return {"assets": [{"name": n, "browser_download_url": "x"} for n in names]}
+
+    def test_picks_the_checksum_asset(self):
+        rel = self._release(["AFK-Farm-Clicker-windows-x64.zip", "SHA256SUMS"])
+        self.assertEqual(app.pick_checksums(rel)["name"], "SHA256SUMS")
+
+    def test_a_release_without_checksums(self):
+        self.assertIsNone(app.pick_checksums(self._release(["something.zip"])))
+        self.assertIsNone(app.pick_checksums({}))
+        self.assertIsNone(app.pick_checksums(None))
+
+    def test_parses_sha256sum_output(self):
+        digest = "a" * 64
+        blob = (f"{digest}  plain.zip\n"
+                f"{digest.upper()}  *binary-mode.tar.gz\n"
+                "not a checksum line\n"
+                f"{'b' * 63}  too-short.zip\n")
+        path = os.path.join(tempfile.mkdtemp(), "SHA256SUMS")
+        open(path, "w").write(blob)
+        sums = app.fetch_checksums(
+            {"browser_download_url": pathlib.Path(path).as_uri()})
+        # The leading "*" marks binary mode and is not part of the name; the
+        # digest is normalised to lower case so comparison cannot miss.
+        self.assertEqual(sums, {"plain.zip": digest, "binary-mode.tar.gz": digest})
+
+    def test_file_digest_matches_hashlib(self):
+        path = os.path.join(tempfile.mkdtemp(), "payload.bin")
+        data = os.urandom(3 * 1024 * 1024 + 7)      # spans several read chunks
+        open(path, "wb").write(data)
+        self.assertEqual(app.file_digest(path), hashlib.sha256(data).hexdigest())
+
+
+@needs_display
+class StagingSafety(unittest.TestCase):
+    """Verification happens before extraction, and extraction cannot escape."""
+
+    def _zip(self, entries):
+        base = tempfile.mkdtemp()
+        path = os.path.join(base, "pkg-windows-x64.zip")
+        with zipfile.ZipFile(path, "w") as zf:
+            for name, body in entries.items():
+                zf.writestr(name, body)
+        return path
+
+    def _asset(self, path):
+        return {"name": os.path.basename(path),
+                "browser_download_url": pathlib.Path(path).as_uri()}
+
+    def test_a_matching_digest_is_accepted(self):
+        path = self._zip({"AFK Farm Clicker/marker.txt": "hello"})
+        asset = self._asset(path)
+        staged = app.download_and_stage(
+            asset, checksums={asset["name"]: app.file_digest(path)})
+        self.assertTrue(os.path.isfile(os.path.join(staged, "marker.txt")))
+
+    def test_a_wrong_digest_is_refused(self):
+        path = self._zip({"AFK Farm Clicker/marker.txt": "hello"})
+        asset = self._asset(path)
+        with self.assertRaises(app.ChecksumError) as caught:
+            app.download_and_stage(asset, checksums={asset["name"]: "c" * 64})
+        self.assertIn("mismatch", str(caught.exception))
+
+    def test_an_unlisted_archive_is_refused(self):
+        path = self._zip({"AFK Farm Clicker/marker.txt": "hello"})
+        with self.assertRaises(app.ChecksumError):
+            app.download_and_stage(self._asset(path), checksums={"other.zip": "d" * 64})
+
+    def test_nothing_is_extracted_when_the_digest_is_wrong(self):
+        # Verification must come first: extraction is the step that puts
+        # attacker-controlled names onto the filesystem.
+        path = self._zip({"AFK Farm Clicker/marker.txt": "hello"})
+        asset = self._asset(path)
+        before = set(os.listdir(os.path.dirname(path)))
+        with self.assertRaises(app.ChecksumError):
+            app.download_and_stage(asset, checksums={asset["name"]: "e" * 64})
+        marker = os.path.join(os.path.dirname(path), "staged")
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(set(os.listdir(os.path.dirname(path))) - before, set())
+
+    def test_an_entry_escaping_the_directory_is_refused(self):
+        # zipfile writes the member name as given; "../.." lands outside.
+        path = self._zip({"../../escaped.txt": "gotcha"})
+        asset = self._asset(path)
+        with self.assertRaises(app.ChecksumError) as caught:
+            app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
+        self.assertIn("escapes", str(caught.exception))
+
+    def test_an_absolute_entry_is_refused(self):
+        path = self._zip({"/tmp/afk-clicker-escape.txt": "gotcha"})
+        asset = self._asset(path)
+        with self.assertRaises(app.ChecksumError):
+            app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
+
+    def _tar_with(self, extra):
+        base = tempfile.mkdtemp()
+        payload = os.path.join(base, "tree")
+        os.makedirs(payload)
+        with open(os.path.join(payload, "marker.txt"), "w") as fh:
+            fh.write("hello")
+        extra(payload)
+        path = os.path.join(base, "pkg-linux-x86_64.tar.gz")
+        with tarfile.open(path, "w:gz") as tf:
+            tf.add(payload, arcname="AFK Farm Clicker")
+        return path
+
+    def test_a_plain_tar_is_accepted(self):
+        path = self._tar_with(lambda d: None)
+        asset = self._asset(path)
+        staged = app.download_and_stage(
+            asset, checksums={asset["name"]: app.file_digest(path)})
+        self.assertTrue(os.path.isfile(os.path.join(staged, "marker.txt")))
+
+    def test_a_tar_symlink_is_refused(self):
+        # The reason this is checked explicitly rather than left to
+        # extractall(filter="data"): that argument does not exist before
+        # Python 3.12, and the fallback path wrote the symlink to disk.
+        path = self._tar_with(
+            lambda d: os.symlink("/etc/passwd", os.path.join(d, "link")))
+        asset = self._asset(path)
+        with self.assertRaises(app.ChecksumError) as caught:
+            app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
+        self.assertIn("link entry", str(caught.exception))
+
+    def test_a_tar_hardlink_is_refused(self):
+        def add_hardlink(d):
+            os.link(os.path.join(d, "marker.txt"), os.path.join(d, "hard"))
+        path = self._tar_with(add_hardlink)
+        asset = self._asset(path)
+        with self.assertRaises(app.ChecksumError):
+            app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
+
+    def test_a_tar_fifo_is_refused(self):
+        path = self._tar_with(lambda d: os.mkfifo(os.path.join(d, "pipe")))
+        asset = self._asset(path)
+        with self.assertRaises(app.ChecksumError) as caught:
+            app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
+        self.assertIn("device entry", str(caught.exception))
 
 
 @needs_display
