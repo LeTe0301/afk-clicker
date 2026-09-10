@@ -79,7 +79,9 @@ def selftest():
     lazily-resolved platform backend here so the build fails in CI instead.
     """
     Controller()                                  # pynput mouse backend
-    kb.Listener(on_press=lambda k: False)         # pynput keyboard backend
+    macos_input_permitted()                       # the guard itself must load
+    if macos_input_permitted():
+        kb.Listener(on_press=lambda k: False)     # pynput keyboard backend
     Hotkey({"ctrl"}, [_record(kb.KeyCode.from_char("h"))]).label()
     Hotkey(set(), [_record(kb.Key.f6), _record(kb.Key.f7)]).label()
     tk.Tk().destroy()                             # Tcl/Tk actually bundled
@@ -126,6 +128,40 @@ _MOD_ORDER = {"ctrl": 0, "altgr": 1, "alt": 2, "shift": 3, "cmd": 4}
 # chord stops being something a keyboard can reliably deliver anyway: most
 # membrane boards ghost past two simultaneous keys in the same matrix row.
 MAX_CHORD = 3
+
+
+def macos_input_permitted():
+    """
+    Whether this process is allowed to observe and synthesise input on macOS.
+
+    pynput does not reliably *raise* when Accessibility permission is missing:
+    on a machine that has never granted it, creating the CoreGraphics event tap
+    can abort the process with SIGTRAP, which no except clause can catch. A CI
+    runner reproduced exactly that -- "Trace/BPT trap: 5", exit 133, mid-test.
+    A user would see the window vanish.
+
+    AXIsProcessTrusted answers the question without touching the event tap, so
+    the unrecoverable crash becomes a message telling them what to grant.
+    Returns True wherever the question does not apply. On macOS itself an
+    unanswerable question returns False, because the two mistakes do not cost
+    the same: a wrong True aborts the process, a wrong False shows a message.
+    """
+    if sys.platform != "darwin":
+        return True
+    try:
+        import ctypes
+        import ctypes.util
+        path = ctypes.util.find_library("ApplicationServices")
+        if not path:
+            return False        # same unanswerable question as the except below
+        lib = ctypes.cdll.LoadLibrary(path)
+        lib.AXIsProcessTrusted.restype = ctypes.c_bool
+        return bool(lib.AXIsProcessTrusted())
+    except Exception:
+        # On macOS an unanswerable question must read as "not permitted".
+        # Guessing True costs an uncatchable SIGTRAP that takes the window with
+        # it; guessing False costs a message the user can act on.
+        return False
 
 
 def _mod_base(key):
@@ -198,6 +234,56 @@ class Hotkey:
             return False
         return all(any(_same_key(spec, rec) for rec in held_keys)
                    for spec in self.keys)
+
+    def to_json(self):
+        return {"mods": sorted(self.mods), "keys": [list(k) for k in self.keys]}
+
+    @classmethod
+    def from_json(cls, blob):
+        """
+        None for anything malformed -- a damaged setting must not block startup.
+
+        Checked rather than wrapped in try/except: {"keys": "nope"} raises
+        nothing at all, because iterating a string hands back characters and
+        builds a plausible-looking hotkey out of garbage.
+        """
+        if not isinstance(blob, dict):
+            return None
+        raw, mods = blob.get("keys"), blob.get("mods", [])
+        if not isinstance(raw, (list, tuple)) or not raw:
+            return None
+        # Reject, do not filter. Dropping the entries that fail the check
+        # silently turned a saved Ctrl+Shift+F6 into an armed, firing Ctrl+F6 --
+        # a global hotkey the user never recorded, wearing a plausible label.
+        if not isinstance(mods, (list, tuple)):
+            return None
+        # Types before membership: `m not in _MOD_ORDER` hashes m, so a list or
+        # a dict in there raised TypeError straight out of __init__ and the
+        # window never opened -- the exact failure this function exists to
+        # prevent, reintroduced by the fix for the filtering above.
+        if not all(isinstance(m, str) for m in mods):
+            return None
+        if any(m not in _MOD_ORDER for m in mods):
+            return None
+        records = []
+        for entry in raw:
+            if not isinstance(entry, (list, tuple)) or not 1 <= len(entry) <= 3:
+                return None
+            name, vk, char = (list(entry) + [None, None, None])[:3]
+            if not (name is None or isinstance(name, str)):
+                return None
+            if not (vk is None or isinstance(vk, int)):
+                return None
+            if not (char is None or isinstance(char, str)):
+                return None
+            if name is None and vk is None and char is None:
+                return None
+            # Shape is not vocabulary: "bogus" and "" are strings of the right
+            # type and would arm a hotkey no key can ever satisfy.
+            if name is not None and not hasattr(kb.Key, name):
+                return None
+            records.append((name, vk, char))
+        return cls(list(mods), records)
 
     def label(self):
         mods = sorted(self.mods, key=lambda m: _MOD_ORDER.get(m, 9))
@@ -959,6 +1045,11 @@ class AfkAutoclicker:
         self.content.pack_propagate(False)
         self._build_content(s)
 
+        saved = Hotkey.from_json(self.store.data.get("hotkey") or {})
+        if saved is not None:
+            self.hotkey = saved
+            self.apply_hotkey()
+
         self._select(self.current, persist=False)
         self._timers = []
         self._sync_settings()
@@ -1281,6 +1372,9 @@ class AfkAutoclicker:
         self.capture_thread.start()
 
     def capture_hotkey(self):
+        if not macos_input_permitted():
+            self._ui(self._hotkey_error, "Accessibility permission not granted")
+            return
         rec = HotkeyRecorder()
         try:
             with kb.Listener(on_press=rec.press, on_release=rec.release) as listener:
@@ -1319,6 +1413,14 @@ class AfkAutoclicker:
         if self.hk_listener is not None:
             self.hk_listener.stop()
             self.hk_listener = None
+        if not macos_input_permitted():
+            # Starting the listener here would trap, not raise. Show the label
+            # and keep the recorded combination so applying it again after the
+            # permission is granted just works.
+            self.registered_hotkey = self.hotkey
+            self.hotkey_label.config(text=self.hotkey.label(), fg=INK)
+            self._hotkey_error("Accessibility permission not granted")
+            return
         try:
             self.hk_listener = HotkeyWatcher(self.hotkey, self.toggle)
             self.hk_listener.start()
@@ -1327,6 +1429,8 @@ class AfkAutoclicker:
             self._hotkey_error(exc)
             return
         self.registered_hotkey = self.hotkey
+        self.store.data["hotkey"] = self.hotkey.to_json()
+        self.store.save()
         self.hotkey_label.config(text=self.hotkey.label(), fg=INK)
         self.apply_button.set_enabled(False)
         self.status.set("OFF", BAD, f"{self.hotkey.label()} toggles")

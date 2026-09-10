@@ -187,5 +187,133 @@ class Recorder(unittest.TestCase):
 
 
 
+@needs_display
+class Persistence(unittest.TestCase):
+    def test_round_trip(self):
+        for mods, keys in [(set(), [kb.Key.f6]),
+                           ({"ctrl", "shift"}, [kb.Key.f6, kb.Key.f7]),
+                           (set(), [kb.KeyCode.from_char("ä")]),
+                           ({"alt"}, [kb.KeyCode.from_char("+"), kb.Key.f9])]:
+            with self.subTest(keys=keys):
+                original = hotkey(mods, keys)
+                blob = json.loads(json.dumps(original.to_json()))
+                restored = app.Hotkey.from_json(blob)
+                self.assertEqual(restored.label(), original.label())
+                self.assertTrue(restored.matches(set(mods),
+                                                 [record(k) for k in keys]))
+
+    def test_a_dropped_vk_is_not_silently_survivable(self):
+        # KeyCode.from_char() leaves vk as None, so a round-trip built from one
+        # passes even if to_json stops writing vk at all. Use a record that
+        # carries one -- the shape a real X11 or Win32 event has.
+        original = app.Hotkey(set(), [(None, 97, "a")])
+        restored = app.Hotkey.from_json(json.loads(json.dumps(original.to_json())))
+        self.assertEqual(restored.keys[0][1], 97, "the virtual key code was lost")
+        # And it must still match an event carrying only the vk, which is what
+        # arrives once a modifier changes the character.
+        self.assertTrue(restored.matches(set(), [(None, 97, None)]))
+
+    def test_bad_modifiers_are_rejected_not_filtered(self):
+        # Filtering turned a saved Ctrl+Shift+F6 into an armed, firing Ctrl+F6:
+        # a global hotkey the user never recorded, with a plausible label.
+        good = {"mods": ["ctrl", "shift"], "keys": [["f6", 65475, None]]}
+        self.assertEqual(app.Hotkey.from_json(good).label(), "Ctrl + Shift + F6")
+        for mods in (["ctrl", 0], ["ctrl", None], ["ctrl", "bogus"], ["CTRL"], [""]):
+            with self.subTest(mods=mods):
+                self.assertIsNone(app.Hotkey.from_json(
+                    {"mods": mods, "keys": [["f6", 65475, None]]}))
+
+    def test_unknown_key_names_are_rejected(self):
+        # Shape is not vocabulary: "no_such_key" is a string of the right type
+        # and would arm a hotkey nothing can ever satisfy.
+        for name in ("bogus", "", "no_such_key", "F6"):
+            with self.subTest(name=name):
+                self.assertIsNone(app.Hotkey.from_json({"keys": [[name, None, None]]}))
+        self.assertIsNotNone(app.Hotkey.from_json({"keys": [["f6", None, None]]}))
+
+    def test_unhashable_modifiers_do_not_raise(self):
+        # `m not in _MOD_ORDER` hashes m. A list or a dict in "mods" raised
+        # TypeError out of __init__ and the window never opened -- a damaged
+        # setting must start clean, never block startup.
+        for mods in ([["ctrl"]], [{"ctrl": 1}], [{"a"}], [("ctrl",)]):
+            with self.subTest(mods=mods):
+                self.assertIsNone(app.Hotkey.from_json(
+                    {"mods": mods, "keys": [["f6", 65475, None]]}))
+
+    def test_every_rejection_path_is_reachable(self):
+        # One case per guard, chosen so that removing that guard fails here
+        # rather than surviving because a later one happens to catch the same
+        # input. Two of these were originally chosen badly and did exactly
+        # that: {"mods": "ctrl"} and {"keys": ["f6"]} are both rejected by a
+        # later check, so the guards they were named after could be deleted
+        # with the suite still green. The dict and int cases reach them.
+        cases = {
+            "not a dict": "nope",
+            "keys missing": {"mods": []},
+            "keys not a sequence": {"keys": 7},
+            "keys empty": {"keys": []},
+            "mods not a sequence": {"keys": [["f6", 1, None]], "mods": "ctrl"},
+            # A dict *is* iterable and yields its keys, so without the
+            # isinstance check this is silently accepted as Ctrl + F6 -- the
+            # original filtering bug, wearing a plausible label.
+            "mods is a dict": {"keys": [["f6", 1, None]], "mods": {"ctrl": 1}},
+            "mods wrong type": {"keys": [["f6", 1, None]], "mods": [1]},
+            "mods unknown": {"keys": [["f6", 1, None]], "mods": ["hyper"]},
+            "entry not a sequence": {"keys": ["f6"]},
+            # An int is not iterable at all, so without the isinstance check
+            # this raises TypeError out of __init__ and the window never
+            # opens -- the same failure as the unhashable modifier.
+            "entry is an int": {"keys": [5]},
+            "entry too long": {"keys": [["f6", 1, None, "x"]]},
+            "entry empty": {"keys": [[]]},
+            "name wrong type": {"keys": [[7, None, None]]},
+            "vk wrong type": {"keys": [[None, "97", None]]},
+            "char wrong type": {"keys": [[None, None, 5]]},
+            "entry all null": {"keys": [[None, None, None]]},
+            "unknown key name": {"keys": [["no_such_key", None, None]]},
+        }
+        for label, blob in cases.items():
+            with self.subTest(case=label):
+                self.assertIsNone(app.Hotkey.from_json(blob), label)
+
+    def test_malformed_input_yields_none(self):
+        # "keys": "nope" raises nothing on its own -- iterating a string hands
+        # back characters and would build a plausible hotkey out of garbage.
+        for blob in ({}, {"keys": []}, {"keys": "nope"}, {"mods": ["ctrl"]},
+                     {"keys": [[]]}, {"keys": [[None, None, None]]},
+                     {"keys": [["f6"]], "mods": "ctrl"},
+                     {"keys": [[1, 2, 3]]}, "not a dict", None):
+            with self.subTest(blob=blob):
+                self.assertIsNone(app.Hotkey.from_json(blob if blob else {}))
+
+
+@needs_display
+class InputPermission(unittest.TestCase):
+    """
+    macos_input_permitted() decides whether a listener may be started at all.
+
+    It needs tests of its own: keying a skip off it meant forcing it False just
+    skipped the tests that would have caught the change, and forcing it True
+    changed nothing observable anywhere.
+    """
+
+    def test_true_off_darwin(self):
+        if app.sys.platform == "darwin":
+            self.skipTest("this asserts the non-macOS short circuit")
+        self.assertIs(app.macos_input_permitted(), True)
+
+    def test_false_on_darwin_when_the_question_cannot_be_answered(self):
+        # Pretend to be macOS on a machine with no ApplicationServices. The two
+        # mistakes do not cost the same: a wrong True is an uncatchable SIGTRAP
+        # that takes the window with it, a wrong False is a message.
+        if app.sys.platform == "darwin":
+            self.skipTest("only meaningful where the framework is absent")
+        original = app.sys.platform
+        app.sys.platform = "darwin"
+        try:
+            self.assertIs(app.macos_input_permitted(), False)
+        finally:
+            app.sys.platform = original
+
 if __name__ == "__main__":
     unittest.main()
