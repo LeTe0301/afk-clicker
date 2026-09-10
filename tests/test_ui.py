@@ -390,5 +390,79 @@ class Selftest(unittest.TestCase):
 
 
 
+class HotkeyPersistence(UITestCase):
+    # Applying a hotkey starts a pynput listener. Without macOS Accessibility
+    # permission that aborts the process with SIGTRAP rather than raising, so
+    # the app checks first and these tests follow the same signal -- the
+    # permission, not the platform, decides whether a listener can exist.
+    # Skipped on macOS outright, not merely when permission is missing.
+    # AXIsProcessTrusted reports trusted on the CI runner and the CoreGraphics
+    # event tap aborts the process anyway -- "Trace/BPT trap: 5", exit 133,
+    # which no except clause can catch and which takes the whole suite with it.
+    # So the permission check is necessary but not sufficient, and what else is
+    # involved is unattributed. Tracked in issue #7 rather than guessed at.
+    needs_input_permission = unittest.skipIf(
+        app is not None and app.sys.platform == "darwin",
+        "starting a listener aborts the process on macOS -- see issue #7")
+
+    @needs_input_permission
+    def test_restored_and_armed_after_restart(self):
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6, kb.Key.f7])
+        self.ui.apply_hotkey()
+        self.root.update()
+        ui = self.restart()
+        self.assertIsNotNone(ui.registered_hotkey)
+        self.assertEqual(ui.registered_hotkey.label(), "Ctrl + F6 + F7")
+        self.assertTrue(ui.hk_listener.running)
+
+    @needs_input_permission
+    def test_a_corrupt_hotkey_starts_clean(self):
+        self.ui.hotkey = hotkey(set(), [kb.Key.f6])
+        self.ui.apply_hotkey()
+        self.ui.on_close()
+        data = json.load(open(self.config))
+        data["hotkey"] = {"keys": "garbage"}
+        json.dump(data, open(self.config, "w"))
+        self.root = tk.Tk()
+        self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
+        self.root.update()
+        self.assertIsNone(self.ui.registered_hotkey)
+
+    def test_nothing_is_saved_when_no_hotkey_was_applied(self):
+        self.ui.on_close()
+        self.assertIsNone(json.load(open(self.config)).get("hotkey"))
+
+    def test_no_listener_is_started_without_permission(self):
+        # The guard, exercised directly rather than only on a Mac. Applying
+        # must keep the combination and the label so that granting the
+        # permission and pressing Apply again works without re-recording.
+        original = app.macos_input_permitted
+        app.macos_input_permitted = lambda: False
+        try:
+            self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
+            self.ui.apply_hotkey()
+            self.root.update()
+            self.assertIsNone(self.ui.hk_listener, "a listener was started anyway")
+            self.assertEqual(self.ui.registered_hotkey.label(), "Ctrl + F6")
+        finally:
+            app.macos_input_permitted = original
+
+    def test_capture_refuses_without_permission(self):
+        # On a worker with a deadline, never inline: capture_hotkey() blocks in
+        # listener.join() waiting for a key that never comes, so without the
+        # guard an inline call hangs the whole suite instead of failing it.
+        original = app.macos_input_permitted
+        app.macos_input_permitted = lambda: False
+        worker = threading.Thread(target=self.ui.capture_hotkey, daemon=True)
+        try:
+            worker.start()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive(),
+                             "capture_hotkey opened a listener instead of refusing")
+            self.pump(0.2)
+            self.assertIsNone(self.ui.hotkey)
+        finally:
+            app.macos_input_permitted = original
+
 if __name__ == "__main__":
     unittest.main()
