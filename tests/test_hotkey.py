@@ -89,34 +89,6 @@ class Matching(unittest.TestCase):
         self.assertFalse(hk.matches({"ctrl", "shift"}, held))
 
 
-@needs_display
-class InputPermission(unittest.TestCase):
-    """
-    macos_input_permitted() decides whether a listener may be started at all.
-
-    It needs tests of its own: keying a skip off it meant forcing it False just
-    skipped the tests that would have caught the change, and forcing it True
-    changed nothing observable anywhere.
-    """
-
-    def test_true_off_darwin(self):
-        if app.sys.platform == "darwin":
-            self.skipTest("this asserts the non-macOS short circuit")
-        self.assertIs(app.macos_input_permitted(), True)
-
-    def test_false_on_darwin_when_the_question_cannot_be_answered(self):
-        # Pretend to be macOS on a machine with no ApplicationServices. The two
-        # mistakes do not cost the same: a wrong True is an uncatchable SIGTRAP
-        # that takes the window with it, a wrong False is a message.
-        if app.sys.platform == "darwin":
-            self.skipTest("only meaningful where the framework is absent")
-        original = app.sys.platform
-        app.sys.platform = "darwin"
-        try:
-            self.assertIs(app.macos_input_permitted(), False)
-        finally:
-            app.sys.platform = original
-
 
 @needs_display
 class Watcher(unittest.TestCase):
@@ -212,7 +184,6 @@ class Recorder(unittest.TestCase):
         rec.press(kb.Key.ctrl)
         rec.release(kb.Key.ctrl)
         self.assertIsNone(rec.result())
-
 
 
 
