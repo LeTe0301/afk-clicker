@@ -34,13 +34,28 @@ def read(case, name):
         return fh.read()
 
 
+def answer(case):
+    """
+    Decode the key.
+
+    Stored base64 rather than plain Markdown because the first calibration run
+    leaked one: the agent grepped the repo for a symbol that appears in a case
+    and the plaintext answer matched. Asking people not to grep is not a
+    control; making the file unmatchable is.
+    """
+    import base64
+    lines = [l for l in read(case, "ANSWER.b64").splitlines()
+             if l and not l.startswith("#")]
+    return base64.b64decode("".join(lines)).decode("utf-8")
+
+
 def defects(case):
     """[(id, round, severity, text)] from the answer key."""
-    return [m.groups() for m in ROW.finditer(read(case, "ANSWER.md"))]
+    return [m.groups() for m in ROW.finditer(answer(case))]
 
 
 def traps(case):
-    return [m.groups() for m in TRAP.finditer(read(case, "ANSWER.md"))]
+    return [m.groups() for m in TRAP.finditer(answer(case))]
 
 
 def cmd_list():
@@ -60,7 +75,7 @@ def cmd_case(case):
 
 
 def cmd_key(case):
-    print(read(case, "ANSWER.md"))
+    print(answer(case))
 
 
 def cmd_score(case, report_path):

@@ -6,24 +6,12 @@ them exactly as it reviews a real pull request — the ten rounds in
 `CODING-GUIDELINES.md` and `ROADMAP.md`. Its report is then scored against a
 sealed answer key.
 
-## Why these ten
+## What is in each case
 
-Every planted defect is one this project actually shipped, or one a review
-round actually caught late. Inventing plausible-looking bugs would calibrate
-the agent against my imagination; these calibrate it against the record.
-
-| Case | Planted defect | Where it really happened |
-|---|---|---|
-| 01 | Tk touched from a worker thread | the settings snapshot rework |
-| 02 | A class shadowing an imported symbol | `Button` vs `pynput.mouse.Button` |
-| 03 | `try/except` where validation is needed | `{"keys": "nope"}` builds a hotkey out of garbage |
-| 04 | A test that skips instead of failing | `OK (skipped=57)`, exit 0, no display |
-| 05 | A test that measures the harness | XTEST double-delivery; the CI interval spread |
-| 06 | `${{ }}` interpolated into a `run:` | the release workflow's version job |
-| 07 | A release tagged on the wrong commit | missing `target_commitish` |
-| 08 | A Linux-only assumption | `dirname(dirname(mkdtemp())) == os.sep` |
-| 09 | A fix whose test passes without it | the swap-script root-walk guard |
-| 10 | A silent no-op reporting success | `str.replace()` matching nothing |
+Deliberately not written down here. `GRADING.md` holds the list, and it is for
+graders. The first run of this suite was measured against an agent that had
+already read a table in this file naming one planted defect per case, which is
+not a measurement.
 
 ## The trap in every case
 

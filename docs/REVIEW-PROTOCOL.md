@@ -102,7 +102,13 @@ exist.
 
 ## Round 8 — Tests
 
-Every fix lands with a test that fails without it.
+**First, mechanically: is there a test at all?** Name the file and the test, or
+write `no test`. This question comes first because the calibration run showed
+it is the one that gets skipped when the code has louder problems — three
+missing-test findings were walked past in changes that had a threading bug or a
+crash to look at instead. A loud defect is not a reason to stop counting.
+
+Then: every fix lands with a test that fails without it.
 
 - Does the test actually fail if you revert the fix? Say whether you checked.
 - Does it assert a property, or does it assert the harness? Under Xvfb, XTEST
@@ -146,6 +152,18 @@ CONCERNS: <count>
 
 `ANOTHER ROUND` whenever there is at least one `BLOCKER`. With only concerns,
 recommend `MERGE` and list them — the product manager decides whether they wait.
+
+**Say where you were uncertain.** A finding you are sure of and a finding you
+are guessing at look identical in a list, and the difference is what tells the
+reader whether to go and check. If a severity was a judgement call, say it was.
+If you could not reproduce something, say that rather than softening the wording
+until it sounds reproduced.
+
+**Disclose anything that compromised the review.** If you saw something you
+should not have — an answer, a spoiler, a previous reviewer's notes — say so,
+even where it costs you. A review whose provenance is unclear is worth less
+than a shorter one that is clean, and the first calibration run was salvaged
+only because the agent volunteered two such disclosures unprompted.
 
 Then notify the product manager with the verdict and the single most important
 finding. The decision to merge is theirs, not the review agent's.
