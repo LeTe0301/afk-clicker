@@ -164,6 +164,11 @@ CARD_INNER_W = CONTENT_W - 2 * CONTENT_PAD - 2 * CARD_R    # a full-width
     # card's real inner width: body sits CONTENT_PAD in from CONTENT_W on
     # each side before the card's own CARD_R padding starts, so a control
     # sized off CONTENT_W alone (skipping the body inset) overruns the card.
+ROW_LABEL_W = 140    # widest existing Row label ("Mouse button"/"Random
+    # jitter", ~88px measured @ s=1) plus headroom for font-metric
+    # differences on the real target font.
+ROW_LABEL_GAP = 12    # breathing room between the label column and the
+    # value column that starts right after it.
 
 
 def selftest():
@@ -1418,15 +1423,23 @@ class Row(tk.Frame):
 
     def __init__(self, parent, label, s, hint=None):
         super().__init__(parent, bg=CARD)
+        # A fixed-width label column via grid, not pack -- the control then
+        # starts at a constant offset from the row's left edge regardless of
+        # how wide a stretched card gets; leftover width becomes trailing
+        # margin after the control (column 1 stays at weight=0) instead of a
+        # growing gap before it.
+        self.grid_columnconfigure(0, minsize=int((ROW_LABEL_W + ROW_LABEL_GAP) * s))
         text = tk.Frame(self, bg=CARD)
-        text.pack(side="left", fill="x", expand=True)
-        tk.Label(text, text=label, bg=CARD, fg=INK, anchor="w",
+        text.grid(row=0, column=0, sticky="w")
+        tk.Label(text, text=label, bg=CARD, fg=INK, anchor="w", justify="left",
+                 wraplength=int(ROW_LABEL_W * s),
                  font=("Segoe UI", int(9.5 * s))).pack(fill="x")
         if hint:
-            tk.Label(text, text=hint, bg=CARD, fg=MUTED, anchor="w",
+            tk.Label(text, text=hint, bg=CARD, fg=MUTED, anchor="w", justify="left",
+                     wraplength=int(ROW_LABEL_W * s),
                      font=("Segoe UI", int(8 * s))).pack(fill="x")
         self.control = tk.Frame(self, bg=CARD)
-        self.control.pack(side="right")
+        self.control.grid(row=0, column=1, sticky="w")
 
 
 class NumBox(tk.Frame):
@@ -1885,18 +1898,20 @@ class AfkAutoclicker:
         self.appearance_var = tk.StringVar(value=self.store.data["appearance"])
         # 3-option Segmented inside a Row's control area -- same width as the
         # other 3-option control in this file (button_name, "Mouse button"
-        # above): CARD_INNER_W (the full-card default) would overrun the
-        # label sharing this row.
+        # above): ROW_LABEL_W + ROW_LABEL_GAP + 180 = 152 + 180 = 332, well
+        # inside CARD_INNER_W (396) since Row's fixed label column now sits
+        # ahead of it, not a variable-width label sharing the row.
         Segmented(row.control, [("system", "System"), ("light", "Light"), ("dark", "Dark")],
                   self.appearance_var, s, width=180).pack()
 
-        # Second Row in the same card, below Theme (docs/spec.md §5) --
-        # 4-option Segmented, narrower per-option (55px) than Theme's own
-        # 3-option control (60px/option) since "90%"/"100%"/"115%"/"130%"
-        # are shorter per-character than "System", the longest Theme label;
-        # still comfortably inside CARD_INNER_W (396px) alongside the short
-        # "UI scale" label, at every step (the invariant-ratio argument,
-        # docs/spec.md §1).
+        # Second Row in the same card, below Theme -- 4-option Segmented,
+        # narrower per-option (55px) than Theme's own 3-option control
+        # (60px/option) since "90%"/"100%"/"115%"/"130%" are shorter
+        # per-character than "System", the longest Theme label; still
+        # comfortably inside CARD_INNER_W (396) alongside Row's fixed
+        # ROW_LABEL_W + ROW_LABEL_GAP (152) label column, at every UI-scale
+        # step, since every quantity here scales by the same s (the
+        # invariant-ratio argument -- 152 + 220 = 372 <= 396 at s=1).
         row2 = Row(ap, "UI scale", s)
         row2.pack(fill="x", pady=(int(8 * s), 0))
         self.ui_scale_var = tk.StringVar(value=self.store.data["ui_scale"])

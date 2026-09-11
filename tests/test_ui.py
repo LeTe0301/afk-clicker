@@ -761,6 +761,83 @@ class WindowResize(UITestCase):
         self.assertGreaterEqual(self.root.winfo_height(), minh)
 
 
+class RowValueColumn(UITestCase):
+    """Row's fixed-width label column (docs/spec.md, story #24 Feature 1):
+    the control always starts at the same offset from the row's left edge,
+    regardless of how wide a stretched card gets, so the label-to-control
+    gap does not grow the way it did with the old pack-based Row -- extra
+    width becomes trailing margin after the control instead."""
+
+    def _right_edge(self, widget, ancestor):
+        """widget's right edge, in pixels from ancestor's own left edge.
+
+        winfo_x() alone is only relative to a widget's *immediate* parent,
+        which is not `ancestor` for a control several frames deep (control
+        frame -> Row -> card inner) -- winfo_rootx() gives an absolute
+        screen position that both share, so the difference is the offset
+        that actually matters here.
+        """
+        return (widget.winfo_rootx() + widget.winfo_width()) - ancestor.winfo_rootx()
+
+    def test_control_sits_at_the_fixed_label_column_offset(self):
+        control = self.ui.click_ms.master
+        expected = int((app.ROW_LABEL_W + app.ROW_LABEL_GAP) * self.ui.s)
+        self.assertEqual(control.winfo_x(), expected)
+
+    def test_offset_is_unchanged_when_the_card_stretches(self):
+        control = self.ui.click_ms.master
+        before = control.winfo_x()
+        # Not the ticket's literal 1200x820 -- both dimensions risk being
+        # clamped by the window manager on the ~1024x768 CI runners. 900x760
+        # is comfortably under both bounds and comfortably above the default
+        # minsize width, so content genuinely stretches.
+        self.root.geometry("900x760")
+        self.root.update()
+        self.assertEqual(control.winfo_x(), before)
+
+    def test_extra_width_becomes_trailing_margin_not_a_growing_gap(self):
+        control = self.ui.click_ms.master
+        card = control.master.master
+        self.root.geometry("900x760")
+        self.root.update()
+        self.assertLess(control.winfo_x() + control.winfo_width(),
+                        card.winfo_width())
+
+    def test_ui_scale_row_never_overflows_its_card_at_any_scale_step(self):
+        # Constant-level check first (docs/spec.md's own fit-check
+        # argument): the widest explicit control in the file (width=220,
+        # the "UI scale" row) plus the fixed label column must fit inside
+        # CARD_INNER_W, independent of any rendering: 152 + 220 = 372 <= 396.
+        self.assertLessEqual(
+            app.ROW_LABEL_W + app.ROW_LABEL_GAP + 220, app.CARD_INNER_W)
+        for value in ("90", "100", "115", "130"):
+            with self.subTest(value=value):
+                # A fresh instance per step, NOT _apply_ui_scale() on one
+                # window. _apply_minsize(grow_only=True) never shrinks, so
+                # stepping down from 100% to 90% leaves the window -- and
+                # therefore the card -- at the larger size, and the control
+                # is measured against a card wider than 90% would ever
+                # actually build. That passes for the wrong reason, and
+                # exactly where the fit is tightest. Restarting makes each
+                # step size its own window from the store in __init__.
+                self.ui.store.data["ui_scale"] = value
+                self.ui.store.save()
+                ui = self.restart()
+                ui._show_settings()
+                self.root.update()
+                seg = self._appearance_segment(ui.ui_scale_var)
+                card = seg.master.master.master
+                self.assertLessEqual(self._right_edge(seg, card), card.winfo_width())
+
+    def test_random_jitter_hint_wraps_instead_of_overlapping_the_control(self):
+        row = self.ui.jitter_ms.master.master
+        text = row.grid_slaves(row=0, column=0)[0]
+        _label, hint = text.winfo_children()
+        expected = int(app.ROW_LABEL_W * self.ui.s)
+        self.assertEqual(hint.cget("wraplength"), expected)
+        self.assertLessEqual(hint.winfo_reqwidth(), expected)
+
+
 @needs_display
 class Selftest(unittest.TestCase):
     def test_selftest_passes(self):
