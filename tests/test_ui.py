@@ -153,13 +153,18 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
         self.root.update()
         return self.ui
 
-    def _appearance_segment(self):
+    def _appearance_segment(self, var=None):
         """The Appearance Segmented control on the (already open) Settings
         page -- shared by SettingsNavigation and OverlappingAppearanceChanges
         (docs/test-review.md's PR-review Finding #4: was a byte-identical
-        duplicate in each)."""
+        duplicate in each). `var` defaults to `self.ui.appearance_var`;
+        pass `self.ui.ui_scale_var` (or any other Segmented-bound var on the
+        page) to locate a different control without a second copy of this
+        walk (docs/test-review.md Finding #1)."""
+        if var is None:
+            var = self.ui.appearance_var
         def walk(widget):
-            if isinstance(widget, app.Segmented) and widget.var is self.ui.appearance_var:
+            if isinstance(widget, app.Segmented) and widget.var is var:
                 return widget
             for child in widget.winfo_children():
                 found = walk(child)
@@ -167,7 +172,7 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
                     return found
             return None
         found = walk(self.ui.content)
-        self.assertIsNotNone(found, "no Appearance Segmented control found")
+        self.assertIsNotNone(found, "no matching Segmented control found")
         return found
 
 
@@ -1556,6 +1561,168 @@ class AppearanceThemeSwitch(CapturesCallbackExceptions, unittest.TestCase):
         self.assertEqual(on_disk["appearance"], "light")
 
 
+class UIScaleStore(UITestCase):
+    """Store.__init__'s new "ui_scale" key -- same sanitiser shape/spirit as
+    "appearance" (AppearanceStore, above)."""
+
+    def _write(self, data):
+        path = os.path.join(tempfile.mkdtemp(), "settings.json")
+        with open(path, "w") as fh:
+            json.dump(data, fh)
+        return path
+
+    def test_a_fresh_store_defaults_to_100(self):
+        path = os.path.join(tempfile.mkdtemp(), "settings.json")
+        self.assertEqual(app.Store(path).data["ui_scale"], "100")
+
+    def test_known_values_round_trip(self):
+        for value in ("90", "100", "115", "130"):
+            with self.subTest(value=value):
+                path = self._write({"ui_scale": value})
+                self.assertEqual(app.Store(path).data["ui_scale"], value)
+
+    def test_garbage_values_fall_back_to_100(self):
+        for value in ("120", None, 42):
+            with self.subTest(value=value):
+                path = self._write({"ui_scale": value})
+                self.assertEqual(app.Store(path).data["ui_scale"], "100")
+
+    def test_a_missing_ui_scale_key_defaults_to_100(self):
+        path = self._write({"games": {}, "hotkey": None, "selected": None})
+        self.assertEqual(app.Store(path).data["ui_scale"], "100")
+
+    def test_a_garbage_on_disk_value_resolves_to_100_end_to_end(self):
+        # Same technique as AppearanceStore.test_a_missing_appearance_key_
+        # defaults_to_system -- write directly into the test's own
+        # settings.json -- but goes one step further, all the way through a
+        # fresh AfkAutoclicker (self.restart()), per docs/spec.md's
+        # acceptance criterion: a garbage stored "ui_scale" must sanitize to
+        # "100" AND self.ui.s must equal self.ui._dpi_s (the "100" factor is
+        # a no-op 1.0 multiplier).
+        with open(self.config, "w") as fh:
+            json.dump({"games": {}, "hotkey": None, "selected": None,
+                       "ui_scale": "120"}, fh)
+        ui = self.restart()
+        self.assertEqual(ui.store.data["ui_scale"], "100")
+        self.assertEqual(ui.s, ui._dpi_s)
+
+
+class UIScale(UITestCase):
+    """The Settings page's second Appearance-card Row (docs/spec.md, story
+    #17 Feature 4): self.s becomes DPI x the chosen step, applied through
+    the same in-place rebuild mechanism Feature 3 built for Appearance --
+    structurally parallel to AppearanceThemeSwitch/WindowResize above."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_each_step_multiplies_the_dpi_factor(self):
+        for value in ("90", "100", "115", "130"):
+            with self.subTest(value=value):
+                self.ui._apply_ui_scale(value)
+                self.root.update()
+                self.assertEqual(self.ui.s,
+                                 self.ui._dpi_s * app.UI_SCALE_FACTORS[value])
+
+    def test_a_sampled_widget_and_font_scale_with_it(self):
+        # _appearance_segment() needs appearance_var to already exist, which
+        # only happens once Settings has been built -- same precondition
+        # every other test using it already meets (SettingsNavigation,
+        # OverlappingAppearanceChanges).
+        self.ui._show_settings()
+        self.root.update()
+        self.ui._apply_ui_scale("130")
+        self.root.update()
+        # The header StatusPill, rebuilt fresh -- Canvas widths round-trip
+        # through cget() as the same int the constructor was given.
+        self.assertEqual(int(self.ui.status.cget("width")), int(250 * self.ui.s))
+        # The Theme Segmented's own text item font, same control
+        # _appearance_segment() already locates for the Appearance tests --
+        # re-fetched after the scale change since the rebuild replaced it.
+        seg = self._appearance_segment()
+        self.assertEqual(seg.itemcget(seg.texts[0], "font"),
+                         f"{{Segoe UI}} {int(9 * self.ui.s)}")
+
+    def test_minsize_updates_on_every_scale_change(self):
+        for value in ("90", "115", "130", "100"):
+            with self.subTest(value=value):
+                self.ui._apply_ui_scale(value)
+                self.root.update()
+                expected = (int((app.SIDEBAR_W + 1 + app.CONTENT_W) * self.ui.s),
+                           int(690 * self.ui.s))
+                self.assertEqual(self.root.minsize(), expected)
+
+    def test_a_bigger_step_grows_the_window_to_the_new_minimum(self):
+        self.ui._apply_ui_scale("130")
+        self.root.update()
+        minw, minh = self.root.minsize()
+        self.assertGreaterEqual(self.root.winfo_width(), minw)
+        self.assertGreaterEqual(self.root.winfo_height(), minh)
+
+    def test_a_manually_enlarged_window_is_never_shrunk_by_a_scale_change(self):
+        # Matches WindowResize's own geometry-reading pattern (line ~746),
+        # but derives the "manually enlarged" size from the biggest step's
+        # own minsize (plus margin) rather than a hardcoded literal -- must
+        # exceed every step's minsize, including 130%'s, on any DPI this
+        # suite runs under (docs/spec.md's own invariant-ratio argument,
+        # §1: a bigger step's minsize is a strictly bigger floor).
+        max_s = self.ui._dpi_s * app.UI_SCALE_FACTORS["130"]
+        big_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * max_s) + 200
+        big_h = int(690 * max_s) + 200
+        self.root.geometry(f"{big_w}x{big_h}")
+        self.root.update()
+        for value in ("130", "90"):
+            with self.subTest(value=value):
+                self.ui._apply_ui_scale(value)
+                self.root.update()
+                self.assertEqual(self.root.winfo_width(), big_w)
+                self.assertEqual(self.root.winfo_height(), big_h)
+
+    def test_a_scale_choice_survives_a_restart_with_no_settings_visit(self):
+        self.ui._apply_ui_scale("90")
+        self.root.update()
+        expected_s = self.ui._dpi_s * app.UI_SCALE_FACTORS["90"]
+        ui = self.restart()
+        # self.ui.s reflects the persisted choice without ever opening
+        # Settings -- computed straight from self.store.data in __init__.
+        self.assertEqual(ui.s, expected_s)
+        # ui_scale_var itself is only built once Settings is opened (same
+        # as appearance_var, see SettingsNavigation's own tests) -- confirm
+        # it then reflects the same persisted choice.
+        ui._show_settings()
+        self.root.update()
+        self.assertEqual(ui.ui_scale_var.get(), "90")
+
+    def test_ui_scale_is_persisted_to_disk(self):
+        self.ui._apply_ui_scale("115")
+        self.root.update()
+        on_disk = json.load(open(self.config, encoding="utf-8"))
+        self.assertEqual(on_disk["ui_scale"], "115")
+
+    def test_two_real_ui_scale_segmented_clicks_with_no_pump_between_them(self):
+        # docs/test-review.md Finding #1: every other test in this class
+        # calls self.ui._apply_ui_scale(value) directly, so neither write
+        # trace registered on ui_scale_var (Segmented's own repaint trace,
+        # and _apply_ui_scale itself) is ever invoked by a real click --
+        # including the one whose *registration order* docs/spec.md §2
+        # flags as a TclError hazard (afk_clicker.py:1901-1926). Mirrors
+        # Theme's own real-click regression test,
+        # test_two_real_segmented_clicks_with_no_pump_between_them
+        # (line ~2309): two back-to-back <Button-1> events with no
+        # root.update() between them, then one pump. This control has 4
+        # options, not Theme's 3, so seg_w divides by 4.
+        self.ui._show_settings()
+        self.root.update()
+        seg = self._appearance_segment(self.ui.ui_scale_var)
+        seg_w = seg.w / 4
+        seg.event_generate("<Button-1>", x=int(seg_w * 1.5), y=int(seg.h / 2))  # "100%"
+        seg.event_generate("<Button-1>", x=int(seg_w * 3.5), y=int(seg.h / 2))  # "130%"
+        self.root.update()
+        self.assertEqual(self.ui.ui_scale_var.get(), "130")
+        self.assertEqual(self.ui.s, self.ui._dpi_s * app.UI_SCALE_FACTORS["130"])
+
+
 class SettingsNavigation(UITestCase):
     """The sidebar entry and the content-pane swap between the per-game form
     and the Settings page."""
@@ -1971,6 +2138,37 @@ class RunningClickerSurvivesRebuild(UITestCase):
         self.ui.stop()
         self.pump(0.2)
 
+    def test_worker_running_and_clicks_continue_across_a_scale_change(self):
+        # Same guarantee as the Appearance test above, docs/spec.md's own
+        # "a running clicker survives a scale-triggered rebuild unharmed" --
+        # none of self.worker/self.hk_listener/the click-loop thread's state
+        # lives in the destroyed/rebuilt widget tree, so a UI-scale change
+        # (a different trigger for the identical _rebuild_ui() path) must
+        # leave it exactly as unaffected.
+        self.ui.mouse = FakeMouse()
+        self.ui._select("global")
+        self.ui.click_ms.var.set("60")
+        self.pump(0.3)                          # let the snapshot catch up
+        self.ui.start()
+        self.pump(0.3)
+        old_worker = self.ui.worker
+        self.assertTrue(self.ui.running)
+
+        self.ui._apply_ui_scale("130")          # runs synchronously, main thread
+        self.root.update()
+
+        self.assertIs(self.ui.worker, old_worker)
+        self.assertTrue(self.ui.worker.is_alive())
+        self.assertTrue(self.ui.running)
+        self.ui.mouse.clicks.clear()
+        self.pump(0.3)
+        self.assertTrue(self.ui.mouse.clicks, "no clicks landed after the rebuild")
+        self.assertEqual(
+            self.ui.status.itemcget(self.ui.status.text, "text"), "RUNNING")
+
+        self.ui.stop()
+        self.pump(0.2)
+
 
 class HotkeyListenerSurvivesRebuild(UITestCase):
     needs_input_permission = unittest.skipIf(
@@ -2178,6 +2376,64 @@ class OverlappingAppearanceChanges(UITestCase):
         except tk.TclError:
             pass
         self._assert_no_callback_exceptions()
+
+
+class OverlappingScaleAndAppearanceChanges(UITestCase):
+    """docs/spec.md §4: a UI-scale change and an Appearance change fired in
+    quick succession must coalesce into exactly one rebuild -- the same
+    self._rebuilding/_rebuild_wanted/_rebuild_after_id machinery
+    OverlappingAppearanceChanges (above) already proves for repeated
+    Appearance changes alone, now shared by both callers via
+    _request_rebuild(). Generalizes
+    test_five_rapid_appearance_changes_coalesce_into_exactly_one_rebuild's
+    counting-wrapper technique, interleaving the two kinds of change in
+    both orders."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_scale_then_appearance_coalesce_into_one_rebuild(self):
+        calls = []
+        original_rebuild = self.ui._rebuild_ui
+
+        def counting():
+            calls.append(1)
+            return original_rebuild()
+        self.ui._rebuild_ui = counting
+        try:
+            self.ui._apply_ui_scale("130")
+            self.ui._apply_appearance("light")
+            self.root.update()
+        finally:
+            self.ui._rebuild_ui = original_rebuild
+        self.assertEqual(len(calls), 1,
+                         "a scale change then an appearance change must "
+                         "coalesce into exactly one rebuild")
+        self.assertEqual(self.ui.store.data["ui_scale"], "130")
+        self.assertEqual(self.ui.s, self.ui._dpi_s * app.UI_SCALE_FACTORS["130"])
+        self.assertEqual(self.root.cget("bg"), app.THEMES["light"]["BG"])
+
+    def test_appearance_then_scale_coalesce_into_one_rebuild(self):
+        calls = []
+        original_rebuild = self.ui._rebuild_ui
+
+        def counting():
+            calls.append(1)
+            return original_rebuild()
+        self.ui._rebuild_ui = counting
+        try:
+            self.ui._apply_appearance("light")
+            self.ui._apply_ui_scale("90")
+            self.root.update()
+        finally:
+            self.ui._rebuild_ui = original_rebuild
+        self.assertEqual(len(calls), 1,
+                         "an appearance change then a scale change must "
+                         "coalesce into exactly one rebuild")
+        self.assertEqual(self.ui.store.data["ui_scale"], "90")
+        self.assertEqual(self.ui.s, self.ui._dpi_s * app.UI_SCALE_FACTORS["90"])
+        self.assertEqual(self.root.cget("bg"), app.THEMES["light"]["BG"])
 
 
 class ReentrantAppearanceChangeDuringRebuild(UITestCase):

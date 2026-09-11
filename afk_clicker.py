@@ -119,6 +119,15 @@ def set_active_theme(name):
         _ACTIVE["OK"], _ACTIVE["BAD"])
 
 
+# A persisted enum key -> the concrete value it resolves to, same category as
+# THEMES above: "ui_scale" in settings.json is one of these four strings, and
+# self.s (AfkAutoclicker.__init__) multiplies the DPI factor by the matching
+# float. See docs/spec.md §1 for why 4 explicit percentage steps rather than
+# a slider or named sizes.
+UI_SCALE_FACTORS = {"90": 0.9, "100": 1.0, "115": 1.15, "130": 1.3}
+UI_SCALE_DEFAULT = "100"
+
+
 def resolve_appearance(value, cached_os_theme=None):
     """"system"/"light"/"dark" -> a THEMES key. cached_os_theme, if given,
     is reused instead of calling detect_os_theme() again -- story.md:
@@ -802,7 +811,7 @@ class Store:
     def __init__(self, path=None):
         self.path = path or config_path()
         self.data = {"games": {}, "hotkey": None, "selected": None,
-                     "appearance": "system"}
+                     "appearance": "system", "ui_scale": UI_SCALE_DEFAULT}
         try:
             with open(self.path, encoding="utf-8") as fh:
                 loaded = json.load(fh)
@@ -833,6 +842,12 @@ class Store:
         # set_active_theme() never see it unvalidated.
         if self.data["appearance"] not in ("system", "light", "dark"):
             self.data["appearance"] = "system"
+
+        # Same contract, one more key: a garbage on-disk "ui_scale" (wrong
+        # type, an old/foreign value, a hand-edited "120") is as
+        # untrustworthy as a damaged file -- self.s never sees it unvalidated.
+        if self.data["ui_scale"] not in UI_SCALE_FACTORS:
+            self.data["ui_scale"] = UI_SCALE_DEFAULT
 
         # _persist() writes this value to disk automatically the first time
         # Minecraft is ever selected -- including the automatic _select() a
@@ -1442,8 +1457,13 @@ class NumBox(tk.Frame):
 class AfkAutoclicker:
     def __init__(self, root, store=None, os_theme=None):
         self.root = root
-        self.s = s = root.tk.call("tk", "scaling") / 1.333  # 1.0 at 96 dpi
         self.store = store if store is not None else Store()
+        # DPI half of self.s, named separately from the combined value below
+        # -- a UI-scale change (_apply_ui_scale) recomputes self.s from this
+        # unchanged, never re-reads "tk scaling" (docs/spec.md §2: the DPI
+        # half is still detected once, at startup).
+        self._dpi_s = root.tk.call("tk", "scaling") / 1.333  # 1.0 at 96 dpi
+        self.s = s = self._dpi_s * UI_SCALE_FACTORS[self.store.data["ui_scale"]]
         # Feature 2's detect_os_theme(), if it already ran once in __main__
         # to resolve a saved "system" appearance -- never re-detected from
         # here, only ever read or (once) lazily filled in, see
@@ -1457,9 +1477,7 @@ class AfkAutoclicker:
         # explicit size the body collapses to zero height and only the header
         # shows. minsize keeps the window from ever being resized below the
         # size the layout was tuned at, so nothing clips.
-        minw, minh = int((SIDEBAR_W + 1 + CONTENT_W) * s), int(690 * s)
-        root.minsize(minw, minh)
-        root.geometry(f"{minw}x{minh}")
+        self._apply_minsize()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind_all("<Button-1>", self._maybe_drop_focus)  # bound once, here --
             # NOT inside _build_ui(): root itself survives every rebuild
@@ -1523,6 +1541,42 @@ class AfkAutoclicker:
         if saved is not None:
             self.hotkey = saved
             self.apply_hotkey()
+
+    def _apply_minsize(self, grow_only=False):
+        """The tuned-default-size mechanism (#14): establishes/updates
+        root.minsize() from self.s. Called once, unconditionally, from
+        __init__ (grow_only=False, the byte-identical first-launch
+        behavior the two inline lines this replaces always had -- also
+        sets geometry() to that exact size). A UI-scale change calls this
+        again with grow_only=True: minsize is always updated (a WM-level
+        constraint, safe to change regardless of the window's current
+        actual size), but geometry() is only invoked, and only per-axis,
+        when the window's current size is now below the new floor -- so a
+        smaller step never shrinks a window the user made bigger, and a
+        bigger step only grows whichever axis actually falls short (see
+        docs/spec.md §2)."""
+        minw, minh = int((SIDEBAR_W + 1 + CONTENT_W) * self.s), int(690 * self.s)
+        self.root.minsize(minw, minh)
+        if not grow_only:
+            self.root.geometry(f"{minw}x{minh}")
+            return
+        cur_w, cur_h = self.root.winfo_width(), self.root.winfo_height()
+        new_w, new_h = max(cur_w, minw), max(cur_h, minh)
+        if (new_w, new_h) != (cur_w, cur_h):
+            self.root.geometry(f"{new_w}x{new_h}")
+
+    def _request_rebuild(self):
+        """The coalescing tail shared by _apply_appearance() and
+        _apply_ui_scale(): at most one rebuild is ever pending or running,
+        see _rebuild_ui()'s own docstring for why a second pending rebuild
+        is a real crash, not just wasted work. Extracted, not duplicated,
+        so a theme change and a scale change fired in quick succession
+        coalesce into exactly one rebuild by construction, the same
+        guarantee already proven for repeated Appearance changes alone."""
+        if self._rebuilding:
+            self._rebuild_wanted = True
+        elif self._rebuild_after_id is None:
+            self._rebuild_after_id = self.root.after_idle(self._rebuild_ui)
 
     # ---------- widget tree (rebuildable) ----------
 
@@ -1836,6 +1890,20 @@ class AfkAutoclicker:
         Segmented(row.control, [("system", "System"), ("light", "Light"), ("dark", "Dark")],
                   self.appearance_var, s, width=180).pack()
 
+        # Second Row in the same card, below Theme (docs/spec.md §5) --
+        # 4-option Segmented, narrower per-option (55px) than Theme's own
+        # 3-option control (60px/option) since "90%"/"100%"/"115%"/"130%"
+        # are shorter per-character than "System", the longest Theme label;
+        # still comfortably inside CARD_INNER_W (396px) alongside the short
+        # "UI scale" label, at every step (the invariant-ratio argument,
+        # docs/spec.md §1).
+        row2 = Row(ap, "UI scale", s)
+        row2.pack(fill="x", pady=(int(8 * s), 0))
+        self.ui_scale_var = tk.StringVar(value=self.store.data["ui_scale"])
+        Segmented(row2.control,
+                  [("90", "90%"), ("100", "100%"), ("115", "115%"), ("130", "130%")],
+                  self.ui_scale_var, s, width=220).pack()
+
         # Detected at most once per process (docs/spec.md §4) -- if nothing
         # has needed the real OS theme yet (appearance started as "light"/
         # "dark", so __main__ never detected it), this is that first need;
@@ -1847,6 +1915,23 @@ class AfkAutoclicker:
 
         self.appearance_var.trace_add("write",
             lambda *_a: self._apply_appearance(self.appearance_var.get()))
+        # Registered after the Segmented(...) call above, exactly like
+        # appearance_var's own trace -- Tcl fires write traces most-
+        # recently-registered-first, so this trace (_apply_ui_scale) fires
+        # before the Segmented's own built-in repaint trace, not after it.
+        # Under the current code this ordering has no observable effect:
+        # _apply_ui_scale only ever defers the rebuild via
+        # _request_rebuild()/after_idle and never rebuilds synchronously
+        # inside the trace (verified empirically -- reversing this
+        # registration order and running the full suite still passes; see
+        # docs/implementation.md's fix-pass section). The ordering is kept
+        # anyway, matching Theme's, because it is the order that would be
+        # required if _apply_ui_scale (or _apply_appearance) ever stopped
+        # deferring and rebuilt synchronously instead: getting it backwards
+        # in that scenario destroys the Segmented mid-repaint and raises
+        # TclError (docs/spec.md §2, same hazard as Theme's).
+        self.ui_scale_var.trace_add("write",
+            lambda *_a: self._apply_ui_scale(self.ui_scale_var.get()))
 
         section(body, "Updates", s)
         up = card(body, s)
@@ -1901,11 +1986,27 @@ class AfkAutoclicker:
         # events -- but made impossible outright rather than left as a
         # documented-but-unenforced invariant). Just mark a follow-up
         # wanted; _rebuild_ui()'s own finally block schedules exactly one
-        # once the running rebuild has fully finished.
-        if self._rebuilding:
-            self._rebuild_wanted = True
-        elif self._rebuild_after_id is None:
-            self._rebuild_after_id = self.root.after_idle(self._rebuild_ui)
+        # once the running rebuild has fully finished. This tail is shared
+        # with _apply_ui_scale() via _request_rebuild() -- see its own
+        # docstring; the reasoning above still applies unchanged.
+        self._request_rebuild()
+
+    def _apply_ui_scale(self, value):
+        """Structurally parallel to _apply_appearance(): persist, apply the
+        synchronous part of the change (self.s and the window's minsize),
+        then request the shared coalesced rebuild. The `value not in
+        UI_SCALE_FACTORS` guard mirrors Store.__init__'s own sanitization --
+        the Segmented this is wired to only ever emits one of the four valid
+        keys, but an invalid self.s would be a visibly broken window, not
+        just a wrong color, so the same belt-and-suspenders defense is cheap
+        insurance here."""
+        if value not in UI_SCALE_FACTORS:
+            value = UI_SCALE_DEFAULT
+        self.store.data["ui_scale"] = value
+        self.store.save()
+        self.s = self._dpi_s * UI_SCALE_FACTORS[value]
+        self._apply_minsize(grow_only=True)
+        self._request_rebuild()
 
     def _show_settings(self):
         if self._settings_open:
