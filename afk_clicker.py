@@ -1467,7 +1467,9 @@ class AfkAutoclicker:
         self.right_held = False
         self.settings = {}
         self._pending = None
-        self._ui_queue = queue.SimpleQueue()
+        self._ui_queue = queue.SimpleQueue()   # one queue for the app's whole
+                                                # lifetime -- never swapped by
+                                                # a rebuild (see _rebuild_ui())
         self._loading = False          # suppress saves while filling the form
         self._settings_open = False    # which content-pane body is showing
         self._rebuild_after_id = None  # the one after_idle(self._rebuild_ui)
@@ -1652,6 +1654,24 @@ class AfkAutoclicker:
         follow-up once this call has fully finished, so the outcome (the
         latest choice, eventually rebuilt against) is unchanged -- only the
         timing of the follow-up moves to after this call safely returns.
+
+        self._ui_queue is NOT swapped here (Round 4, PR review Finding #2):
+        an earlier version replaced it with a fresh queue.SimpleQueue() on
+        every rebuild, reasoned as harmless because "the next state
+        transition re-queues one" -- true for RUNNING/OFF (the only two
+        states resynced below, via _build_ui()'s tail), false for
+        ERROR/STOPPED/EATING, none of which the tail resyncs: a worker's
+        self._ui(self._set_status, "ERROR", ...) call landing in the queue
+        an instant before a rebuild was silently and permanently dropped,
+        leaving the post-rebuild pill reading a plain, misleading OFF. The
+        swap was never actually load-bearing: every queued callback
+        (_set_status, _offer_update, _set_update_state, _mark_running, ...)
+        already resolves its target widget fresh, at drain time, not at
+        enqueue time (see _set_status's own docstring), and _drain_ui()
+        already drops a TclError from a genuinely stale/destroyed-widget
+        closure and keeps draining (see _drain_ui()) -- so nothing here
+        actually needed a widget queued against the pre-rebuild tree to be
+        thrown away; one queue lives for the app's whole lifetime instead.
         """
         if self._rebuild_after_id is not None:
             try:
@@ -1669,14 +1689,6 @@ class AfkAutoclicker:
                 except tk.TclError:
                     pass
             self._timers = []
-            self._ui_queue = queue.SimpleQueue()   # drop any already-queued closure
-                                                    # bound to a widget about to be
-                                                    # destroyed (see the self.status.
-                                                    # set hazard in docs/spec.md §3)
-                                                    # -- losing an in-flight, not-
-                                                    # yet-drained status update is
-                                                    # harmless; the next state
-                                                    # transition re-queues one.
             for w in self.root.winfo_children():
                 w.destroy()
             self._build_ui(self.s)

@@ -146,6 +146,23 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
         self.root.update()
         return self.ui
 
+    def _appearance_segment(self):
+        """The Appearance Segmented control on the (already open) Settings
+        page -- shared by SettingsNavigation and OverlappingAppearanceChanges
+        (docs/test-review.md's PR-review Finding #4: was a byte-identical
+        duplicate in each)."""
+        def walk(widget):
+            if isinstance(widget, app.Segmented) and widget.var is self.ui.appearance_var:
+                return widget
+            for child in widget.winfo_children():
+                found = walk(child)
+                if found is not None:
+                    return found
+            return None
+        found = walk(self.ui.content)
+        self.assertIsNotNone(found, "no Appearance Segmented control found")
+        return found
+
 
 class Sidebar(UITestCase):
     def test_lists_the_builtin_profiles(self):
@@ -1532,19 +1549,6 @@ class SettingsNavigation(UITestCase):
         super().tearDown()
         app.set_active_theme("dark")
 
-    def _appearance_segment(self):
-        def walk(widget):
-            if isinstance(widget, app.Segmented) and widget.var is self.ui.appearance_var:
-                return widget
-            for child in widget.winfo_children():
-                found = walk(child)
-                if found is not None:
-                    return found
-            return None
-        found = walk(self.ui.content)
-        self.assertIsNotNone(found, "no Appearance Segmented control found")
-        return found
-
     def test_sidebar_has_a_settings_entry_plus_the_untouched_update_widgets(self):
         # 3a's interim sidebar: games -> Add current game -> Settings (new) ->
         # Check for updates -> version. The last two are unmoved (Feature 3b).
@@ -1782,19 +1786,6 @@ class OverlappingAppearanceChanges(UITestCase):
         super().tearDown()
         app.set_active_theme("dark")
 
-    def _appearance_segment(self):
-        def walk(widget):
-            if isinstance(widget, app.Segmented) and widget.var is self.ui.appearance_var:
-                return widget
-            for child in widget.winfo_children():
-                found = walk(child)
-                if found is not None:
-                    return found
-            return None
-        found = walk(self.ui.content)
-        self.assertIsNotNone(found, "no Appearance Segmented control found")
-        return found
-
     def test_two_rapid_appearance_changes_before_the_idle_rebuild_drains(self):
         self.ui._apply_appearance("light")
         self.ui._apply_appearance("dark")
@@ -1930,6 +1921,58 @@ class ReentrantAppearanceChangeDuringRebuild(UITestCase):
             "final theme should match the last choice ('dark', applied "
             "mid-rebuild), not the one the in-progress rebuild started with")
         self._assert_no_callback_exceptions()
+
+
+class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
+    """PR review Finding #2 (docs/implementation.md "Round 4"): _rebuild_ui()
+    used to replace self._ui_queue with a fresh queue.SimpleQueue() on every
+    rebuild -- documented as harmless because "the next state transition
+    re-queues one." True only for RUNNING/OFF, the two states _build_ui()'s
+    own tail resyncs from self.running; an ERROR/STOPPED/EATING status, or a
+    _mark_running() scan result, queued an instant before a rebuild was
+    silently and permanently dropped instead, with no trace it ever
+    happened. The swap is gone now -- one queue for the app's whole
+    lifetime, same as every other queued callback already resolves its
+    target fresh at drain time."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_error_and_stopped_updates_survive_a_rebuild(self):
+        for text, color, hint in (
+            ("ERROR", app.BAD, "boom"),
+            ("STOPPED", app.MUTED, "auto-stop after 5 min"),
+        ):
+            with self.subTest(text=text):
+                self.ui.running = False   # matches loop()'s own finally ordering
+                self.ui._ui(self.ui._set_status, text, color, hint)
+                self.ui._rebuild_ui()      # queued before this call, not after
+                self.ui._drain_ui()        # _rebuild_ui()'s own tail already
+                                            # drains it too -- calling again
+                                            # here is a harmless no-op on an
+                                            # empty queue, matching the
+                                            # dispatch's literal "queued,
+                                            # then a rebuild, then a drain"
+                self.assertEqual(
+                    self.ui.status.itemcget(self.ui.status.text, "text"), text,
+                    f"a queued {text} update should survive a rebuild, not "
+                    "be silently dropped by the old _ui_queue swap")
+
+    def test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands(self):
+        old_seen = self.ui._seen_running   # already set by setUp()'s settle()
+        target = {"minecraft"}
+        self.assertNotEqual(old_seen, target,
+                            "test needs a genuinely different value to prove "
+                            "the queued call actually landed, not that "
+                            "_seen_running just happened to already match")
+        self.ui._ui(self.ui._mark_running, target)
+        self.ui._rebuild_ui()
+        self.ui._drain_ui()
+        self.assertEqual(
+            self.ui._seen_running, target,
+            "a queued _mark_running() scan result should survive a rebuild, "
+            "not be silently dropped by the old _ui_queue swap")
 
 
 class QueuedStatusSurvivesARebuild(UITestCase):
