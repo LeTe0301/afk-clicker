@@ -1668,16 +1668,34 @@ class UIScale(UITestCase):
         # suite runs under (docs/spec.md's own invariant-ratio argument,
         # §1: a bigger step's minsize is a strictly bigger floor).
         max_s = self.ui._dpi_s * app.UI_SCALE_FACTORS["130"]
-        big_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * max_s) + 200
-        big_h = int(690 * max_s) + 200
+        min_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * max_s)
+        min_h = int(690 * max_s)
+        big_w = min_w + 200
+        big_h = min_h + 200
         self.root.geometry(f"{big_w}x{big_h}")
         self.root.update()
+        # A window manager can clamp a geometry request to the screen it
+        # actually has rather than granting it outright -- observed on the
+        # Windows and macOS CI runners' own (smaller) displays. The
+        # "manually enlarged" size is therefore whatever was actually
+        # granted, not what was asked for.
+        actual_w, actual_h = self.root.winfo_width(), self.root.winfo_height()
+        if actual_w < min_w or actual_h < min_h:
+            # The runner's screen won't grant a size above 130%'s own
+            # minsize, so the "never shrunk below the user's size" premise
+            # cannot hold here -- there is no manually-enlarged size left
+            # to shrink from. Skipping is honest here; asserting on the
+            # request rather than the grant is what made this test fail on
+            # the Windows and macOS runners in the first place.
+            self.skipTest(
+                "WM clamped the enlarged geometry to at or below 130%'s "
+                "minsize on this screen -- nothing to test")
         for value in ("130", "90"):
             with self.subTest(value=value):
                 self.ui._apply_ui_scale(value)
                 self.root.update()
-                self.assertEqual(self.root.winfo_width(), big_w)
-                self.assertEqual(self.root.winfo_height(), big_h)
+                self.assertEqual(self.root.winfo_width(), actual_w)
+                self.assertEqual(self.root.winfo_height(), actual_h)
 
     def test_a_scale_choice_survives_a_restart_with_no_settings_visit(self):
         self.ui._apply_ui_scale("90")
