@@ -835,13 +835,22 @@ class RowValueColumn(UITestCase):
         _label, hint = text.winfo_children()
         self.assertEqual(hint.cget("wraplength"), int(app.ROW_LABEL_W * self.ui.s))
 
-        # That it actually wrapped, said in a way no font can argue with: the
-        # jitter hint is the only one long enough to need two lines, so it must
-        # stand taller than one that fits on one. Asserting its requested WIDTH
-        # against wraplength instead compares a widget's width -- text plus the
-        # Label's own padx and border -- against a text-wrapping limit, which
-        # are different quantities. That passed here on DejaVu Sans and failed
-        # on Windows' Segoe UI by exactly one pixel (141 > 140).
+        # That it actually wrapped: the jitter hint is the only one long enough
+        # to need two lines at this scale, so it stands taller than one that
+        # fits on a single line. Comparing two heights measured the same way
+        # survives a font change, where the previous assertion did not -- that
+        # one compared the hint's requested WIDTH (text plus the Label's own
+        # padx and border) against wraplength (a text-only limit), two
+        # different quantities whose order the font decides: it passed here on
+        # DejaVu Sans at 144 <= 145 and failed on Windows' Segoe UI at 141 > 140.
+        #
+        # Scope of that claim, deliberately narrow (PR #37 review): this holds
+        # at the scale the test runs at, not at every UI-scale step. Font size
+        # is int(8 * s) and truncates in whole points while wraplength scales
+        # continuously, so "only the jitter hint wraps" is not scale-invariant
+        # -- at _dpi_s ~0.75 (macOS, #35) and the 90% step it does not wrap at
+        # all. Anything that sweeps this assertion across scale steps has to
+        # establish the premise per step rather than assume it.
         short = self.ui.autostop_min.master.master
         _short_label, short_hint = short.grid_slaves(
             row=0, column=0)[0].winfo_children()
