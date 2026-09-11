@@ -1,11 +1,15 @@
 name: Tests
 
-# Every push and every pull request. Fast on purpose -- the slow chord suite
-# synthesises real key presses and takes minutes, so it belongs to the release
-# pipeline, not to the feedback loop on a branch.
+# Every pull request, and every push to main. Fast on purpose -- the slow chord
+# suite synthesises real key presses and takes minutes, so it belongs to the
+# release pipeline, not to the feedback loop on a branch.
+#
+# Push is limited to main because a branch with an open PR would otherwise run
+# the whole matrix twice per commit (push + pull_request), and every failure
+# arrived as two emails. A branch without a PR can still be run by hand.
 on:
   push:
-    branches-ignore: ["release/**"]     # release/** runs the full pipeline instead
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
