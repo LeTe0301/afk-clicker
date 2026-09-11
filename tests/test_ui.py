@@ -37,6 +37,13 @@ class UITestCase(unittest.TestCase):
         self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
         self.root.update()
         self.settle()
+        # Under Xvfb with no window manager, a freshly created tk.Tk() never
+        # actually owns X input focus, so focus_set() alone produces no
+        # <FocusIn>/<FocusOut> and focus_get() reads None no matter what.
+        # This one-time focus_force() makes the toplevel genuinely own input
+        # focus so every focus_set()-based assertion below observes something
+        # -- the app itself keeps using focus_set(), never focus_force().
+        self.root.focus_force()
 
     def tearDown(self):
         try:
@@ -463,6 +470,203 @@ class ButtonRelease(UITestCase):
             self.ui.mouse.pressed.count(("release", app.MouseButton.right)))
         self.ui.stop()
         self.pump(0.2)
+
+
+class InstallWorker(UITestCase):
+    """
+    `_install_worker` end to end, not just the module-level helpers it calls.
+
+    AC1/AC2/AC4/AC6 are written at the level of "the install path" / "the
+    user" -- the wired-up AfkAutoclicker flow -- so a test that only calls
+    download_and_stage directly cannot cover the fail-closed branch or the
+    truncated status line the user actually sees. `_install_worker` is called
+    directly rather than through a thread: it never touches Tk except via
+    self._ui(), so calling it inline on the test thread is safe, and it makes
+    the assertions below deterministic instead of racing a background thread.
+    """
+
+    def _drain(self):
+        # _install_worker only ever queues UI updates through self._ui();
+        # _drain_ui() is what turns those into real widget state. It is
+        # normally reached via the 40 ms timer started in __init__ -- call it
+        # directly here rather than waiting on the clock.
+        self.ui._drain_ui()
+
+    def _button_text(self):
+        return self.ui.update_button.itemcget(self.ui.update_button.label, "text")
+
+    def test_a_release_without_checksums_is_refused_and_nothing_is_downloaded(self):
+        # AC4: a release that publishes no SHA256SUMS is refused, fail
+        # closed, and download_and_stage is never reached -- not just
+        # pick_checksums(release) is None at the unit level.
+        calls = []
+        original = app.download_and_stage
+        app.download_and_stage = lambda *a, **k: calls.append((a, k))
+        try:
+            release = {"assets": [
+                {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
+            self.ui._pending = ("v9.9.9", release["assets"][0], release)
+            self.ui._install_worker()
+            self._drain()
+        finally:
+            app.download_and_stage = original
+        self.assertEqual(calls, [], "download_and_stage was called despite no SHA256SUMS")
+        self.assertIn("SHA256SUMS", self._button_text())
+        self.assertTrue(self.ui.update_button._enabled, "the button was left disabled after a refusal")
+
+    def test_a_checksum_error_reaches_the_status_line_with_its_meaning_intact(self):
+        # AC6, driven through the real worker rather than by calling
+        # download_and_stage directly -- this is the path that would have
+        # caught the truncated "is not listed" message before it shipped.
+        # The network is mocked (fetch_checksums, download_and_stage); this
+        # test never reaches GitHub.
+        def fake_fetch(asset, timeout=30):
+            return {}
+
+        def fake_stage(asset, checksums, on_progress=None):
+            raise app.ChecksumError(
+                f"checksum: not in {app.CHECKSUM_ASSET}: {asset['name']}")
+
+        original_fetch, original_stage = app.fetch_checksums, app.download_and_stage
+        app.fetch_checksums, app.download_and_stage = fake_fetch, fake_stage
+        try:
+            release = {"assets": [
+                {"name": "SHA256SUMS", "browser_download_url": "x"},
+                {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
+            self.ui._pending = ("v9.9.9", release["assets"][1], release)
+            self.ui._install_worker()
+            self._drain()
+        finally:
+            app.fetch_checksums, app.download_and_stage = original_fetch, original_stage
+        shown = self._button_text().lower()
+        self.assertIn("checksum", shown,
+                       f"status line {shown!r} does not read as a checksum failure")
+        self.assertTrue(self.ui.update_button._enabled, "the button was left disabled after a refusal")
+
+
+class NumBoxFocus(UITestCase):
+    """A field keeps eating keystrokes until something explicitly drops focus."""
+
+    def focus_and_settle(self, numbox):
+        numbox.entry.focus_set()
+        self.root.update()
+        self.assertEqual(self.root.focus_get(), numbox.entry,
+                         "setup failed to focus the entry")
+
+    def _find_segmented_for(self, variable):
+        def walk(widget):
+            if isinstance(widget, app.Segmented) and widget.var is variable:
+                return widget
+            for child in widget.winfo_children():
+                found = walk(child)
+                if found is not None:
+                    return found
+            return None
+        found = walk(self.ui.content)
+        self.assertIsNotNone(found, "no matching Segmented control found")
+        return found
+
+    def test_click_elsewhere_drops_focus(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.ACCENT)
+        self.ui.count_label.event_generate("<Button-1>", x=1, y=1)
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.LINE)
+
+    def test_click_the_entry_itself_keeps_it_focused(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.click_ms.entry.event_generate("<Button-1>", x=2, y=2)
+        self.root.update()
+        self.assertIsInstance(self.root.focus_get(), tk.Entry)
+
+    def test_click_a_different_numbox_switches_focus(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.jitter_ms.entry.event_generate("<Button-1>", x=2, y=2)
+        self.root.update()
+        self.assertEqual(self.root.focus_get(), self.ui.jitter_ms.entry)
+
+    def test_enter_blurs_without_reverting_the_value(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.click_ms.var.set("321")
+        self.ui.click_ms.entry.event_generate("<Return>")
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.LINE)
+        self.assertEqual(self.ui.click_ms.var.get(), "321")
+
+    def test_escape_blurs_without_reverting_the_value(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.click_ms.var.set("321")
+        self.ui.click_ms.entry.event_generate("<Escape>")
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.LINE)
+        self.assertEqual(self.ui.click_ms.var.get(), "321")
+
+    def test_tab_still_moves_focus(self):
+        # Non-regression: not a pinned order, just proof traversal survives.
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.click_ms.entry.event_generate("<Tab>")
+        self.root.update()
+        self.assertIsNotNone(self.root.focus_get())
+
+    def test_a_segmented_control_still_changes_its_variable(self):
+        seg = self._find_segmented_for(self.ui.button_name)
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.button_name.set("left")
+        # Third segment ("middle") of three, spanning seg.w wide.
+        seg.event_generate("<Button-1>", x=seg.w - 2, y=int(seg.h / 2))
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.button_name.get(), "middle")
+
+    def test_a_game_item_still_selects(self):
+        self.focus_and_settle(self.ui.click_ms)
+        item = self.ui.items["minecraft"]
+        item.event_generate("<Button-1>", x=5, y=5)
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.current, "minecraft")
+
+    def test_starting_from_a_background_thread_drops_focus(self):
+        # The real hotkey callback runs on the pynput listener thread, never
+        # the Tk main thread -- prove the same is true here.
+        self.ui.mouse = FakeMouse()
+        self.focus_and_settle(self.ui.click_ms)
+        worker = threading.Thread(target=self.ui.start, daemon=True)
+        worker.start()
+        worker.join(timeout=2)
+        self.pump(0.1)                      # let _drain_ui's 40 ms tick land
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.LINE)
+        self.ui.stop()
+        self.pump(0.2)
+
+
+class WindowResize(UITestCase):
+    def test_both_axes_are_resizable(self):
+        self.assertEqual(self.root.resizable(), (1, 1))
+
+    def test_minsize_matches_todays_default_size(self):
+        s = self.ui.s
+        expected = (int((app.SIDEBAR_W + 1 + app.CONTENT_W) * s), int(690 * s))
+        self.assertEqual(self.root.minsize(), expected)
+
+    def test_growing_the_window_expands_content_not_the_sidebar(self):
+        content_before = self.ui.content.winfo_width()
+        side_before = self.ui.side.winfo_width()
+        self.root.geometry("1000x900")
+        self.root.update()
+        self.assertGreater(self.ui.content.winfo_width(), content_before)
+        self.assertEqual(self.ui.side.winfo_width(), side_before)
+
+    def test_shrinking_below_minsize_is_clamped(self):
+        self.root.geometry("50x50")
+        self.root.update()
+        minw, minh = self.root.minsize()
+        self.assertGreaterEqual(self.root.winfo_width(), minw)
+        self.assertGreaterEqual(self.root.winfo_height(), minh)
 
 
 @needs_display
