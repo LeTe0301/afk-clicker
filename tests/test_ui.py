@@ -639,8 +639,28 @@ class NumBoxFocus(UITestCase):
     """A field keeps eating keystrokes until something explicitly drops focus."""
 
     def focus_and_settle(self, numbox):
-        numbox.entry.focus_set()
+        # focus_set()/event_generate() are no-ops on a widget inside an
+        # unmapped ancestor (docs/spec.md's "Test impact", finding 1/2) --
+        # every NumBox this class exercises lives in the Clicking pane,
+        # while Hotkey is the default-active tab (story #24 feature 2), so
+        # a real user has to click Clicking first before any entry inside
+        # it can take real keyboard focus. Switching the tab directly
+        # (rather than a real TabBar click) is enough here: the pane-
+        # visibility contract itself is covered separately by
+        # TabBarNavigation.
+        self.ui._set_content_tab("clicking")
         self.root.update()
+        # _set_content_tab("clicking") maps the Clicking pane for the first
+        # time, and a single root.update() does not reliably wait out the X
+        # server's MapNotify round trip -- focus_set() on a widget that
+        # isn't yet viewable is DROPPED by Tk, not queued, so calling it too
+        # early silently loses the focus request with no error. Both waits
+        # below fail closed: if the widget never becomes viewable, or never
+        # actually takes focus, within the timeout, the assertEqual still
+        # reports a genuine regression.
+        self.pump_until(lambda: numbox.entry.winfo_viewable(), timeout=1.0)
+        numbox.entry.focus_set()
+        self.pump_until(lambda: self.root.focus_get() == numbox.entry, timeout=1.0)
         self.assertEqual(self.root.focus_get(), numbox.entry,
                          "setup failed to focus the entry")
 
@@ -793,12 +813,24 @@ class RowValueColumn(UITestCase):
         # minsize width, so content genuinely stretches.
         self.root.geometry("900x760")
         self.root.update()
+        # click_ms's Clicking pane is hidden by default (story #24 feature
+        # 2); a hidden pane's geometry does not track a live resize (spec's
+        # "Test impact" finding 4), so without switching to it this
+        # assertion would still pass but for a hollow reason -- it would
+        # never actually observe the resize. Switch to the pane that owns
+        # `control` so the resize is genuinely applied before measuring.
+        self.ui._set_content_tab("clicking")
+        self.root.update()
         self.assertEqual(control.winfo_x(), before)
 
     def test_extra_width_becomes_trailing_margin_not_a_growing_gap(self):
         control = self.ui.click_ms.master
         card = control.master.master
         self.root.geometry("900x760")
+        self.root.update()
+        # Same reasoning as above: measure while the Clicking pane is
+        # actually visible and has actually received the resize.
+        self.ui._set_content_tab("clicking")
         self.root.update()
         self.assertLess(control.winfo_x() + control.winfo_width(),
                         card.winfo_width())
@@ -862,6 +894,222 @@ class RowValueColumn(UITestCase):
         self.assertLessEqual(
             hint.winfo_rootx() + hint.winfo_width(),
             self.ui.jitter_ms.winfo_rootx())
+
+
+class TabBarNavigation(UITestCase):
+    """The horizontal tab bar (story #24 feature 2, docs/spec.md): TabBar
+    itself, and the pane-visibility contract on both the game page
+    (Hotkey | Clicking) and Settings (Appearance | Updates)."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def _tab_bar(self, variable):
+        def walk(widget):
+            if isinstance(widget, app.TabBar) and widget.var is variable:
+                return widget
+            for child in widget.winfo_children():
+                found = walk(child)
+                if found is not None:
+                    return found
+            return None
+        found = walk(self.ui.content)
+        self.assertIsNotNone(found, "no matching TabBar found")
+        return found
+
+    def _click_tab(self, bar, value):
+        """A real <Button-1> at the tab's own measured x-range, per the
+        spec's acceptance criteria -- not a hand-picked pixel constant."""
+        for tab_value, _label, x1, x2, _tid in bar._tabs:
+            if tab_value == value:
+                bar.event_generate("<Button-1>", x=int((x1 + x2) / 2), y=2)
+                return
+        self.fail(f"TabBar has no tab {value!r}")
+
+    def test_hotkey_is_the_default_active_tab_on_a_fresh_game_page(self):
+        self.assertEqual(self.ui._content_tab, "hotkey")
+        self.assertEqual(self.ui.hotkey_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.clicking_pane.winfo_manager(), "")
+
+    def test_clicking_the_clicking_tab_shows_only_the_clicking_pane(self):
+        bar = self._tab_bar(self.ui.content_tab_var)
+        self._click_tab(bar, "clicking")
+        self.root.update()
+        self.assertEqual(self.ui.content_tab_var.get(), "clicking")
+        self.assertEqual(self.ui.clicking_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.hotkey_pane.winfo_manager(), "")
+
+    def test_calling_the_setter_directly_also_moves_the_tab_indicator(self):
+        # Regression: _set_content_tab used to move the pane but never wrote
+        # content_tab_var back, so a direct call (anything other than a real
+        # tab click) desynced the underline from the visible pane -- it
+        # only "worked" via the click path, where the var's own write trace
+        # is what calls this method in the first place. Calling the setter
+        # directly, with a value that DIFFERS from what the var already
+        # holds, is the one direction the click-driven tests above never
+        # exercise.
+        self.assertEqual(self.ui.content_tab_var.get(), "hotkey")
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        self.assertEqual(self.ui.clicking_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.hotkey_pane.winfo_manager(), "")
+        self.assertEqual(self.ui.content_tab_var.get(), "clicking",
+                         "the tab indicator did not follow a direct setter call")
+
+    def test_both_content_panes_widgets_exist_no_matter_which_is_packed(self):
+        # Hotkey pane is the one currently packed...
+        self.assertEqual(self.ui.hotkey_pane.winfo_manager(), "pack")
+        self.assertTrue(hasattr(self.ui, "hotkey_label"))
+        self.assertTrue(hasattr(self.ui, "apply_button"))
+        # ...but Clicking-pane widgets exist and hold their values too, even
+        # while hidden -- built unconditionally, only unpacked.
+        self.assertEqual(self.ui.clicking_pane.winfo_manager(), "")
+        self.assertTrue(self.ui.click_ms.var.get(),
+                        "click_ms should already hold this game's value, "
+                        "even while its pane is hidden")
+        self.assertTrue(hasattr(self.ui, "jitter_ms"))
+        self.assertTrue(hasattr(self.ui, "button_name"))
+
+    def test_appearance_is_the_default_active_settings_tab(self):
+        self.ui._show_settings()
+        self.root.update()
+        self.assertEqual(self.ui._settings_tab, "appearance")
+        self.assertEqual(self.ui.appearance_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.updates_pane.winfo_manager(), "")
+        self.assertTrue(hasattr(self.ui, "update_button"),
+                        "update_button should exist once Settings is open, "
+                        "regardless of which Settings tab is showing")
+
+    def test_clicking_updates_shows_only_that_pane(self):
+        self.ui._show_settings()
+        self.root.update()
+        bar = self._tab_bar(self.ui.settings_tab_var)
+        self._click_tab(bar, "updates")
+        self.root.update()
+        self.assertEqual(self.ui.settings_tab_var.get(), "updates")
+        self.assertEqual(self.ui.updates_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.appearance_pane.winfo_manager(), "")
+
+    def test_calling_the_settings_setter_directly_also_moves_the_indicator(self):
+        # Same regression/direction as the content-tab version above, for
+        # _set_settings_tab.
+        self.ui._show_settings()
+        self.root.update()
+        self.assertEqual(self.ui.settings_tab_var.get(), "appearance")
+        self.ui._set_settings_tab("updates")
+        self.root.update()
+        self.assertEqual(self.ui.updates_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.appearance_pane.winfo_manager(), "")
+        self.assertEqual(self.ui.settings_tab_var.get(), "updates",
+                         "the tab indicator did not follow a direct setter call")
+
+    def test_the_updater_still_reflects_state_while_its_tab_is_active(self):
+        self.ui._show_settings()
+        self.root.update()
+        self.ui._set_settings_tab("updates")
+        self.root.update()
+        self.ui._set_update_state("Custom status", False, app.BAD)
+        self.assertEqual(
+            self.ui.update_button.itemcget(self.ui.update_button.label, "text"),
+            "Custom status")
+        self.assertFalse(self.ui.update_button._enabled)
+
+    def test_eating_stays_conditional_inside_the_clicking_pane(self):
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        self.ui._select("minecraft")
+        self.root.update()
+        self.assertEqual(self.ui.eat_card.winfo_manager(), "pack")
+        self.ui._select("global")
+        self.root.update()
+        self.assertEqual(self.ui.eat_card.winfo_manager(), "")
+
+    def test_active_content_tab_survives_a_rebuild(self):
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        self.ui._apply_appearance("light")
+        self.root.update()
+        self.assertEqual(self.ui._content_tab, "clicking")
+        self.assertEqual(self.ui.clicking_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.hotkey_pane.winfo_manager(), "")
+
+    def test_active_settings_tab_survives_a_rebuild(self):
+        self.ui._show_settings()
+        self.root.update()
+        self.ui._set_settings_tab("updates")
+        self.root.update()
+        self.ui._apply_appearance("light")
+        self.root.update()
+        self.assertEqual(self.ui._settings_tab, "updates")
+        self.assertEqual(self.ui.updates_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.appearance_pane.winfo_manager(), "")
+
+    def test_active_content_tab_survives_a_ui_scale_rebuild(self):
+        # Same invariant as test_active_content_tab_survives_a_rebuild, but
+        # via _apply_ui_scale()'s own caller of the shared _request_rebuild()
+        # path -- a different trigger than Appearance, still the same
+        # after_idle(self._rebuild_ui) mechanism (docs/spec.md §4).
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        self.ui._apply_ui_scale("115")
+        self.root.update()
+        self.assertEqual(self.ui._content_tab, "clicking")
+        self.assertEqual(self.ui.clicking_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.hotkey_pane.winfo_manager(), "")
+
+    def test_active_settings_tab_survives_a_ui_scale_rebuild(self):
+        self.ui._show_settings()
+        self.root.update()
+        self.ui._set_settings_tab("updates")
+        self.root.update()
+        self.ui._apply_ui_scale("115")
+        self.root.update()
+        self.assertEqual(self.ui._settings_tab, "updates")
+        self.assertEqual(self.ui.updates_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.appearance_pane.winfo_manager(), "")
+
+    def test_a_running_clicker_is_unaffected_by_a_tab_switch(self):
+        # _sync_settings()'s 200ms poll feeds the live click-worker thread
+        # from Clicking-pane widgets unconditionally (docs/spec.md) -- a tab
+        # switch while it is running must not interrupt it. This is the
+        # single highest-risk invariant this feature could break, so the
+        # test genuinely switches tabs -- both directions -- while the
+        # clicker is running, rather than re-affirming the tab it is
+        # already on: a call that leaves _content_tab unchanged is a no-op
+        # and proves nothing (a prior round of this test did exactly that
+        # and passed identically with the assertion deleted).
+        self.ui.mouse = FakeMouse()
+        self.ui._select("global")
+        self.ui.click_ms.var.set("100")
+        self.pump(0.3)
+        self.ui.start()
+        self.pump(0.4)
+        self.assertTrue(self.ui.mouse.clicks,
+                        "no clicks were produced before any tab switch")
+
+        # hotkey -> clicking, while running.
+        self.assertEqual(self.ui._content_tab, "hotkey")
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        self.ui.mouse.clicks.clear()
+        self.pump(0.4)
+        self.assertTrue(self.ui.running)
+        self.assertTrue(self.ui.mouse.clicks,
+                        "the click worker stopped producing clicks after switching to Clicking")
+
+        # clicking -> hotkey, while still running.
+        self.ui._set_content_tab("hotkey")
+        self.root.update()
+        self.ui.mouse.clicks.clear()
+        self.pump(0.4)
+        self.assertTrue(self.ui.running)
+        self.assertTrue(self.ui.mouse.clicks,
+                        "the click worker stopped producing clicks after switching back to Hotkey")
+
+        self.ui.stop()
+        self.pump(0.2)
+        self.assertFalse(self.ui.running)
 
 
 @needs_display
@@ -2375,6 +2623,11 @@ class BindAllBoundOnce(UITestCase):
         self.ui._apply_appearance("light")
         self.root.update()
         self.ui._apply_appearance("dark")
+        self.root.update()
+        # click_ms lives in the Clicking pane, hidden by default (story #24
+        # feature 2) -- a real user has to click that tab before focus_set()
+        # on an entry inside it does anything real.
+        self.ui._set_content_tab("clicking")
         self.root.update()
         self.ui.click_ms.entry.focus_set()
         self.root.update()
