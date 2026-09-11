@@ -79,6 +79,13 @@ Der **Hotkey gilt global**, für alle Spiele derselbe.
 | **Hold RMB** | Rechte Maustaste dauerhaft halten. |
 | **Eat every / Hold for** | Angreifen kostet ~1 Nahrungspunkt pro 20 s, verrottetes Fleisch gibt 4. Fleisch braucht 1,6 s — 2,0 s lässt Luft für einen verzögerten Tick. |
 
+### Aussehen
+
+Das Fenster übernimmt beim Start den hell/dunkel-Modus des Systems — unter
+Windows, macOS und GNOME. Auf anderen Linux-Desktops, oder wenn sich der
+Systemwert gar nicht auslesen lässt, öffnet es sich dunkel. Die Wahl wird
+einmal beim Start gelesen, nicht laufend nachgeführt.
+
 ### Hotkey
 
 **Record** drücken, bis zu **drei Tasten gleichzeitig** halten, loslassen — die

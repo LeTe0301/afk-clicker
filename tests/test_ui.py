@@ -990,9 +990,14 @@ class DetectOsTheme(unittest.TestCase):
 
     # -- macOS: `defaults` via the _run_theme_command seam --
 
-    def test_macos_key_present_exit_0_is_dark(self):
+    def test_macos_clean_exit_0_is_dark_regardless_of_stdout(self):
+        # detect_os_theme's macOS branch never reads _run_theme_command's
+        # stdout at all -- per Apple's own convention (see the comment in
+        # detect_os_theme), AppleInterfaceStyle exists, with any value,
+        # only in dark mode, so exit status alone decides. stdout is left
+        # empty here on purpose, to not imply parsing that doesn't happen.
         app.sys.platform = "darwin"
-        app._run_theme_command = lambda args: types.SimpleNamespace(stdout="Dark\n")
+        app._run_theme_command = lambda args: types.SimpleNamespace(stdout="")
         self.assertEqual(app.detect_os_theme(), "dark")
 
     def test_macos_key_absent_nonzero_exit_is_light(self):
@@ -1061,6 +1066,23 @@ class DetectOsTheme(unittest.TestCase):
             if "color-scheme" in args:
                 return types.SimpleNamespace(stdout="'default'\n")
             return types.SimpleNamespace(stdout="'Adwaita'\n")
+        app._run_theme_command = fake
+        self.assertEqual(app.detect_os_theme(), "light")
+
+    def test_linux_gtk_theme_fallback_known_limitation_dark_theme_without_dark_in_name(self):
+        # Documents a known limitation, doesn't assert desired behaviour:
+        # "Dracula" is a real, actively-distributed dark GTK theme, but the
+        # substring heuristic has no way to know that without "dark" in its
+        # name, so it (wrongly) returns "light" here. See the comment above
+        # _detect_linux_theme's `return "dark" if "dark" in name else
+        # "light"` line -- this pins the current, imperfect behaviour so a
+        # future change to the heuristic is a deliberate choice, not an
+        # accidental regression this test would silently paper over.
+        app.sys.platform = "linux"
+        def fake(args):
+            if "color-scheme" in args:
+                return types.SimpleNamespace(stdout="'default'\n")
+            return types.SimpleNamespace(stdout="'Dracula'\n")
         app._run_theme_command = fake
         self.assertEqual(app.detect_os_theme(), "light")
 

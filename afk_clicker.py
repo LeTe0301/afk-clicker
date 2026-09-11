@@ -907,10 +907,18 @@ def _run_theme_command(args):
     errors="replace" keeps a stray non-UTF-8 byte from raising
     UnicodeDecodeError: the garbled-but-decodable result then falls through
     the normal "unrecognized value" handling in _detect_linux_theme/
-    detect_os_theme, rather than needing a fourth failure mode of its own."""
+    detect_os_theme, rather than needing a fourth failure mode of its own.
+    encoding="utf-8" is explicit rather than left to default: without it,
+    text=True decodes with subprocess._text_encoding()'s fallback,
+    locale.getencoding(), which is cp1252 on Windows -- a single-byte
+    codepage with a glyph for every byte, so it never raises
+    UnicodeDecodeError and errors="replace" never fires.
+    gsettings/defaults both emit UTF-8 regardless of the host locale, so
+    decoding as UTF-8 is correct on every platform this ever runs on
+    (darwin/linux only -- see the docstring above)."""
     return subprocess.run(args, capture_output=True, text=True,
-                           errors="replace", timeout=_THEME_DETECT_TIMEOUT,
-                           check=True)
+                           encoding="utf-8", errors="replace",
+                           timeout=_THEME_DETECT_TIMEOUT, check=True)
 
 
 def _read_windows_theme_registry():
@@ -957,6 +965,12 @@ def _detect_linux_theme():
         if not name:
             return "dark"   # exit 0 with nothing to read is the "unparseable
                              # output" case -- fail safe, don't guess.
+        # Known limitation: this substring check misclassifies real, popular
+        # dark GTK themes whose names don't contain "dark" (e.g. "Dracula",
+        # "Nordic" -> "light"). A name list would never be complete, so this
+        # is left as-is; Feature 3's Settings-tab override is the intended
+        # way for an affected user to correct it, not a growing allow-list
+        # here.
         return "dark" if "dark" in name else "light"
     except Exception:
         return "dark"   # chain ends here; no further fallback.
