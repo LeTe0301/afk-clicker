@@ -3,12 +3,13 @@
 ## Comments
 
 Comment the **why**, never the what. A comment that restates the code is noise
-that rots; a comment explaining why a value is 510 and not 400, or why a
+that rots; a comment explaining why a value is 650 and not 400, or why a
 listener is hand-rolled instead of taken from the library, is the thing nobody
 can reconstruct later.
 
-Every non-obvious constant carries its reason. `510` is Rays Works' figure and
-faster breaks the sword sweep. `2.0` seconds is rotten flesh's 1.6 plus room
+Every non-obvious constant carries its reason. `650` is Java's 12-tick (600 ms)
+sword-sweep charge plus a tick of margin; at the old 510 most hits landed
+at 10 ticks, a 76%-damage non-sweep. `2.0` seconds is rotten flesh's 1.6 plus room
 for a lagged tick. `0.25` is a debounce that also absorbs X11 auto-repeat.
 
 ## Threading

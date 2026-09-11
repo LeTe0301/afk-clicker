@@ -10,7 +10,11 @@ Until both are settled, the version stays in `0.x`.
 
 - [ ] **Settings schema version.** `settings.json` has no version field, so a
       future format change has no migration path and would silently reset
-      everyone's per-game values.
+      everyone's per-game values. Two unversioned rewrites already run in
+      `Store.__init__` (#15): entries under `games` that are not objects are
+      dropped, and a saved Minecraft `click_ms` of exactly 510 becomes 650.
+      Whatever versioned migration comes first must run **before** that
+      shape filter, or it will discard old-format data as if it were corrupt.
 - [x] **Update integrity.** The updater downloads over HTTPS and executes the
       result. It now verifies the archive against the release's `SHA256SUMS`
       before extracting anything, refuses a release that publishes none, and

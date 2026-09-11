@@ -71,7 +71,7 @@ Der **Hotkey gilt global**, für alle Spiele derselbe.
 
 | Feld | Bedeutung |
 |---|---|
-| **Interval** | Abstand zwischen zwei Klicks. 510 ms ist Rays Works' Wert für Minecraft: schneller zerlegt den Sword-Sweep. |
+| **Interval** | Abstand zwischen zwei Klicks. 650 ms deckt Javas volle Sword-Sweep-Aufladung ab (12 Ticks / 600 ms) plus einen Tick Puffer. |
 | **Random jitter** | Streut das Intervall, damit der Rhythmus nicht exakt gleichmäßig ist. |
 | **Auto-stop** | Hält nach N Minuten von selbst an. 0 heißt nie. |
 | **Mouse button** | Links, rechts oder mittig. |

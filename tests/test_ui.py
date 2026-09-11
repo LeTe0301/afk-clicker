@@ -119,7 +119,7 @@ class Sidebar(UITestCase):
 class PerGameSettings(UITestCase):
     def test_defaults_differ_per_profile(self):
         self.ui._select("minecraft")
-        self.assertEqual(self.ui.click_ms.var.get(), "510")
+        self.assertEqual(self.ui.click_ms.var.get(), "650")
         self.ui._select("global")
         self.assertEqual(self.ui.click_ms.var.get(), "250")
 
@@ -157,7 +157,7 @@ class PerGameSettings(UITestCase):
         self.pump(0.2)
         ui = self.restart()
         ui._select("minecraft")
-        self.assertEqual(ui.click_ms.var.get(), "510")
+        self.assertEqual(ui.click_ms.var.get(), "650")
 
 
 class AddedGames(UITestCase):
@@ -184,6 +184,89 @@ class CorruptConfig(UITestCase):
         with open(self.config, "w") as fh:
             fh.write("{ this is not json")
         self.assertIsInstance(app.Store(self.config).data.get("games"), dict)
+
+
+class StoreMigration(UITestCase):
+    """
+    The old 510 ms default auto-saved itself the first time Minecraft was
+    ever detected -- see the migration comment in Store.__init__ -- so a
+    stored 510 is not evidence anyone chose it on purpose. These tests write
+    the raw settings file directly and load a fresh Store; the UI built by
+    setUp is not exercised.
+    """
+
+    def _write(self, data):
+        with open(self.config, "w") as fh:
+            json.dump(data, fh)
+
+    def test_the_old_default_is_migrated(self):
+        self._write({"games": {"minecraft": {"click_ms": 510}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 650)
+
+    def test_a_tuned_value_is_left_alone(self):
+        for click_ms in (600, 700, 510.5):
+            with self.subTest(click_ms=click_ms):
+                self._write({"games": {"minecraft": {"click_ms": click_ms}}})
+                store = app.Store(self.config)
+                self.assertEqual(
+                    store.data["games"]["minecraft"]["click_ms"], click_ms)
+
+    def test_only_the_minecraft_profile_is_touched(self):
+        self._write({"games": {
+            "global": {"click_ms": 510},
+            "custom:some other game": {"click_ms": 510},
+        }})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"]["global"]["click_ms"], 510)
+        self.assertEqual(
+            store.data["games"]["custom:some other game"]["click_ms"], 510)
+
+    def test_a_missing_games_key_starts_from_defaults(self):
+        self._write({"hotkey": None, "selected": None})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"], {})
+
+    def test_a_corrupt_file_starts_from_defaults(self):
+        with open(self.config, "w") as fh:
+            fh.write("{ this is not json")
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"], {})
+
+    def test_a_null_minecraft_entry_does_not_crash_the_load(self):
+        self._write({"games": {"minecraft": None}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"].get("minecraft", {}), {})
+
+    def test_a_non_dict_games_value_does_not_crash_the_load(self):
+        self._write({"games": "oops"})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"], {})
+
+    def test_a_list_minecraft_entry_does_not_crash_the_load(self):
+        self._write({"games": {"minecraft": []}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"].get("minecraft", {}), {})
+
+    def test_a_string_click_ms_is_not_mistaken_for_the_old_default(self):
+        # "510" is not the int/float 510 -- an exact-match migration must
+        # leave it alone rather than coerce-and-compare.
+        self._write({"games": {"minecraft": {"click_ms": "510"}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"]["minecraft"]["click_ms"], "510")
+
+    def test_the_migration_is_a_no_op_on_the_next_load(self):
+        # load, save, load again -- once the corrected value has been
+        # written back the same way the old default was, a second load
+        # finds 650 already on disk and the equality check no-ops.
+        self._write({"games": {"minecraft": {"click_ms": 510}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 650)
+        store.save()
+        on_disk = json.load(open(self.config))
+        self.assertEqual(on_disk["games"]["minecraft"]["click_ms"], 650)
+        store2 = app.Store(self.config)
+        self.assertEqual(store2.data["games"]["minecraft"]["click_ms"], 650)
 
 
 class ClickLoop(UITestCase):

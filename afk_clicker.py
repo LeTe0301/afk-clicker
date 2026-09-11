@@ -53,7 +53,7 @@ OK      = "#35d07f"
 BAD     = "#ff5f56"
 
 # Rotten flesh is 1.6 s; leave headroom so a lagged tick still finishes the eat.
-DEFAULT_CLICK_MS = 510      # Rays Works' figure: faster than this breaks the sword sweep
+DEFAULT_CLICK_MS = 650      # 12 ticks (600 ms) is Java's full sword-sweep charge; +1 tick covers click/tick quantisation jitter
 DEFAULT_EAT_EVERY_S = 75    # attacking burns ~1 food point / 20 s; flesh restores 4
 DEFAULT_EAT_HOLD_S = 2.0
 
@@ -719,6 +719,35 @@ class Store:
         except (OSError, ValueError):
             pass                      # missing or damaged -> start from defaults
 
+        # The same "corrupt file is replaced, never fatal" contract applies
+        # one level down: a valid-JSON-wrong-shape "games" (not a dict, or a
+        # per-game entry that isn't one -- null/list/str instead of {}) is as
+        # untrustworthy as a damaged file. Nothing above validates that shape,
+        # so every reader of self.data["games"] -- this migration, game(),
+        # and the profile-defaults merge in _select() -- inherits whatever
+        # crashes it inherits. Dropping the offending entries here, once,
+        # keeps that guarantee in the one place that already does this kind
+        # of filtering instead of pushing an isinstance check onto each
+        # reader individually.
+        games = self.data.get("games")
+        if not isinstance(games, dict):
+            games = {}
+        self.data["games"] = {gid: g for gid, g in games.items()
+                               if isinstance(g, dict)}
+
+        # _persist() writes this value to disk automatically the first time
+        # Minecraft is ever selected -- including the automatic _select() a
+        # window-detection triggers, before a user touches the field -- so a
+        # stored 510 (the old default) is that auto-save having happened, not
+        # a deliberate choice; any other value is left alone because it is.
+        # In-memory only: this does not call save() itself, so the corrected
+        # value reaches disk the same way the old default did -- via the next
+        # natural _persist() (selecting Minecraft, which happens automatically
+        # on detection) -- rather than Store.__init__ taking on a write it
+        # has never performed before.
+        if self.data["games"].get("minecraft", {}).get("click_ms") == 510:
+            self.data["games"]["minecraft"]["click_ms"] = 650
+
     def save(self):
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -751,8 +780,8 @@ PROFILES = [
         "name": "Minecraft",
         "titles": ("minecraft",),
         "eating": True,
-        "note": "510 ms is Rays Works' figure — faster breaks the sword sweep.",
-        "defaults": {"click_ms": 510, "jitter_ms": 0, "autostop_min": 0,
+        "note": "650 ms: Java sword full charge is 600 ms (12 ticks), +1 tick margin.",
+        "defaults": {"click_ms": 650, "jitter_ms": 0, "autostop_min": 0,
                      "button": "left", "eat_mode": "pause",
                      "eat_every": 75, "eat_hold": 2.0},
     },
