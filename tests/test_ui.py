@@ -6,6 +6,7 @@ import sys
 import threading
 import tempfile
 import time
+import traceback
 import types
 import unittest
 
@@ -32,11 +33,40 @@ class FakeMouse:
         self.pressed.append(("release", button))
 
 
+class CapturesCallbackExceptions:
+    """Mixed into a TestCase: fails the test if Tk's own dispatcher ever had
+    to fall back to report_callback_exception -- an uncaught exception
+    inside a bound command, a variable trace, an after()/after_idle() job,
+    or a <Configure> handler. Tk's default report_callback_exception just
+    prints "Exception in Tkinter callback" plus the traceback to stderr and
+    otherwise carries on, so a test that never looks at stderr can pass
+    clean next to a real, swallowed crash -- exactly how
+    docs/test-review.md's Defect 1 escaped the suite the first time. See
+    docs/implementation.md "Round 2" for why this replaces a raw
+    redirect_stderr: it only ever catches genuine Tk callback exceptions,
+    never unrelated stderr noise."""
+
+    def _capture_callback_exceptions(self, root):
+        self._callback_exceptions = []
+        root.report_callback_exception = \
+            lambda exc, val, tb: self._callback_exceptions.append((exc, val, tb))
+
+    def _assert_no_callback_exceptions(self):
+        if not self._callback_exceptions:
+            return
+        exc, val, tb = self._callback_exceptions[0]
+        formatted = "".join(traceback.format_exception(exc, val, tb))
+        self.fail(
+            f"{len(self._callback_exceptions)} uncaught Tkinter callback "
+            f"exception(s) during the test; first:\n{formatted}")
+
+
 @needs_display
-class UITestCase(unittest.TestCase):
+class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
     def setUp(self):
         self.config = os.path.join(tempfile.mkdtemp(), "settings.json")
         self.root = tk.Tk()
+        self._capture_callback_exceptions(self.root)
         self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
         self.root.update()
         self.settle()
@@ -53,6 +83,7 @@ class UITestCase(unittest.TestCase):
             self.ui.on_close()
         except tk.TclError:
             pass
+        self._assert_no_callback_exceptions()
 
     def settle(self, timeout=5.0):
         """
@@ -1259,11 +1290,12 @@ class PrimaryButtonTheme(unittest.TestCase):
 
 
 @needs_display
-class CardShell(unittest.TestCase):
+class CardShell(CapturesCallbackExceptions, unittest.TestCase):
     """card() becomes a borderless canvas hosting the returned Frame."""
 
     def setUp(self):
         self.root = tk.Tk()
+        self._capture_callback_exceptions(self.root)
         self.root.geometry("500x400")
         self.parent = tk.Frame(self.root, bg=app.BG)
         self.parent.pack(fill="both", expand=True)
@@ -1271,6 +1303,7 @@ class CardShell(unittest.TestCase):
 
     def tearDown(self):
         self.root.destroy()
+        self._assert_no_callback_exceptions()
 
     def test_shell_is_a_borderless_canvas(self):
         inner = app.card(self.parent, 1.0)
@@ -1300,6 +1333,45 @@ class CardShell(unittest.TestCase):
         # go stale or clip -- a `<Configure>` storm or a redraw that only
         # fires once would leave this mismatched.
         self.assertAlmostEqual(after[2] - after[0], shell.winfo_width(), delta=2)
+
+    def test_redraw_bails_out_once_its_shell_is_destroyed(self):
+        """docs/test-review.md Finding #2: card()'s two winfo_exists()
+        guards (afk_clicker.py's _redraw()) had zero direct test coverage --
+        removing both lines still left the full suite green, since
+        coalescing alone already prevented the shapes the other tests
+        drive. Captures the real _redraw closure card() binds to
+        <Configure> by intercepting tk.Canvas.bind while card() runs (not
+        by changing card() itself -- the closure is otherwise private), then
+        dispatches it through Tk's own callback machinery (after_idle) once
+        its shell is already destroyed -- a late/stale callback firing
+        against a torn-down widget, the exact shape the guard exists for."""
+        captured = []
+        original_bind = tk.Canvas.bind
+
+        def capturing_bind(canvas_self, sequence=None, func=None, add=None):
+            if sequence == "<Configure>" and func is not None and not captured:
+                captured.append(func)
+            return original_bind(canvas_self, sequence, func, add)
+
+        tk.Canvas.bind = capturing_bind
+        try:
+            inner = app.card(self.parent, 1.0)
+        finally:
+            tk.Canvas.bind = original_bind
+        self.assertEqual(len(captured), 1, "card()'s _redraw was not captured")
+        redraw = captured[0]
+
+        shell = inner.master
+        shell.destroy()
+        self.root.update()
+
+        # A genuine Tk-dispatched callback (not a bare Python call, which
+        # would just raise straight into this test) -- exactly how a late/
+        # stale <Configure> event would actually reach _redraw() for real.
+        self.root.after_idle(redraw)
+        self.root.update()
+
+        self._assert_no_callback_exceptions()
 
 
 class EatingCardCanvas(UITestCase):
@@ -1365,6 +1437,643 @@ class RoundedCanvasBackgrounds(UITestCase):
         self.assertEqual(mismatches, [],
             "canvas bg must match its parent's bg, or the area outside the "
             "rounded shape paints a visible mismatched rectangle")
+
+
+class AppearanceStore(UITestCase):
+    """Store.__init__'s new "appearance" key -- same sanitiser shape/spirit
+    as the existing "games" filter (StoreMigration above)."""
+
+    def _write(self, data):
+        path = os.path.join(tempfile.mkdtemp(), "settings.json")
+        with open(path, "w") as fh:
+            json.dump(data, fh)
+        return path
+
+    def test_a_fresh_store_defaults_to_system(self):
+        path = os.path.join(tempfile.mkdtemp(), "settings.json")
+        self.assertEqual(app.Store(path).data["appearance"], "system")
+
+    def test_known_values_round_trip(self):
+        for value in ("system", "light", "dark"):
+            with self.subTest(value=value):
+                path = self._write({"appearance": value})
+                self.assertEqual(app.Store(path).data["appearance"], value)
+
+    def test_garbage_values_fall_back_to_system(self):
+        for value in ("sepia", None, 42):
+            with self.subTest(value=value):
+                path = self._write({"appearance": value})
+                self.assertEqual(app.Store(path).data["appearance"], "system")
+
+    def test_a_missing_appearance_key_defaults_to_system(self):
+        path = self._write({"games": {}, "hotkey": None, "selected": None})
+        self.assertEqual(app.Store(path).data["appearance"], "system")
+
+
+@needs_display
+class AppearanceThemeSwitch(CapturesCallbackExceptions, unittest.TestCase):
+    """Picking a segment rebuilds the window with the matching palette --
+    sampling the same widgets Feature 2's test_light_theme_reaches_every_
+    sampled_widget samples, using the post-rebuild references."""
+
+    def setUp(self):
+        self.config = os.path.join(tempfile.mkdtemp(), "settings.json")
+        self.root = tk.Tk()
+        self._capture_callback_exceptions(self.root)
+        self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
+        self.root.update()
+
+    def tearDown(self):
+        try:
+            self.ui.on_close()
+        except tk.TclError:
+            pass
+        self._assert_no_callback_exceptions()
+        # Unconditional: no later test in the suite may inherit Quartz.
+        app.set_active_theme("dark")
+
+    def _assert_matches(self, palette):
+        self.assertEqual(self.ui.root.cget("bg"), palette["BG"])
+        self.assertEqual(self.ui.eat_card_inner.cget("bg"), palette["CARD"])
+        self.ui.apply_button.set_enabled(True)
+        self.assertEqual(
+            self.ui.apply_button.itemcget(self.ui.apply_button.shape, "fill"),
+            palette["ACCENT"])
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), palette["LINE"])
+
+    def test_switching_to_light_and_back_repaints_the_rebuilt_widgets(self):
+        old_click_ms = self.ui.click_ms
+        old_apply_button = self.ui.apply_button
+
+        self.ui._apply_appearance("light")
+        self.root.update()
+        # Proves the rebuild actually replaced the widgets, not that stale
+        # references happen to still resolve.
+        self.assertIsNot(self.ui.click_ms, old_click_ms)
+        self.assertIsNot(self.ui.apply_button, old_apply_button)
+        self._assert_matches(app.THEMES["light"])
+
+        self.ui._apply_appearance("dark")
+        self.root.update()
+        self._assert_matches(app.THEMES["dark"])
+
+    def test_appearance_is_persisted_to_disk(self):
+        self.ui._apply_appearance("light")
+        self.root.update()
+        on_disk = json.load(open(self.config, encoding="utf-8"))
+        self.assertEqual(on_disk["appearance"], "light")
+
+
+class SettingsNavigation(UITestCase):
+    """The sidebar entry and the content-pane swap between the per-game form
+    and the Settings page."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def _appearance_segment(self):
+        def walk(widget):
+            if isinstance(widget, app.Segmented) and widget.var is self.ui.appearance_var:
+                return widget
+            for child in widget.winfo_children():
+                found = walk(child)
+                if found is not None:
+                    return found
+            return None
+        found = walk(self.ui.content)
+        self.assertIsNotNone(found, "no Appearance Segmented control found")
+        return found
+
+    def test_sidebar_has_a_settings_entry_plus_the_untouched_update_widgets(self):
+        # 3a's interim sidebar: games -> Add current game -> Settings (new) ->
+        # Check for updates -> version. The last two are unmoved (Feature 3b).
+        self.assertIsInstance(self.ui.settings_item, app.SettingsItem)
+        self.assertIsInstance(self.ui.update_button, app.Button)
+        self.assertEqual(self.ui.version_label.cget("text"), f"v{app.__version__}")
+
+    def test_games_count_excludes_the_settings_entry(self):
+        expected = f"GAMES   {len(self.ui.profiles)}"
+        self.assertEqual(self.ui.count_label.cget("text"), expected)
+        self.ui._show_settings()
+        self.root.update()
+        self.assertEqual(self.ui.count_label.cget("text"), expected)
+        self.assertNotIn("settings", self.ui.items)
+
+    def test_opening_settings_deselects_every_game_and_selects_settings(self):
+        self.ui._select("minecraft")
+        self.ui._show_settings()
+        self.root.update()
+        self.assertTrue(self.ui._settings_open)
+        self.assertTrue(self.ui.settings_item.selected)
+        for item in self.ui.items.values():
+            self.assertFalse(item.selected)
+        self.assertEqual(self.ui.current, "minecraft", "leaving is unchanged while Settings is open")
+
+    def test_clicking_a_game_closes_settings(self):
+        self.ui._show_settings()
+        self.root.update()
+        self.ui._select("minecraft")
+        self.root.update()
+        self.assertFalse(self.ui._settings_open)
+        self.assertFalse(self.ui.settings_item.selected)
+        self.assertEqual(self.ui.current, "minecraft")
+
+    def test_hotkey_card_is_never_part_of_the_settings_page(self):
+        old_hotkey_label = self.ui.hotkey_label
+        self.ui._show_settings()
+        self.root.update()
+        self.assertFalse(old_hotkey_label.winfo_exists(),
+                         "hotkey card should have been torn down, not reused")
+
+    def test_a_selected_game_survives_a_rebuild_from_the_game_view(self):
+        self.ui._select("minecraft")
+        self.root.update()
+        self.ui._apply_appearance("light")
+        self.root.update()
+        self.assertEqual(self.ui.current, "minecraft")
+        self.assertFalse(self.ui._settings_open)
+        self.assertEqual(self.ui.click_ms.var.get(), "650")
+
+    def test_settings_page_stays_open_across_a_theme_switch_with_the_new_segment_selected(self):
+        self.ui._show_settings()
+        self.root.update()
+        seg = self._appearance_segment()
+        seg.event_generate("<Button-1>", x=seg.w - 2, y=int(seg.h / 2))  # "Dark", 3rd of 3
+        self.root.update()
+        self.assertTrue(self.ui._settings_open)
+        self.assertTrue(self.ui.settings_item.selected)
+        self.assertEqual(self.ui.appearance_var.get(), "dark")
+
+    def test_hint_text_reflects_the_cached_os_theme(self):
+        self.ui._os_theme = "light"
+
+        def find_hint(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, tk.Label) and \
+                        child.cget("text").startswith("System is currently"):
+                    return child
+                found = find_hint(child)
+                if found is not None:
+                    return found
+            return None
+
+        self.ui._show_settings()
+        self.root.update()
+        hint = find_hint(self.ui.content)
+        self.assertIsNotNone(hint, "no OS-theme hint label found")
+        self.assertEqual(hint.cget("text"), "System is currently light")
+
+
+class RunningClickerSurvivesRebuild(UITestCase):
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_worker_running_and_clicks_continue_across_a_rebuild(self):
+        self.ui.mouse = FakeMouse()
+        self.ui._select("global")
+        self.ui.click_ms.var.set("60")
+        self.pump(0.3)                          # let the snapshot catch up
+        self.ui.start()
+        self.pump(0.3)
+        old_worker = self.ui.worker
+        self.assertTrue(self.ui.running)
+
+        self.ui._apply_appearance("light")      # runs synchronously, main thread
+        self.root.update()
+
+        self.assertIs(self.ui.worker, old_worker)
+        self.assertTrue(self.ui.worker.is_alive())
+        self.assertTrue(self.ui.running)
+        self.ui.mouse.clicks.clear()
+        self.pump(0.3)
+        self.assertTrue(self.ui.mouse.clicks, "no clicks landed after the rebuild")
+        self.assertEqual(
+            self.ui.status.itemcget(self.ui.status.text, "text"), "RUNNING")
+
+        self.ui.stop()
+        self.pump(0.2)
+
+
+class HotkeyListenerSurvivesRebuild(UITestCase):
+    needs_input_permission = unittest.skipIf(
+        app is not None and app.sys.platform == "darwin",
+        "starting a listener aborts the process on macOS -- see issue #7")
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    @needs_input_permission
+    def test_listener_object_identity_is_unchanged_across_a_rebuild(self):
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
+        self.ui.apply_hotkey()
+        self.root.update()
+        listener = self.ui.hk_listener
+        self.assertIsNotNone(listener)
+
+        self.ui._apply_appearance("light")
+        self.root.update()
+
+        self.assertIs(self.ui.hk_listener, listener)
+        self.assertTrue(self.ui.hk_listener.running)
+
+
+class AfterJobsAreNotDuplicated(UITestCase):
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def _after_count(self):
+        return len(self.root.tk.call("after", "info"))
+
+    def test_exactly_three_after_jobs_survive_three_rebuilds(self):
+        # ui._timers is an ever-growing log -- each of the 3 self-rescheduling
+        # jobs appends a fresh id every time it fires, even with no rebuild
+        # at all, so its size only means "exactly 3" in the instant right
+        # after a rebuild resets it (_rebuild_ui does self._timers = []).
+        # Checked right after each rebuild, before its own jobs have had a
+        # chance to fire and grow the list again.
+        for value in ("light", "dark", "light"):
+            self.ui._apply_appearance(value)
+            self.root.update()          # runs the after_idle-deferred rebuild
+            self.assertEqual(len(self.ui._timers), 3)
+            self.assertEqual(self._after_count(), 3)
+
+
+class BindAllBoundOnce(UITestCase):
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_bind_all_is_never_reissued_by_a_rebuild(self):
+        calls = []
+        orig_bind_all = self.root.bind_all
+
+        def counting(*a, **kw):
+            calls.append((a, kw))
+            return orig_bind_all(*a, **kw)
+        self.root.bind_all = counting
+        try:
+            self.ui._apply_appearance("light")
+            self.root.update()
+            self.ui._apply_appearance("dark")
+            self.root.update()
+            self.assertEqual(calls, [], "bind_all was called again by a rebuild")
+        finally:
+            self.root.bind_all = orig_bind_all
+
+    def test_a_click_still_drops_focus_exactly_once_after_two_theme_changes(self):
+        self.ui._apply_appearance("light")
+        self.root.update()
+        self.ui._apply_appearance("dark")
+        self.root.update()
+        self.ui.click_ms.entry.focus_set()
+        self.root.update()
+        calls = []
+        original = self.ui._maybe_drop_focus
+        self.ui.count_label.bind("<Button-1>", lambda e: calls.append(1), add="+")
+        self.ui.count_label.event_generate("<Button-1>", x=1, y=1)
+        self.root.update()
+        self.assertEqual(calls, [1])
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+
+
+class DrainUiSurvivesAStaleClosure(UITestCase):
+    """The permanent-death bug: a self.status.set bound method captured
+    before a rebuild must not permanently kill _drain_ui when it raises
+    TclError on the now-destroyed canvas -- the loop must drop the stale
+    closure and keep draining, so a later queued update still applies."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_a_later_queued_update_still_applies_after_a_stale_closure(self):
+        stale = self.ui.status.set          # bound to the pre-rebuild canvas,
+                                             # exactly how the old code used
+                                             # to enqueue it
+        self.ui._rebuild_ui()
+        self.root.update()
+
+        self.ui._ui_queue.put((stale, ("OFF", app.BAD, "")))
+        self.ui._ui_queue.put((self.ui._set_status, ("RUNNING", app.OK, "")))
+
+        self.pump_until(
+            lambda: self.ui.status.itemcget(self.ui.status.text, "text") == "RUNNING")
+        self.assertEqual(
+            self.ui.status.itemcget(self.ui.status.text, "text"), "RUNNING")
+
+
+class OverlappingAppearanceChanges(UITestCase):
+    """docs/test-review.md Defect 1: two Appearance changes landing before
+    the first after_idle(self._rebuild_ui) has run used to raise an
+    uncaught TclError -- card()'s _redraw() calls inner.update_idletasks(),
+    which reentrantly ran the SECOND already-queued idle rebuild mid-way
+    through the first one, tearing down widgets the first rebuild's own
+    card() calls were still holding references to. _apply_appearance() now
+    coalesces: at most one rebuild is ever pending. CapturesCallbackExceptions
+    (via UITestCase) is what actually proves "no crash" here -- Tk prints a
+    swallowed callback exception to stderr and otherwise carries on, so an
+    assertion on the app's own state alone would not have caught this."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def _appearance_segment(self):
+        def walk(widget):
+            if isinstance(widget, app.Segmented) and widget.var is self.ui.appearance_var:
+                return widget
+            for child in widget.winfo_children():
+                found = walk(child)
+                if found is not None:
+                    return found
+            return None
+        found = walk(self.ui.content)
+        self.assertIsNotNone(found, "no Appearance Segmented control found")
+        return found
+
+    def test_two_rapid_appearance_changes_before_the_idle_rebuild_drains(self):
+        self.ui._apply_appearance("light")
+        self.ui._apply_appearance("dark")
+        self.root.update()
+        self.assertEqual(self.root.cget("bg"), app.THEMES["dark"]["BG"])
+
+    def test_five_rapid_appearance_changes_coalesce_into_exactly_one_rebuild(self):
+        calls = []
+        original_rebuild = self.ui._rebuild_ui
+
+        def counting():
+            calls.append(1)
+            return original_rebuild()
+        self.ui._rebuild_ui = counting
+        try:
+            for value in ("light", "dark", "light", "dark", "light"):
+                self.ui._apply_appearance(value)
+            self.root.update()
+        finally:
+            self.ui._rebuild_ui = original_rebuild
+        self.assertEqual(
+            len(calls), 1,
+            "5 rapid Appearance picks must coalesce into exactly one rebuild")
+        self.assertEqual(self.root.cget("bg"), app.THEMES["light"]["BG"])
+
+    def test_two_real_segmented_clicks_with_no_pump_between_them(self):
+        self.ui._show_settings()
+        self.root.update()
+        seg = self._appearance_segment()
+        seg_w = seg.w / 3
+        # Real <Button-1> events on the actual control, back to back, no
+        # root.update() between them -- a physically plausible fast
+        # double-click; see docs/test-review.md's repro #2.
+        seg.event_generate("<Button-1>", x=int(seg_w * 1.5), y=int(seg.h / 2))  # "Light"
+        seg.event_generate("<Button-1>", x=int(seg_w * 2.5), y=int(seg.h / 2))  # "Dark"
+        self.root.update()
+        self.assertEqual(self.ui.appearance_var.get(), "dark")
+        self.assertEqual(self.root.cget("bg"), app.THEMES["dark"]["BG"])
+
+    def test_on_close_between_an_appearance_change_and_its_idle_rebuild(self):
+        self.ui._apply_appearance("light")   # queues after_idle(self._rebuild_ui)
+        job_id = self.ui._rebuild_after_id
+        self.assertIsNotNone(job_id, "no idle rebuild was actually pending")
+
+        # _release_right() is on_close()'s last call before root.destroy() --
+        # hooking it is the last point at which "after info" can still be
+        # queried at all, and proves the cancellation happened strictly
+        # before destroy(), not just "eventually".
+        original_release = self.ui._release_right
+        checked = []
+
+        def patched_release():
+            original_release()
+            checked.append(self.root.tk.call("after", "info"))
+        self.ui._release_right = patched_release
+        try:
+            self.ui.on_close()               # closes before that job ever runs
+        finally:
+            self.ui._release_right = original_release
+        self.assertEqual(len(checked), 1, "the patched _release_right never ran")
+        self.assertNotIn(job_id, checked[0],
+                         "on_close() left the pending idle rebuild scheduled")
+
+        try:
+            self.root.update()               # give the stale idle job a turn
+        except tk.TclError:
+            pass
+        self._assert_no_callback_exceptions()
+
+
+class ReentrantAppearanceChangeDuringRebuild(UITestCase):
+    """docs/test-review.md Round 2 review, Finding #1: _rebuild_ui() clears
+    self._rebuild_after_id to None at its own top, before its body runs. An
+    _apply_appearance() call from *inside* that body (a future synchronous
+    internal caller -- not reachable through today's only real caller, a
+    <Button-1>-driven trace, but not enforced against either) would see
+    None and schedule a fresh after_idle job, which the SAME still-running
+    rebuild's own card() calls then reentrantly service via
+    update_idletasks() -- reproducing Defect 1's exact crash through a
+    different door (probe5_reentrant_card.py). self._rebuilding/
+    self._rebuild_wanted close it: while a rebuild is running,
+    _apply_appearance() only marks a follow-up wanted; _rebuild_ui()'s own
+    finally block schedules exactly one once it has fully finished."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_appearance_change_fired_from_inside_a_rebuild_does_not_crash(self):
+        # _build_content() (the default, Settings-closed view) calls card()
+        # three times in a row (hotkey, clicking, eating) -- unlike
+        # _build_settings()'s single card, this gives a SECOND/THIRD card()
+        # call, still inside the SAME still-running rebuild, a chance to
+        # reentrantly service a job queued between them. Matches
+        # probe5_reentrant_card.py's own shape and its crash site
+        # (Row(hk, "Toggle", s), the card right after the injection point).
+        rebuild_calls = []
+        original_rebuild = self.ui._rebuild_ui
+
+        def counting_rebuild():
+            rebuild_calls.append(1)
+            return original_rebuild()
+        self.ui._rebuild_ui = counting_rebuild
+
+        original_card = app.card
+        fired = []
+
+        def patched_card(parent, s):
+            result = original_card(parent, s)
+            if not fired:
+                fired.append(1)
+                # Simulates a trace/callback re-entering _apply_appearance()
+                # WHILE the current _rebuild_ui() call (still inside
+                # _build_content(), about to build its next card()) is
+                # still on the stack.
+                self.ui._apply_appearance("dark")
+            return result
+        app.card = patched_card
+
+        try:
+            self.ui._apply_appearance("light")   # queues the first (only) idle rebuild
+            self.pump_until(lambda: len(rebuild_calls) >= 2, timeout=2.0)
+        finally:
+            app.card = original_card
+            self.ui._rebuild_ui = original_rebuild
+
+        self.assertEqual(
+            len(rebuild_calls), 2,
+            "exactly one follow-up rebuild should run once the in-progress "
+            "one finishes, on top of the one 'light' itself queued")
+        self.assertEqual(
+            self.root.cget("bg"), app.THEMES["dark"]["BG"],
+            "final theme should match the last choice ('dark', applied "
+            "mid-rebuild), not the one the in-progress rebuild started with")
+        self._assert_no_callback_exceptions()
+
+
+class QueuedStatusSurvivesARebuild(UITestCase):
+    """Round 8 coverage gap (docs/test-review.md): reverting _set_status's
+    fresh-lookup indirection at all 6 call sites in start()/stop()/loop()
+    left the full suite green, because every existing rebuild test only
+    ever lands a RUNNING/OFF update -- exactly what _rebuild_ui()'s own
+    boolean resync already writes, so the two implementations are
+    indistinguishable there. EATING is never written by the resync, so it
+    is the only way to tell "the queued update actually landed" apart from
+    "the resync happened to already agree". Goes through loop()'s real
+    EATING call site (not a hand-built queue tuple, unlike
+    DrainUiSurvivesAStaleClosure above), timed via StatusPill.__init__ to
+    land in the exact window _set_status's own docstring names: after
+    _rebuild_ui() has already swapped in a fresh _ui_queue, but before
+    self.status is reassigned to the new pill."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_a_queued_eating_update_lands_on_the_post_rebuild_pill(self):
+        self.ui.mouse = FakeMouse()
+        self.ui._select("global")
+        self.ui.button_name.set("left")
+        self.ui.eat_mode.set("pause")
+        self.ui.eat_every.var.set("5")     # the field's own enforced minimum
+        self.ui.eat_hold.var.set("5")
+        self.ui._sync_settings()           # settings snapshot the worker reads
+        self.ui.running = True
+        old_status = self.ui.status
+
+        # Fast-forward the worker's own clock instead of waiting 5 real
+        # seconds for eat_every to elapse: every time.monotonic() call
+        # inside afk_clicker jumps 1 (fake) second forward, so loop()'s
+        # deadlines/intervals stay internally consistent (all computed from
+        # the same function) while "eat_every seconds since the last meal"
+        # arrives within a handful of calls. real_monotonic is captured
+        # before patching so this test's own polling below keeps using the
+        # real wall clock -- time.monotonic is one shared module-level
+        # function, patching app.time.monotonic changes what plain
+        # time.monotonic() resolves to here too.
+        real_monotonic = app.time.monotonic
+        fake_clock = [0.0]
+
+        def fake_monotonic():
+            fake_clock[0] += 1.0
+            return fake_clock[0]
+
+        original_init = app.StatusPill.__init__
+
+        def patched_init(pill_self, *a, **kw):
+            original_init(pill_self, *a, **kw)
+            # Fires from inside _build_ui(), called by _rebuild_ui() AFTER
+            # its own self._ui_queue = queue.SimpleQueue() swap but BEFORE
+            # self.status is reassigned to this new pill -- the narrow
+            # window _set_status's docstring describes. Starting the real
+            # worker here, instead of before _rebuild_ui() at all, is what
+            # guarantees its self._ui(self._set_status, "EATING", ...) call
+            # lands inside that window rather than being dropped by the
+            # queue swap.
+            worker = threading.Thread(target=self.ui.loop, daemon=True)
+            worker.start()
+            deadline = real_monotonic() + 2.0
+            while real_monotonic() < deadline and not self.ui.right_held:
+                time.sleep(0.005)
+            self.assertTrue(self.ui.right_held,
+                            "worker never reached the EATING branch")
+            self.ui.running = False        # let the interruptible _sleep(hold) exit
+            worker.join(timeout=2.0)
+
+        app.time.monotonic = fake_monotonic
+        app.StatusPill.__init__ = patched_init
+        try:
+            self.ui._rebuild_ui()
+        finally:
+            app.StatusPill.__init__ = original_init
+            app.time.monotonic = real_monotonic
+
+        self.assertIsNot(self.ui.status, old_status,
+                         "the rebuild should have replaced the pill")
+        self.pump_until(
+            lambda: self.ui.status.itemcget(self.ui.status.text, "text") == "EATING")
+        self.assertEqual(
+            self.ui.status.itemcget(self.ui.status.text, "text"), "EATING",
+            "the queued EATING update did not land on the post-rebuild pill")
+
+
+@needs_display
+class StartupHonoursSavedAppearance(CapturesCallbackExceptions, unittest.TestCase):
+    def tearDown(self):
+        app.set_active_theme("dark")
+
+    def test_a_saved_light_appearance_opens_already_light_no_settings_visit_needed(self):
+        config = os.path.join(tempfile.mkdtemp(), "settings.json")
+        with open(config, "w") as fh:
+            json.dump({"appearance": "light"}, fh)
+        store = app.Store(config)
+        appearance = store.data["appearance"]
+        os_theme = app.detect_os_theme() if appearance == "system" else None
+        app.set_active_theme(app.resolve_appearance(appearance, os_theme))
+        root = tk.Tk()
+        self._capture_callback_exceptions(root)
+        ui = app.AfkAutoclicker(root, store=store, os_theme=os_theme)
+        root.update()
+        try:
+            self.assertEqual(root.cget("bg"), app.THEMES["light"]["BG"])
+        finally:
+            try:
+                ui.on_close()
+            except tk.TclError:
+                pass
+        self._assert_no_callback_exceptions()
+
+    def test_system_appearance_detects_at_most_once_including_a_later_repick(self):
+        config = os.path.join(tempfile.mkdtemp(), "settings.json")
+        store = app.Store(config)          # appearance defaults to "system"
+        calls = []
+        orig = app.detect_os_theme
+        app.detect_os_theme = lambda: (calls.append(1), "light")[1]
+        root = ui = None
+        try:
+            appearance = store.data["appearance"]
+            os_theme = app.detect_os_theme() if appearance == "system" else None
+            app.set_active_theme(app.resolve_appearance(appearance, os_theme))
+            root = tk.Tk()
+            self._capture_callback_exceptions(root)
+            ui = app.AfkAutoclicker(root, store=store, os_theme=os_theme)
+            root.update()
+            ui._show_settings()
+            root.update()
+            ui.appearance_var.set("light")
+            root.update()
+            ui.appearance_var.set("system")   # re-pick "System" mid-session
+            root.update()
+            self.assertEqual(len(calls), 1)
+        finally:
+            app.detect_os_theme = orig
+            if ui is not None:
+                try:
+                    ui.on_close()
+                except tk.TclError:
+                    pass
+        self._assert_no_callback_exceptions()
 
 
 if __name__ == "__main__":

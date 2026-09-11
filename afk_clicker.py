@@ -119,6 +119,16 @@ def set_active_theme(name):
         _ACTIVE["OK"], _ACTIVE["BAD"])
 
 
+def resolve_appearance(value, cached_os_theme=None):
+    """"system"/"light"/"dark" -> a THEMES key. cached_os_theme, if given,
+    is reused instead of calling detect_os_theme() again -- story.md:
+    detection happens once per process, not on every resolution (including
+    a mid-session re-pick of "System" in Settings)."""
+    if value != "system":
+        return value
+    return cached_os_theme if cached_os_theme is not None else detect_os_theme()
+
+
 PILL_R = 999      # self-clamps to height/2 via round_rect's own min() -- a
                    # true capsule regardless of the widget's exact height.
 CARD_R = 12        # cards and sidebar rows (mock's --rc / --rb at 12px)
@@ -791,7 +801,8 @@ class Store:
 
     def __init__(self, path=None):
         self.path = path or config_path()
-        self.data = {"games": {}, "hotkey": None, "selected": None}
+        self.data = {"games": {}, "hotkey": None, "selected": None,
+                     "appearance": "system"}
         try:
             with open(self.path, encoding="utf-8") as fh:
                 loaded = json.load(fh)
@@ -815,6 +826,13 @@ class Store:
             games = {}
         self.data["games"] = {gid: g for gid, g in games.items()
                                if isinstance(g, dict)}
+
+        # Same contract, one key: a garbage on-disk "appearance" (wrong type,
+        # a typo, an old story.md-draft "theme"-style value, null) is as
+        # untrustworthy as a damaged file -- resolve_appearance()/
+        # set_active_theme() never see it unvalidated.
+        if self.data["appearance"] not in ("system", "light", "dark"):
+            self.data["appearance"] = "system"
 
         # _persist() writes this value to disk automatically the first time
         # Minecraft is ever selected -- including the automatic _select() a
@@ -1272,7 +1290,18 @@ def card(parent, s):
 
     def _redraw(_event=None):
         nonlocal shape_id
+        if not shell.winfo_exists():
+            return                      # a torn-down card fielding a stale/
+                                         # late <Configure> for a tree that
+                                         # is already gone -- nothing to redraw
         inner.update_idletasks()
+        if not shell.winfo_exists():
+            return                      # update_idletasks() can itself run
+                                         # another already-queued idle
+                                         # callback (e.g. a rebuild) that
+                                         # destroys this very card while this
+                                         # call is still on the stack -- see
+                                         # _rebuild_ui()'s docstring
         w = shell.winfo_width() or (inner.winfo_reqwidth() + 2 * pad)
         h = inner.winfo_reqheight() + 2 * pad
         shell.config(height=h)
@@ -1326,6 +1355,36 @@ class GameItem(tk.Canvas):
         self.itemconfig(self.dot, fill=OK if self.running else LINE)
 
 
+class SettingsItem(tk.Canvas):
+    """The sidebar's one non-game destination. Structurally a GameItem minus
+    the running-state dot -- there is nothing to run -- and with no profile
+    behind it: `on_click` takes no id, it just opens Settings."""
+
+    def __init__(self, parent, on_click, s, width=SIDEBAR_W - 16, height=38):
+        super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, cursor="hand2",
+                         width=int(width * s), height=int(height * s))
+        self.on_click = on_click
+        self.selected = False
+        w, h = int(width * s), int(height * s)
+        self.shape = round_rect(self, 1, 1, w - 1, h - 1, CARD_R * s, fill=BG, outline="")
+        self.text = self.create_text(16 * s, h / 2, anchor="w", text="Settings",
+                                     fill=MUTED, font=("Segoe UI", int(9.5 * s)))
+        self.bind("<Enter>", lambda e: self._paint(hover=True))
+        self.bind("<Leave>", lambda e: self._paint())
+        self.bind("<Button-1>", lambda e: self.on_click())
+        self._paint()
+
+    def set_state(self, selected=None):
+        if selected is not None:
+            self.selected = selected
+        self._paint()
+
+    def _paint(self, hover=False):
+        fill = CARD_HI if self.selected else (CARD if hover else BG)
+        self.itemconfig(self.shape, fill=fill)
+        self.itemconfig(self.text, fill=INK if self.selected else MUTED)
+
+
 class Row(tk.Frame):
     """Label on the left, control on the right -- the NVIDIA settings-table look."""
 
@@ -1368,13 +1427,17 @@ class NumBox(tk.Frame):
 
 
 class AfkAutoclicker:
-    def __init__(self, root, store=None):
+    def __init__(self, root, store=None, os_theme=None):
         self.root = root
         self.s = s = root.tk.call("tk", "scaling") / 1.333  # 1.0 at 96 dpi
         self.store = store if store is not None else Store()
+        # Feature 2's detect_os_theme(), if it already ran once in __main__
+        # to resolve a saved "system" appearance -- never re-detected from
+        # here, only ever read or (once) lazily filled in, see
+        # _apply_appearance()/_build_settings().
+        self._os_theme = os_theme
 
         root.title("AFK Farm Clicker")
-        root.config(bg=BG)
         root.resizable(True, True)
         # Both panes still turn off geometry propagation to hold their tuned
         # widths, so nothing tells the window how tall to start -- without an
@@ -1385,7 +1448,14 @@ class AfkAutoclicker:
         root.minsize(minw, minh)
         root.geometry(f"{minw}x{minh}")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        root.bind_all("<Button-1>", self._maybe_drop_focus)
+        root.bind_all("<Button-1>", self._maybe_drop_focus)  # bound once, here --
+            # NOT inside _build_ui(): root itself survives every rebuild
+            # (only its *children* are destroyed), and this tag ("all") is
+            # interpreter-wide -- it already fires for every widget in every
+            # tree, including a rebuilt one and any future tab this grows.
+            # Re-issuing it inside _build_ui()/_rebuild_ui() would be a
+            # pointless duplicate binding on that same tag for a root that
+            # never goes away (see #18).
 
         self.mouse = Controller()
         self.hotkey = None
@@ -1399,6 +1469,16 @@ class AfkAutoclicker:
         self._pending = None
         self._ui_queue = queue.SimpleQueue()
         self._loading = False          # suppress saves while filling the form
+        self._settings_open = False    # which content-pane body is showing
+        self._rebuild_after_id = None  # the one after_idle(self._rebuild_ui)
+                                        # job currently pending, if any -- see
+                                        # _apply_appearance()/_rebuild_ui()
+        self._rebuilding = False       # True for the duration of
+                                        # _rebuild_ui()'s own body -- see
+                                        # _rebuild_ui()/_apply_appearance()
+        self._rebuild_wanted = False   # a rebuild was requested while
+                                        # _rebuilding was True; _rebuild_ui()
+                                        # schedules exactly one follow-up
 
         self.profiles = list(PROFILES)
         for saved in self.store.data.get("games", {}).values():
@@ -1411,8 +1491,39 @@ class AfkAutoclicker:
         if self.current not in self.by_id:
             self.current = "global"
 
+        self._build_ui(s)
+
+        # Registers an OS-level global hotkey listener -- runs once, after
+        # the first _build_ui() call, never inside _build_ui()/_rebuild_ui()
+        # itself: re-running it on every rebuild would try to register a
+        # second listener while self.hk_listener is still running.
+        saved = Hotkey.from_json(self.store.data.get("hotkey") or {})
+        if saved is not None:
+            self.hotkey = saved
+            self.apply_hotkey()
+
+    # ---------- widget tree (rebuildable) ----------
+
+    def _build_ui(self, s):
+        """
+        The rebuildable widget-construction body: header, sidebar, content.
+
+        Called once from __init__ and again, in place, by _rebuild_ui() on
+        every Appearance change -- everything here may run twice (or more);
+        nothing here may assume it is the first time. One-time root
+        configuration and non-Tk state live in __init__ instead, never here.
+        """
+        # root itself survives every rebuild (only its children are
+        # destroyed), so unlike title/resizable/minsize/geometry/protocol/
+        # bind_all -- which are theme-independent and stay one-time in
+        # __init__ -- its background IS theme-dependent and must be
+        # reapplied here every time, the same way every other widget below
+        # picks up BG/CARD/... fresh by being (re)built after set_active_
+        # theme() reassigns them.
+        self.root.config(bg=BG)
+
         # ── header ──
-        header = tk.Frame(root, bg=CARD, height=int(52 * s))
+        header = tk.Frame(self.root, bg=CARD, height=int(52 * s))
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Label(header, text="AFK Farm Clicker", bg=CARD, fg=INK,
@@ -1421,7 +1532,7 @@ class AfkAutoclicker:
         self.status = StatusPill(header, s, width=250, height=36)
         self.status.pack(side="right", padx=int(14 * s))
 
-        shell = tk.Frame(root, bg=BG)
+        shell = tk.Frame(self.root, bg=BG)
         shell.pack(fill="both", expand=True)
 
         # ── sidebar ──
@@ -1437,9 +1548,28 @@ class AfkAutoclicker:
         self._rebuild_list()
         Button(side, "Add current game", self.add_current_game, s,
                width=SIDEBAR_W - 28).pack(pady=(int(12 * s), int(4 * s)))
+        # 3a leaves this exactly where and how it is today -- moving it into
+        # the Settings page this feature builds is Feature 3b. Both action
+        # buttons ("Add current game" above, this one) sit above the
+        # divider; the Settings row is a navigation destination, not an
+        # action, and belongs below it.
         self.update_button = Button(side, "Check for updates", self.check_update, s,
                                     width=SIDEBAR_W - 28)
-        self.update_button.pack(pady=(0, int(6 * s)))
+        self.update_button.pack(pady=(0, int(4 * s)))
+        # A thin divider separates the two action buttons above from the
+        # Settings entry below -- without it the three rows read as one
+        # stack of similar pill buttons instead of "actions" vs. "a
+        # navigation destination" (docs/test-review.md's UX judgment on
+        # 3a). Same LINE color as the sidebar/content divider below, just
+        # laid out horizontally here.
+        tk.Frame(side, bg=LINE, height=1).pack(fill="x", padx=int(14 * s),
+                                               pady=(int(4 * s), int(8 * s)))
+        # Not a game -- never added to self.profiles/self.by_id/self.items,
+        # so it never counts toward "GAMES N" and is untouched by
+        # _rebuild_list()/_mark_running()/_poll_games().
+        self.settings_item = SettingsItem(side, self._show_settings, s)
+        self.settings_item.pack(pady=(0, int(7 * s)))
+        self.settings_item.set_state(selected=self._settings_open)
         self.version_label = tk.Label(side, text=f"v{__version__}", bg=BG, fg=MUTED,
                                       font=("Segoe UI", int(8 * s)))
         self.version_label.pack(pady=(0, int(10 * s)))
@@ -1450,18 +1580,111 @@ class AfkAutoclicker:
         self.content = tk.Frame(shell, bg=BG, width=int(CONTENT_W * s))
         self.content.pack(side="left", fill="both", expand=True)
         self.content.pack_propagate(False)
-        self._build_content(s)
 
-        saved = Hotkey.from_json(self.store.data.get("hotkey") or {})
-        if saved is not None:
-            self.hotkey = saved
-            self.apply_hotkey()
+        if self._settings_open:
+            self._build_settings(s)
+        else:
+            self._build_content(s)
+            self._select(self.current, persist=False)
 
-        self._select(self.current, persist=False)
+        # A durable "update found" offer must survive a rebuild too, same as
+        # the status pill below -- a transient "Checking…"/"Downloading… N%"
+        # is not resynced (see docs/spec.md §2): momentary, and the
+        # background worker thread behind it is unaffected either way.
+        if self._pending is not None:
+            self._offer_update(self._pending[0])
+
+        # The status pill starts hard-coded "OFF" in its own constructor --
+        # resync it to the real, unchanged self.running/self.registered_
+        # hotkey state (untouched by any of the above).
+        if self.running:
+            self.status.set("RUNNING", OK,
+                            self.registered_hotkey.label() if self.registered_hotkey else "")
+        else:
+            self.status.set("OFF", BAD,
+                            self.registered_hotkey.label() if self.registered_hotkey else "")
         self._timers = []
         self._sync_settings()
         self._drain_ui()
         self._poll_games()
+
+    def _rebuild_ui(self):
+        """
+        Tear down every widget under root and build it again in place, so an
+        Appearance change (or leaving/entering Settings) repaints/reshapes
+        the window without a restart. Never touches self.running/self.worker/
+        self.hk_listener/self.registered_hotkey/self.profiles/self.store --
+        none of those are Tk objects, and a rebuild must not reset any of
+        them (see docs/spec.md §2).
+
+        Also absorbs any still-pending after_idle(self._rebuild_ui) job
+        scheduled by _apply_appearance(): whichever caller actually runs a
+        rebuild first -- an inline call from _show_settings()/_select(), or
+        the idle callback itself -- cancels the other right here, so at most
+        one rebuild is ever in flight or pending. This matters beyond mere
+        waste: card()'s _redraw() (see card(), below) calls
+        inner.update_idletasks() while a rebuild is still constructing the
+        tree, and update_idletasks() reentrantly runs any OTHER already-
+        queued idle callback -- including a second pending _rebuild_ui() --
+        before returning. That reentrant rebuild would tear down the first
+        rebuild's still-being-built widgets out from under it, and the
+        first rebuild's next card() call then raises TclError on the now-
+        destroyed shell it was still holding a reference to (see
+        docs/test-review.md Defect 1 / docs/implementation.md "Round 2").
+
+        At most one rebuild is ever actually RUNNING too, not just pending:
+        self._rebuilding, set for the duration of the body below, is what
+        makes that true. Round 2's fix above only stopped a second rebuild
+        from being SCHEDULED while one was pending; it did not stop one from
+        being scheduled and then reentrantly serviced while one was already
+        *running* -- _apply_appearance() clears self._rebuild_after_id to
+        None right here, at the top, before the body runs, so a call to
+        _apply_appearance() from *inside* the body (e.g. some future
+        synchronous internal caller, mid-_build_content()/_build_settings())
+        would see None and schedule a fresh after_idle job, which the SAME
+        still-running rebuild's own card() calls would then reentrantly
+        service via update_idletasks() -- reproducing the exact Defect 1
+        crash through a different door (docs/test-review.md Round 2 review,
+        Finding #1; probe5_reentrant_card.py). self._rebuilding closes that
+        door: _apply_appearance() (and any other rebuild request) checks it
+        and, while it is set, only marks self._rebuild_wanted instead of
+        scheduling anything; the finally block below schedules exactly one
+        follow-up once this call has fully finished, so the outcome (the
+        latest choice, eventually rebuilt against) is unchanged -- only the
+        timing of the follow-up moves to after this call safely returns.
+        """
+        if self._rebuild_after_id is not None:
+            try:
+                self.root.after_cancel(self._rebuild_after_id)
+            except tk.TclError:
+                pass
+            self._rebuild_after_id = None
+        self._rebuilding = True
+        try:
+            self._persist()                    # flush any in-progress field edit
+                                                # before its widget is destroyed
+            for job in self._timers:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+            self._timers = []
+            self._ui_queue = queue.SimpleQueue()   # drop any already-queued closure
+                                                    # bound to a widget about to be
+                                                    # destroyed (see the self.status.
+                                                    # set hazard in docs/spec.md §3)
+                                                    # -- losing an in-flight, not-
+                                                    # yet-drained status update is
+                                                    # harmless; the next state
+                                                    # transition re-queues one.
+            for w in self.root.winfo_children():
+                w.destroy()
+            self._build_ui(self.s)
+        finally:
+            self._rebuilding = False
+            if self._rebuild_wanted:
+                self._rebuild_wanted = False
+                self._rebuild_after_id = self.root.after_idle(self._rebuild_ui)
 
     # ---------- content pane ----------
 
@@ -1531,6 +1754,101 @@ class AfkAutoclicker:
                     self.eat_hold.var):
             var.trace_add("write", lambda *_a: self._persist())
 
+    def _build_settings(self, s):
+        """The Settings page: 3a's whole scope is one Appearance control.
+        Structurally parallel to _build_content(s) -- a padded body frame
+        built straight into self.content, torn down/rebuilt the same way by
+        _rebuild_ui()'s blanket root.winfo_children() teardown, no special
+        casing. Feature 3b's Updates section goes below this, once it moves
+        update_button/version_label out of the sidebar -- nothing built here
+        yet, only the seam left open by this page existing at all."""
+        pad = int(CONTENT_PAD * s)
+        body = tk.Frame(self.content, bg=BG)
+        body.pack(fill="both", expand=True, padx=pad, pady=pad)
+
+        title = tk.Frame(body, bg=BG)
+        title.pack(fill="x")
+        tk.Label(title, text="Settings", bg=BG, fg=INK, anchor="w",
+                 font=("Segoe UI", int(14 * s), "bold")).pack(side="left")
+
+        section(body, "Appearance", s)
+        ap = card(body, s)
+        row = Row(ap, "Theme", s)
+        row.pack(fill="x")
+        self.appearance_var = tk.StringVar(value=self.store.data["appearance"])
+        # 3-option Segmented inside a Row's control area -- same width as the
+        # other 3-option control in this file (button_name, "Mouse button"
+        # above): CARD_INNER_W (the full-card default) would overrun the
+        # label sharing this row.
+        Segmented(row.control, [("system", "System"), ("light", "Light"), ("dark", "Dark")],
+                  self.appearance_var, s, width=180).pack()
+
+        # Detected at most once per process (docs/spec.md §4) -- if nothing
+        # has needed the real OS theme yet (appearance started as "light"/
+        # "dark", so __main__ never detected it), this is that first need;
+        # after this, self._os_theme is cached for the rest of the run.
+        if self._os_theme is None:
+            self._os_theme = detect_os_theme()
+        tk.Label(ap, text=f"System is currently {self._os_theme}", bg=CARD, fg=MUTED,
+                 anchor="w", font=("Segoe UI", int(8 * s))).pack(fill="x", pady=(int(6 * s), 0))
+
+        self.appearance_var.trace_add("write",
+            lambda *_a: self._apply_appearance(self.appearance_var.get()))
+
+    def _apply_appearance(self, value):
+        self.store.data["appearance"] = value
+        self.store.save()
+        resolved = resolve_appearance(value, self._os_theme)
+        if value == "system" and self._os_theme is None:
+            self._os_theme = resolved   # memoize -- a later System pick this
+                                         # session must not call detect_os_theme()
+                                         # a second time
+        set_active_theme(resolved)
+        # Deferred, not called inline: this runs from the Segmented's own
+        # "write" trace on appearance_var, and Tcl fires a variable's traces
+        # most-recently-added-first -- this one first, then the Segmented's
+        # own built-in repaint trace (registered when it was built, in
+        # _build_settings). Rebuilding here synchronously would destroy that
+        # Segmented canvas out from under its own still-pending repaint,
+        # which then raises TclError trying to redraw a widget that no
+        # longer exists. after_idle() lets every trace on this click finish
+        # against the still-live old tree first; the rebuild itself runs a
+        # moment later, once the event has fully unwound.
+        #
+        # Coalesced: a second (or fifth) Appearance change landing before
+        # the first's idle rebuild has run must NOT queue a second
+        # after_idle job -- see _rebuild_ui()'s own docstring for why a
+        # second pending rebuild is a real crash, not just wasted work. The
+        # theme itself is already applied above (set_active_theme(resolved)
+        # runs synchronously on every call), so whichever choice was latest
+        # when the one pending rebuild finally runs is exactly what it
+        # rebuilds against -- nothing further needs to be remembered here.
+        #
+        # Reentrant call (docs/test-review.md Round 2 review, Finding #1):
+        # if _apply_appearance() is itself called while a rebuild is
+        # already RUNNING (self._rebuilding), self._rebuild_after_id was
+        # already cleared to None at that rebuild's own top -- scheduling a
+        # fresh after_idle job here would be reentrantly serviced by a
+        # LATER card() call's own update_idletasks() in that SAME
+        # still-running rebuild, reproducing Defect 1's crash via a
+        # different door than Round 2 already closed (not currently
+        # reachable -- the only real caller today is a <Button-1>-driven
+        # trace, and update_idletasks() never services real window/mouse
+        # events -- but made impossible outright rather than left as a
+        # documented-but-unenforced invariant). Just mark a follow-up
+        # wanted; _rebuild_ui()'s own finally block schedules exactly one
+        # once the running rebuild has fully finished.
+        if self._rebuilding:
+            self._rebuild_wanted = True
+        elif self._rebuild_after_id is None:
+            self._rebuild_after_id = self.root.after_idle(self._rebuild_ui)
+
+    def _show_settings(self):
+        if self._settings_open:
+            return
+        self._settings_open = True
+        self._rebuild_ui()
+
     # ---------- game list ----------
 
     def _rebuild_list(self):
@@ -1544,6 +1862,9 @@ class AfkAutoclicker:
         self.count_label.config(text=f"GAMES   {len(self.profiles)}")
 
     def _select(self, game_id, persist=True):
+        if self._settings_open:
+            self._settings_open = False
+            self._rebuild_ui()
         self.current = game_id
         profile = self.by_id[game_id]
         for gid, item in self.items.items():
@@ -1764,8 +2085,24 @@ class AfkAutoclicker:
             try:
                 fn(*args)
             except tk.TclError:
-                return                      # window is going away
+                if not self.root.winfo_exists():
+                    return                  # window is really going away
+                continue                    # a rebuilt/destroyed widget's stale
+                                             # closure -- drop it, keep draining
         self._timers.append(self.root.after(40, self._drain_ui))
+
+    def _set_status(self, text, color, hint=""):
+        """Looked up fresh here, on the main thread when _drain_ui() actually
+        calls it -- never a bound self.status.set captured at enqueue time.
+        start()/stop()/loop() run on the worker thread, and a rebuild can
+        replace self.status with a new StatusPill between one of their
+        self._ui(...) calls landing in the queue and _drain_ui() draining it;
+        a captured self.status.set would target the old, now-destroyed
+        canvas and raise TclError (docs/spec.md "the actual correctness
+        fix"). Every other queued callback (_offer_update, _set_update_state,
+        _mark_running, ...) already resolves its target this way -- this
+        makes the status pill's the same."""
+        self.status.set(text, color, hint)
 
     def _sync_settings(self):
         """
@@ -1884,14 +2221,14 @@ class AfkAutoclicker:
                 return                     # refuse rather than double-click
         self.running = True
         self._ui(self.root.focus_set)
-        self._ui(self.status.set, "RUNNING", OK,
+        self._ui(self._set_status, "RUNNING", OK,
                  self.registered_hotkey.label() if self.registered_hotkey else "")
         self.worker = threading.Thread(target=self.loop, daemon=True)
         self.worker.start()
 
     def stop(self):
         self.running = False
-        self._ui(self.status.set, "OFF", BAD,
+        self._ui(self._set_status, "OFF", BAD,
                  self.registered_hotkey.label() if self.registered_hotkey else "")
 
     def _sleep(self, seconds):
@@ -1920,7 +2257,7 @@ class AfkAutoclicker:
                 cfg = self.settings
                 limit = cfg.get("autostop_min", 0)
                 if limit and time.monotonic() - started >= limit * 60:
-                    self._ui(self.status.set, "STOPPED", MUTED, f"auto-stop after {limit:g} min")
+                    self._ui(self._set_status, "STOPPED", MUTED, f"auto-stop after {limit:g} min")
                     self.running = False
                     break
                 # Re-read every pass, like the numeric fields already are:
@@ -1947,7 +2284,7 @@ class AfkAutoclicker:
                 if mode == "pause" and button is MouseButton.left:
                     every = cfg.get("eat_every", DEFAULT_EAT_EVERY_S)
                     if time.monotonic() - last_meal >= every:
-                        self._ui(self.status.set, "EATING", ACCENT, "clicks paused")
+                        self._ui(self._set_status, "EATING", ACCENT, "clicks paused")
                         hold = cfg.get("eat_hold", DEFAULT_EAT_HOLD_S)
                         self.mouse.press(MouseButton.right)
                         self.right_held = True
@@ -1956,7 +2293,7 @@ class AfkAutoclicker:
                         last_meal = time.monotonic()
                         if not self.running:
                             break
-                        self._ui(self.status.set, "RUNNING", OK,
+                        self._ui(self._set_status, "RUNNING", OK,
                  self.registered_hotkey.label() if self.registered_hotkey else "")
 
                 self.mouse.click(button)
@@ -1966,7 +2303,7 @@ class AfkAutoclicker:
             # Without this the flag stays set: the window keeps saying RUNNING,
             # the hotkey thinks it is already on and toggling does nothing,
             # and no click has happened since the throw.
-            self._ui(self.status.set, "ERROR", BAD, str(exc)[:32])
+            self._ui(self._set_status, "ERROR", BAD, str(exc)[:32])
             self.running = False
         finally:
             self.running = False
@@ -1982,6 +2319,20 @@ class AfkAutoclicker:
             except tk.TclError:
                 pass
         self._timers = []
+        # Same reasoning as _timers above, for the one job not kept there:
+        # an Appearance change's deferred after_idle(self._rebuild_ui) can
+        # still be pending here (_apply_appearance() ran, _rebuild_ui()
+        # never got a chance to). Left uncancelled it fires after destroy()
+        # into a Tcl interpreter that no longer has the command registered
+        # -- "invalid command name" (docs/test-review.md's "Investigated,
+        # not a defect": unreachable via a real mainloop(), but one line to
+        # make it impossible outright).
+        if self._rebuild_after_id is not None:
+            try:
+                self.root.after_cancel(self._rebuild_after_id)
+            except tk.TclError:
+                pass
+            self._rebuild_after_id = None
         self.stop()
         if self.hk_listener is not None:
             self.hk_listener.stop()
@@ -1995,10 +2346,17 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(selftest())
     enable_dpi_awareness()
-    set_active_theme(detect_os_theme())
+    # Store constructed here (earlier than before) so the saved appearance
+    # is known before the first widget is built. detect_os_theme() runs at
+    # most once, only when the saved choice actually needs it -- a saved
+    # "light"/"dark" never shells out at all.
+    store = Store()
+    appearance = store.data["appearance"]
+    os_theme = detect_os_theme() if appearance == "system" else None
+    set_active_theme(resolve_appearance(appearance, os_theme))
     root = tk.Tk()
     # Segoe UI is the Windows system face; falling back keeps Linux usable.
     if "Segoe UI" not in tkfont.families():
         root.option_add("*Font", "TkDefaultFont")
-    AfkAutoclicker(root)
+    AfkAutoclicker(root, store=store, os_theme=os_theme)
     root.mainloop()
