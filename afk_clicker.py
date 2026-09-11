@@ -1358,13 +1358,19 @@ class GameItem(tk.Canvas):
 class SettingsItem(tk.Canvas):
     """The sidebar's one non-game destination. Structurally a GameItem minus
     the running-state dot -- there is nothing to run -- and with no profile
-    behind it: `on_click` takes no id, it just opens Settings."""
+    behind it: `on_click` takes no id, it just opens Settings.
 
-    def __init__(self, parent, on_click, s, width=SIDEBAR_W - 16, height=38):
+    Feature 3b's `has_update` is the off-screen signal for a pending update
+    found while Settings isn't open (or never opened this session) -- see
+    docs/spec.md §1. Deliberately text, not a dot: 3a's own design already
+    rejected a dot for this row."""
+
+    def __init__(self, parent, on_click, s, has_update=False, width=SIDEBAR_W - 16, height=38):
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, cursor="hand2",
                          width=int(width * s), height=int(height * s))
         self.on_click = on_click
         self.selected = False
+        self.has_update = has_update
         w, h = int(width * s), int(height * s)
         self.shape = round_rect(self, 1, 1, w - 1, h - 1, CARD_R * s, fill=BG, outline="")
         self.text = self.create_text(16 * s, h / 2, anchor="w", text="Settings",
@@ -1374,15 +1380,22 @@ class SettingsItem(tk.Canvas):
         self.bind("<Button-1>", lambda e: self.on_click())
         self._paint()
 
-    def set_state(self, selected=None):
+    def set_state(self, selected=None, has_update=None):
         if selected is not None:
             self.selected = selected
+        if has_update is not None:
+            self.has_update = has_update
         self._paint()
 
     def _paint(self, hover=False):
         fill = CARD_HI if self.selected else (CARD if hover else BG)
         self.itemconfig(self.shape, fill=fill)
-        self.itemconfig(self.text, fill=INK if self.selected else MUTED)
+        text = "Settings · Update" if self.has_update else "Settings"
+        # ACCENT whenever an update is pending, selected or not -- it's the
+        # whole point of the indicator; INK/MUTED only apply once there is
+        # nothing to flag.
+        colour = ACCENT if self.has_update else (INK if self.selected else MUTED)
+        self.itemconfig(self.text, text=text, fill=colour)
 
 
 class Row(tk.Frame):
@@ -1467,6 +1480,13 @@ class AfkAutoclicker:
         self.right_held = False
         self.settings = {}
         self._pending = None
+        self._update_text = ("Check for updates", True, None)   # args of the
+                                # most recent _set_update_state() call, kept
+                                # current whether or not Settings is open --
+                                # a plain tuple, not a Tk object, so (like
+                                # self._pending) never reset by a rebuild;
+                                # replayed onto update_button/version_label
+                                # by _build_ui()'s tail. See docs/spec.md §3.
         self._ui_queue = queue.SimpleQueue()   # one queue for the app's whole
                                                 # lifetime -- never swapped by
                                                 # a rebuild (see _rebuild_ui())
@@ -1550,31 +1570,27 @@ class AfkAutoclicker:
         self._rebuild_list()
         Button(side, "Add current game", self.add_current_game, s,
                width=SIDEBAR_W - 28).pack(pady=(int(12 * s), int(4 * s)))
-        # 3a leaves this exactly where and how it is today -- moving it into
-        # the Settings page this feature builds is Feature 3b. Both action
-        # buttons ("Add current game" above, this one) sit above the
-        # divider; the Settings row is a navigation destination, not an
-        # action, and belongs below it.
-        self.update_button = Button(side, "Check for updates", self.check_update, s,
-                                    width=SIDEBAR_W - 28)
-        self.update_button.pack(pady=(0, int(4 * s)))
-        # A thin divider separates the two action buttons above from the
-        # Settings entry below -- without it the three rows read as one
-        # stack of similar pill buttons instead of "actions" vs. "a
-        # navigation destination" (docs/test-review.md's UX judgment on
-        # 3a). Same LINE color as the sidebar/content divider below, just
-        # laid out horizontally here.
+        # A thin divider separates the action button above from the Settings
+        # entry below -- without it the two rows read as one stack of
+        # similar pill buttons instead of "an action" vs. "a navigation
+        # destination" (docs/test-review.md's UX judgment on 3a). Same LINE
+        # color as the sidebar/content divider below, just laid out
+        # horizontally here. "Check for updates"/the version string moved
+        # into the Settings page's own Updates section in Feature 3b -- this
+        # divider now closes off just the one button above it.
         tk.Frame(side, bg=LINE, height=1).pack(fill="x", padx=int(14 * s),
                                                pady=(int(4 * s), int(8 * s)))
         # Not a game -- never added to self.profiles/self.by_id/self.items,
         # so it never counts toward "GAMES N" and is untouched by
-        # _rebuild_list()/_mark_running()/_poll_games().
-        self.settings_item = SettingsItem(side, self._show_settings, s)
+        # _rebuild_list()/_mark_running()/_poll_games(). has_update is set
+        # fresh from self._pending here so a rebuild that happens while
+        # Settings is closed (an Appearance change on a game page, with an
+        # offer already pending from an earlier Settings visit) still shows
+        # the indicator correctly -- see docs/spec.md §1.
+        self.settings_item = SettingsItem(side, self._show_settings, s,
+                                          has_update=(self._pending is not None))
         self.settings_item.pack(pady=(0, int(7 * s)))
         self.settings_item.set_state(selected=self._settings_open)
-        self.version_label = tk.Label(side, text=f"v{__version__}", bg=BG, fg=MUTED,
-                                      font=("Segoe UI", int(8 * s)))
-        self.version_label.pack(pady=(0, int(10 * s)))
 
         tk.Frame(shell, bg=LINE, width=1).pack(side="left", fill="y")
 
@@ -1585,16 +1601,37 @@ class AfkAutoclicker:
 
         if self._settings_open:
             self._build_settings(s)
+            # update_button/version_label only exist inside this branch
+            # (Feature 3b) -- replay whatever state they'd accumulated
+            # before the rebuild tore the old widgets down. Two steps, in
+            # this order, not one: _offer_update() restores the offer's
+            # *styling* (primary, command=install_update) if an offer is
+            # outstanding, then self._update_text unconditionally overlays
+            # the most recent _set_update_state() text/enabled/colour on
+            # top -- reproducing the exact layering the widgets would have
+            # accumulated live, without a rebuild (see docs/spec.md §3):
+            # idle/checking has no offer to restore and the overlay alone
+            # is correct; an offer with nothing since is idempotent (the
+            # overlay re-applies the same text _offer_update just set); a
+            # mid-download or install-error state restores the offer's
+            # accent styling underneath, then the overlay corrects the text
+            # to "Downloading… N%"/the error, not "Install v{tag}".
+            #
+            # Snapshot self._update_text BEFORE calling _offer_update():
+            # _offer_update() itself always records its own text into self.
+            # _update_text (so a *live* offer, with no rebuild involved, is
+            # correctly the newest state) -- calling it here, mid-replay,
+            # would otherwise clobber a still-current "Downloading… N%"/
+            # error tuple with the offer's own text before the overlay line
+            # below ever reads it, reverting exactly the state this replay
+            # exists to preserve.
+            overlay = self._update_text
+            if self._pending is not None:
+                self._offer_update(self._pending[0])
+            self._set_update_state(*overlay)
         else:
             self._build_content(s)
             self._select(self.current, persist=False)
-
-        # A durable "update found" offer must survive a rebuild too, same as
-        # the status pill below -- a transient "Checking…"/"Downloading… N%"
-        # is not resynced (see docs/spec.md §2): momentary, and the
-        # background worker thread behind it is unaffected either way.
-        if self._pending is not None:
-            self._offer_update(self._pending[0])
 
         # The status pill starts hard-coded "OFF" in its own constructor --
         # resync it to the real, unchanged self.running/self.registered_
@@ -1767,13 +1804,17 @@ class AfkAutoclicker:
             var.trace_add("write", lambda *_a: self._persist())
 
     def _build_settings(self, s):
-        """The Settings page: 3a's whole scope is one Appearance control.
-        Structurally parallel to _build_content(s) -- a padded body frame
-        built straight into self.content, torn down/rebuilt the same way by
-        _rebuild_ui()'s blanket root.winfo_children() teardown, no special
-        casing. Feature 3b's Updates section goes below this, once it moves
-        update_button/version_label out of the sidebar -- nothing built here
-        yet, only the seam left open by this page existing at all."""
+        """The Settings page: Appearance (3a), Updates (3b) -- structurally
+        parallel to _build_content(s), a padded body frame built straight
+        into self.content, torn down/rebuilt the same way by _rebuild_ui()'s
+        blanket root.winfo_children() teardown, no special casing.
+
+        The Updates section below builds self.update_button/self.version_
+        label with the exact constructor shapes they had in the sidebar --
+        check_update/_set_update_state/_offer_update need no signature
+        changes. Only the idle defaults are set here; the actual current
+        state (idle, checking, an offer, downloading, an error) is applied
+        right after this returns, by _build_ui()'s tail (docs/spec.md §3)."""
         pad = int(CONTENT_PAD * s)
         body = tk.Frame(self.content, bg=BG)
         body.pack(fill="both", expand=True, padx=pad, pady=pad)
@@ -1806,6 +1847,17 @@ class AfkAutoclicker:
 
         self.appearance_var.trace_add("write",
             lambda *_a: self._apply_appearance(self.appearance_var.get()))
+
+        section(body, "Updates", s)
+        up = card(body, s)
+        row = Row(up, "Version", s)
+        row.pack(fill="x")
+        self.version_label = tk.Label(row.control, text=f"v{__version__}", bg=CARD,
+                                      fg=MUTED, font=("Consolas", int(9 * s)))
+        self.version_label.pack()
+        self.update_button = Button(up, "Check for updates", self.check_update, s,
+                                    width=CARD_INNER_W)
+        self.update_button.pack(pady=(int(8 * s), 0))
 
     def _apply_appearance(self, value):
         self.store.data["appearance"] = value
@@ -1978,6 +2030,14 @@ class AfkAutoclicker:
         self._ui(self._offer_update, tag)
 
     def _offer_update(self, tag):
+        self._update_text = (f"Install {tag}", True, None)
+        # settings_item is unconditionally present in the sidebar (unlike
+        # update_button/version_label below), so this needs no guard -- it's
+        # what makes an offer found while sitting on a game page, with no
+        # rebuild in sight, visible without waiting for one.
+        self.settings_item.set_state(has_update=True)
+        if not self._settings_open:
+            return
         self.update_button.set_text(f"Install {tag}")
         self.update_button.set_primary(True)
         self.update_button.set_enabled(True)
@@ -2033,6 +2093,9 @@ class AfkAutoclicker:
         self.on_close()
 
     def _set_update_state(self, text, enabled=True, colour=None):
+        self._update_text = (text, enabled, colour)
+        if not self._settings_open:
+            return
         self.update_button.set_text(text)
         self.update_button.set_enabled(enabled)
         if colour:

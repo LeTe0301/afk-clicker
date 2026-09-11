@@ -581,6 +581,10 @@ class InstallWorker(UITestCase):
         original = app.download_and_stage
         app.download_and_stage = lambda *a, **k: calls.append((a, k))
         try:
+            # update_button now lives on the Settings page (Feature 3b) --
+            # open it first so it exists for _drain() to touch.
+            self.ui._show_settings()
+            self.root.update()
             release = {"assets": [
                 {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
             self.ui._pending = ("v9.9.9", release["assets"][0], release)
@@ -608,6 +612,10 @@ class InstallWorker(UITestCase):
         original_fetch, original_stage = app.fetch_checksums, app.download_and_stage
         app.fetch_checksums, app.download_and_stage = fake_fetch, fake_stage
         try:
+            # update_button now lives on the Settings page (Feature 3b) --
+            # open it first so it exists for _drain() to touch.
+            self.ui._show_settings()
+            self.root.update()
             release = {"assets": [
                 {"name": "SHA256SUMS", "browser_download_url": "x"},
                 {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
@@ -1556,12 +1564,23 @@ class SettingsNavigation(UITestCase):
         super().tearDown()
         app.set_active_theme("dark")
 
-    def test_sidebar_has_a_settings_entry_plus_the_untouched_update_widgets(self):
-        # 3a's interim sidebar: games -> Add current game -> Settings (new) ->
-        # Check for updates -> version. The last two are unmoved (Feature 3b).
+    def test_sidebar_no_longer_holds_the_update_widgets(self):
+        # Feature 3b: "Check for updates"/the version label moved into the
+        # Settings page's own Updates section -- the sidebar footer is now
+        # games -> Add current game -> divider -> Settings only.
         self.assertIsInstance(self.ui.settings_item, app.SettingsItem)
-        self.assertIsInstance(self.ui.update_button, app.Button)
-        self.assertEqual(self.ui.version_label.cget("text"), f"v{app.__version__}")
+        buttons = [w for w in self.ui.side.winfo_children() if isinstance(w, app.Button)]
+        self.assertEqual(len(buttons), 1,
+                         "only 'Add current game' should remain a sidebar Button")
+        labels = [w for w in self.ui.side.winfo_children() if isinstance(w, tk.Label)]
+        self.assertEqual(labels, [self.ui.count_label],
+                         "no version label should remain in the sidebar")
+        self.assertFalse(hasattr(self.ui, "update_button"),
+                         "update_button should not be built until Settings is opened")
+        self.assertFalse(hasattr(self.ui, "version_label"),
+                         "version_label should not be built until Settings is opened")
+        self.assertFalse(self.ui.settings_item.has_update,
+                         "a fresh app with no update activity should show no offer")
 
     def test_games_count_excludes_the_settings_entry(self):
         expected = f"GAMES   {len(self.ui.profiles)}"
@@ -1634,6 +1653,183 @@ class SettingsNavigation(UITestCase):
         hint = find_hint(self.ui.content)
         self.assertIsNotNone(hint, "no OS-theme hint label found")
         self.assertEqual(hint.cget("text"), "System is currently light")
+
+
+class SettingsUpdates(UITestCase):
+    """Feature 3b: the Updates section on the Settings page, and the
+    rebuild-/visibility-safety mechanism (self._update_text, the guarded
+    _set_update_state()/_offer_update(), the sidebar's has_update signal)
+    that relocating update_button/version_label out of the sidebar makes
+    necessary. See docs/spec.md §3/§4."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def _button_text(self):
+        return self.ui.update_button.itemcget(self.ui.update_button.label, "text")
+
+    def _button_fill(self):
+        return self.ui.update_button.itemcget(self.ui.update_button.shape, "fill")
+
+    def test_settings_page_builds_the_updates_section(self):
+        self.ui._show_settings()
+        self.root.update()
+        self.assertIsInstance(self.ui.update_button, app.Button)
+        self.assertIsInstance(self.ui.version_label, tk.Label)
+        self.assertEqual(self._button_text(), "Check for updates")
+        self.assertTrue(self.ui.update_button._enabled)
+        self.assertEqual(self.ui.version_label.cget("text"), f"v{app.__version__}")
+
+    def test_every_update_state_renders_on_the_settings_page(self):
+        # A non-regression sweep (docs/spec.md AC3): every text/enabled/
+        # colour combination check_update/_check_worker/install_update/
+        # _install_worker can produce today, driven through the same
+        # _set_update_state() entry point those methods already call --
+        # see afk_clicker.py's own call sites for where each literal comes
+        # from. Colour is only ever passed alongside an error/offer state;
+        # states that pass no colour leave version_label exactly as it was
+        # (unchanged code, docs/spec.md §2/§3) -- asserted explicitly below,
+        # not assumed.
+        self.ui._show_settings()
+        self.root.update()
+        idle_text = self.ui.version_label.cget("text")
+        idle_fg = self.ui.version_label.cget("fg")
+
+        # (state label, enabled, primary) -- no colour, version_label
+        # untouched by any of these.
+        uncoloured = [
+            ("Checking…", False),
+            ("No releases published yet", True),
+            (f"Up to date · {app.__version__}", True),
+        ]
+        for text, enabled in uncoloured:
+            with self.subTest(state=text):
+                self.ui._set_update_state(text, enabled)
+                self.assertEqual(self._button_text(), text)
+                self.assertEqual(self.ui.update_button._enabled, enabled)
+                self.assertEqual(self._button_fill(), app.CARD)
+                self.assertEqual(self.ui.version_label.cget("text"), idle_text)
+                self.assertEqual(self.ui.version_label.cget("fg"), idle_fg)
+
+        checksum_not_listed = (
+            "checksum: not in SHA256SUMS: AFK-Farm-Clicker-linux-x86_64.tar.gz"[:40])
+        checksum_mismatch = (
+            "checksum mismatch: expected abcdef123456…, got 987654fedcba…"[:40])
+        coloured = [
+            "GitHub unreachable",
+            "v9.9.9: no build for this OS",
+            checksum_not_listed,
+            checksum_mismatch,
+            "Install folder is read-only",
+            "Update failed: connection reset"[:40],
+            "Run `git pull` — not a build",
+        ]
+        self.assertIn("checksum", checksum_not_listed.lower())
+        self.assertIn("checksum", checksum_mismatch.lower())
+        for text in coloured:
+            with self.subTest(state=text):
+                self.ui._set_update_state(text, True, app.BAD)
+                self.assertLessEqual(len(text), 40)
+                self.assertEqual(self._button_text(), text)
+                self.assertTrue(self.ui.update_button._enabled)
+                self.assertEqual(self._button_fill(), app.CARD)
+                self.assertEqual(self.ui.version_label.cget("text"), text)
+                self.assertEqual(self.ui.version_label.cget("fg"), app.BAD)
+
+        # Offer found and downloading, in sequence: _offer_update() sets
+        # primary styling + the arrow text; a later no-colour _set_update_
+        # state() call (the progress ticks) must overwrite only the text/
+        # enabled state and leave that styling underneath.
+        self.ui._offer_update("v9.9.9")
+        self.assertEqual(self._button_text(), "Install v9.9.9")
+        self.assertTrue(self.ui.update_button._enabled)
+        self.assertEqual(self._button_fill(), app.ACCENT)
+        self.assertEqual(self.ui.version_label.cget("text"), f"v{app.__version__} → v9.9.9")
+        self.assertEqual(self.ui.version_label.cget("fg"), app.ACCENT)
+
+        for pct in (0, 45, 100):
+            with self.subTest(state=f"Downloading… {pct}%"):
+                self.ui._set_update_state(f"Downloading… {pct}%", False)
+                self.assertEqual(self._button_text(), f"Downloading… {pct}%")
+                self.assertFalse(self.ui.update_button._enabled)
+                # version_label keeps the offer's arrow text/colour -- no
+                # colour is passed for a progress tick.
+                self.assertEqual(self.ui.version_label.cget("text"),
+                                 f"v{app.__version__} → v9.9.9")
+                self.assertEqual(self.ui.version_label.cget("fg"), app.ACCENT)
+
+        self.ui._set_update_state("Restarting…", False)
+        self.assertEqual(self._button_text(), "Restarting…")
+        self.assertFalse(self.ui.update_button._enabled)
+        self.assertEqual(self.ui.version_label.cget("text"), f"v{app.__version__} → v9.9.9")
+        self.assertEqual(self.ui.version_label.cget("fg"), app.ACCENT)
+
+    def test_an_offer_marks_the_settings_row_while_a_game_page_is_open(self):
+        # Settings is never opened this session -- proves the off-screen
+        # signal path (§3's AttributeError/TclError hazard) is safe.
+        self.assertFalse(self.ui._settings_open)
+        self.assertFalse(hasattr(self.ui, "update_button"))
+        self.ui._pending = ("v9.9.9", {"name": "x"}, {})
+        self.ui._offer_update("v9.9.9")
+        self.assertTrue(self.ui.settings_item.has_update)
+
+        # Survives a rebuild triggered while Settings is still closed.
+        self.ui._apply_appearance("light")
+        self.root.update()
+        self.assertTrue(self.ui.settings_item.has_update)
+
+        # Survives switching games too -- has_update is rebuilt fresh from
+        # self._pending on every _build_ui(), not cleared by _select().
+        self.ui._select("minecraft")
+        self.root.update()
+        self.assertTrue(self.ui.settings_item.has_update)
+
+        # Opening Settings now replays the offer without a second check.
+        self.ui._show_settings()
+        self.root.update()
+        self.assertEqual(self._button_text(), "Install v9.9.9")
+        self.assertEqual(self.ui.version_label.cget("text"), f"v{app.__version__} → v9.9.9")
+        self.assertEqual(self.ui.version_label.cget("fg"), app.ACCENT)
+
+    def test_downloading_state_survives_a_rebuild_with_settings_open(self):
+        self.ui._show_settings()
+        self.root.update()
+        self.ui._pending = ("v9.9.9", {"name": "x"}, {})
+        self.ui._offer_update("v9.9.9")
+        # Simulate a progress tick landing from a background thread, the way
+        # download_and_stage()'s on_progress callback really calls it --
+        # queued via self._ui(), then drained on the main thread, exactly
+        # the _drain_ui() contract this spec must not change.
+        worker = threading.Thread(
+            target=lambda: self.ui._ui(self.ui._set_update_state, "Downloading… 42%", False),
+            daemon=True)
+        worker.start()
+        worker.join(timeout=2)
+        self.ui._drain_ui()
+        self.assertEqual(self._button_text(), "Downloading… 42%")
+
+        old_button = self.ui.update_button
+        self.ui._apply_appearance("light")
+        self.root.update()
+
+        self.assertIsNot(self.ui.update_button, old_button,
+                         "the rebuild should have replaced the widget, not reused it")
+        self.assertEqual(self._button_text(), "Downloading… 42%")
+        self.assertFalse(self.ui.update_button._enabled)
+        self.assertEqual(self.ui._pending, ("v9.9.9", {"name": "x"}, {}))
+        self.assertEqual(self.ui._update_text, ("Downloading… 42%", False, None))
+
+    def test_set_update_state_with_settings_closed_does_not_raise(self):
+        self.assertFalse(self.ui._settings_open)
+        self.assertFalse(hasattr(self.ui, "update_button"))
+        self.ui._set_update_state("Checking…", enabled=False)   # must not raise
+        self.assertEqual(self.ui._update_text, ("Checking…", False, None))
+
+        self.ui._show_settings()
+        self.root.update()
+        self.assertEqual(self._button_text(), "Checking…")
+        self.assertFalse(self.ui.update_button._enabled)
 
 
 class RunningClickerSurvivesRebuild(UITestCase):

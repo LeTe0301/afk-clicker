@@ -20,11 +20,11 @@ starten. Kein Python nötig.
 | Linux (glibc 2.35+, X11) | `AFK-Farm-Clicker-linux-x86_64.tar.gz` |
 | macOS (Apple Silicon) | `AFK-Farm-Clicker-macos-arm64.zip` |
 
-Ab dann aktualisiert sich das Programm selbst: **Check for updates** unten
-links. Findet es ein neueres Release, lädt es das passende Archiv, entpackt es
-daneben, beendet sich und tauscht sich aus. Der Tausch läuft über ein kleines
-externes Skript — ein Programm kann seine eigene laufende Datei nicht
-überschreiben, unter Windows schon gar nicht.
+Ab dann aktualisiert sich das Programm selbst: **Settings → Updates →
+Check for updates**. Findet es ein neueres Release, lädt es das passende
+Archiv, entpackt es daneben, beendet sich und tauscht sich aus. Der Tausch
+läuft über ein kleines externes Skript — ein Programm kann seine eigene
+laufende Datei nicht überschreiben, unter Windows schon gar nicht.
 
 Liegt der Ordner an einem schreibgeschützten Ort (etwa `Program Files`), sagt
 der Knopf das, statt es stumm zu versuchen.

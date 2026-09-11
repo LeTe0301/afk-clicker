@@ -187,7 +187,7 @@ class StagingSafety(unittest.TestCase):
             app.download_and_stage(self._asset(path), checksums={"other.zip": "d" * 64})
 
     def test_the_unlisted_message_survives_status_line_truncation(self):
-        # _install_worker shows str(exc)[:40] (afk_clicker.py:1376), and a real
+        # _install_worker shows str(exc)[:40] (afk_clicker.py:2069), and a real
         # release asset is named like the release workflow does it --
         # "AFK-Farm-Clicker-windows-x64.zip", not "pkg-windows-x64.zip". At that
         # length the reason is pushed past character 40 and the user sees only
