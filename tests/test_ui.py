@@ -41,8 +41,8 @@ class CapturesCallbackExceptions:
     prints "Exception in Tkinter callback" plus the traceback to stderr and
     otherwise carries on, so a test that never looks at stderr can pass
     clean next to a real, swallowed crash -- exactly how
-    docs/test-review.md's Defect 1 escaped the suite the first time. See
-    docs/implementation.md "Round 2" for why this replaces a raw
+    docs/history/ac-17-f3a-test-review.md's Defect 1 escaped the suite the first time. See
+    docs/history/ac-17-f3a-implementation.md "Round 2" for why this replaces a raw
     redirect_stderr: it only ever catches genuine Tk callback exceptions,
     never unrelated stderr noise."""
 
@@ -156,11 +156,11 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
     def _appearance_segment(self, var=None):
         """The Appearance Segmented control on the (already open) Settings
         page -- shared by SettingsNavigation and OverlappingAppearanceChanges
-        (docs/test-review.md's PR-review Finding #4: was a byte-identical
+        (docs/history/ac-17-f3a-pr30-review.md's Finding #4: was a byte-identical
         duplicate in each). `var` defaults to `self.ui.appearance_var`;
         pass `self.ui.ui_scale_var` (or any other Segmented-bound var on the
         page) to locate a different control without a second copy of this
-        walk (docs/test-review.md Finding #1)."""
+        walk (docs/history/ac-17-f4-implementation.md Finding #1)."""
         if var is None:
             var = self.ui.appearance_var
         def walk(widget):
@@ -949,7 +949,7 @@ class SetActiveThemeWidgets(unittest.TestCase):
     only place any of the eleven THEMES colors are captured anywhere in this
     file is those bare module globals, read at widget-construction time (no
     default argument, class attribute, or module-level dict/tuple bakes one
-    in independently -- confirmed by grep, see docs/implementation.md)."""
+    in independently -- confirmed by grep, see docs/history/ac-17-f2-implementation.md)."""
 
     def setUp(self):
         self.config = os.path.join(tempfile.mkdtemp(), "settings.json")
@@ -1372,7 +1372,7 @@ class CardShell(CapturesCallbackExceptions, unittest.TestCase):
         self.assertAlmostEqual(after[2] - after[0], shell.winfo_width(), delta=2)
 
     def test_redraw_bails_out_once_its_shell_is_destroyed(self):
-        """docs/test-review.md Finding #2: card()'s two winfo_exists()
+        """docs/history/ac-17-f3a-test-review.md Finding #2: card()'s two winfo_exists()
         guards (afk_clicker.py's _redraw()) had zero direct test coverage --
         removing both lines still left the full suite green, since
         coalescing alone already prevented the shapes the other tests
@@ -1452,7 +1452,7 @@ class CardResize(UITestCase):
 class RoundedCanvasBackgrounds(UITestCase):
     """Every canvas that draws a round_rect shape must paint its parent's own
     background outside the rounded shape -- otherwise the shape's corners
-    sit on a mismatched square (docs/design.md item 3). round_rect is the
+    sit on a mismatched square (docs/history/ac-17-f1-design.md item 3). round_rect is the
     only thing in the app that calls create_polygon, so any canvas holding a
     polygon item is one of these and gets checked, with no per-widget-class
     list to keep in sync by hand."""
@@ -1595,7 +1595,7 @@ class UIScaleStore(UITestCase):
         # Same technique as AppearanceStore.test_a_missing_appearance_key_
         # defaults_to_system -- write directly into the test's own
         # settings.json -- but goes one step further, all the way through a
-        # fresh AfkAutoclicker (self.restart()), per docs/spec.md's
+        # fresh AfkAutoclicker (self.restart()), per docs/history/ac-17-f4-spec.md's
         # acceptance criterion: a garbage stored "ui_scale" must sanitize to
         # "100" AND self.ui.s must equal self.ui._dpi_s (the "100" factor is
         # a no-op 1.0 multiplier).
@@ -1608,7 +1608,7 @@ class UIScaleStore(UITestCase):
 
 
 class UIScale(UITestCase):
-    """The Settings page's second Appearance-card Row (docs/spec.md, story
+    """The Settings page's second Appearance-card Row (docs/history/ac-17-f4-spec.md, story
     #17 Feature 4): self.s becomes DPI x the chosen step, applied through
     the same in-place rebuild mechanism Feature 3 built for Appearance --
     structurally parallel to AppearanceThemeSwitch/WindowResize above."""
@@ -1665,7 +1665,7 @@ class UIScale(UITestCase):
         # but derives the "manually enlarged" size from the biggest step's
         # own minsize (plus margin) rather than a hardcoded literal -- must
         # exceed every step's minsize, including 130%'s, on any DPI this
-        # suite runs under (docs/spec.md's own invariant-ratio argument,
+        # suite runs under (docs/history/ac-17-f4-spec.md's own invariant-ratio argument,
         # §1: a bigger step's minsize is a strictly bigger floor).
         max_s = self.ui._dpi_s * app.UI_SCALE_FACTORS["130"]
         min_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * max_s)
@@ -1719,11 +1719,11 @@ class UIScale(UITestCase):
         self.assertEqual(on_disk["ui_scale"], "115")
 
     def test_two_real_ui_scale_segmented_clicks_with_no_pump_between_them(self):
-        # docs/test-review.md Finding #1: every other test in this class
+        # docs/history/ac-17-f4-implementation.md Finding #1: every other test in this class
         # calls self.ui._apply_ui_scale(value) directly, so neither write
         # trace registered on ui_scale_var (Segmented's own repaint trace,
         # and _apply_ui_scale itself) is ever invoked by a real click --
-        # including the one whose *registration order* docs/spec.md §2
+        # including the one whose *registration order* docs/history/ac-17-f4-spec.md §2
         # flags as a TclError hazard (afk_clicker.py:1901-1926). Mirrors
         # Theme's own real-click regression test,
         # test_two_real_segmented_clicks_with_no_pump_between_them
@@ -1845,7 +1845,7 @@ class SettingsUpdates(UITestCase):
     rebuild-/visibility-safety mechanism (self._update_text, the guarded
     _set_update_state()/_offer_update(), the sidebar's has_update signal)
     that relocating update_button/version_label out of the sidebar makes
-    necessary. See docs/spec.md §3/§4."""
+    necessary. See docs/history/ac-17-f3b-spec.md §3/§4."""
 
     def tearDown(self):
         super().tearDown()
@@ -1867,14 +1867,14 @@ class SettingsUpdates(UITestCase):
         self.assertEqual(self.ui.version_label.cget("text"), f"v{app.__version__}")
 
     def test_every_update_state_renders_on_the_settings_page(self):
-        # A non-regression sweep (docs/spec.md AC3): every text/enabled/
+        # A non-regression sweep (docs/history/ac-17-f3b-spec.md AC3): every text/enabled/
         # colour combination check_update/_check_worker/install_update/
         # _install_worker can produce today, driven through the same
         # _set_update_state() entry point those methods already call --
         # see afk_clicker.py's own call sites for where each literal comes
         # from. Colour is only ever passed alongside an error/offer state;
         # states that pass no colour leave version_label exactly as it was
-        # (unchanged code, docs/spec.md §2/§3) -- asserted explicitly below,
+        # (unchanged code, docs/history/ac-17-f3b-spec.md §2/§3) -- asserted explicitly below,
         # not assumed.
         self.ui._show_settings()
         self.root.update()
@@ -2157,7 +2157,7 @@ class RunningClickerSurvivesRebuild(UITestCase):
         self.pump(0.2)
 
     def test_worker_running_and_clicks_continue_across_a_scale_change(self):
-        # Same guarantee as the Appearance test above, docs/spec.md's own
+        # Same guarantee as the Appearance test above, docs/history/ac-17-f4-spec.md's own
         # "a running clicker survives a scale-triggered rebuild unharmed" --
         # none of self.worker/self.hk_listener/the click-loop thread's state
         # lives in the destroyed/rebuilt widget tree, so a UI-scale change
@@ -2311,7 +2311,7 @@ class DrainUiSurvivesAStaleClosure(UITestCase):
 
 
 class OverlappingAppearanceChanges(UITestCase):
-    """docs/test-review.md Defect 1: two Appearance changes landing before
+    """docs/history/ac-17-f3a-test-review.md Defect 1: two Appearance changes landing before
     the first after_idle(self._rebuild_ui) has run used to raise an
     uncaught TclError -- card()'s _redraw() calls inner.update_idletasks(),
     which reentrantly ran the SECOND already-queued idle rebuild mid-way
@@ -2397,7 +2397,7 @@ class OverlappingAppearanceChanges(UITestCase):
 
 
 class OverlappingScaleAndAppearanceChanges(UITestCase):
-    """docs/spec.md §4: a UI-scale change and an Appearance change fired in
+    """docs/history/ac-17-f4-spec.md §4: a UI-scale change and an Appearance change fired in
     quick succession must coalesce into exactly one rebuild -- the same
     self._rebuilding/_rebuild_wanted/_rebuild_after_id machinery
     OverlappingAppearanceChanges (above) already proves for repeated
@@ -2455,7 +2455,7 @@ class OverlappingScaleAndAppearanceChanges(UITestCase):
 
 
 class ReentrantAppearanceChangeDuringRebuild(UITestCase):
-    """docs/test-review.md Round 2 review, Finding #1: _rebuild_ui() clears
+    """docs/history/ac-17-f3a-test-review.md Round 2 review, Finding #1: _rebuild_ui() clears
     self._rebuild_after_id to None at its own top, before its body runs. An
     _apply_appearance() call from *inside* that body (a future synchronous
     internal caller -- not reachable through today's only real caller, a
@@ -2574,7 +2574,7 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
 
 
 class QueuedStatusSurvivesARebuild(UITestCase):
-    """Round 8 coverage gap (docs/test-review.md): reverting _set_status's
+    """Round 8 coverage gap (docs/history/ac-17-f3a-test-review.md): reverting _set_status's
     fresh-lookup indirection at all 6 call sites in start()/stop()/loop()
     left the full suite green, because every existing rebuild test only
     ever lands a RUNNING/OFF update -- exactly what _rebuild_ui()'s own
