@@ -81,10 +81,12 @@ Der **Hotkey gilt global**, für alle Spiele derselbe.
 
 ### Aussehen
 
-Das Fenster übernimmt beim Start den hell/dunkel-Modus des Systems — unter
-Windows, macOS und GNOME. Auf anderen Linux-Desktops, oder wenn sich der
-Systemwert gar nicht auslesen lässt, öffnet es sich dunkel. Die Wahl wird
-einmal beim Start gelesen, nicht laufend nachgeführt.
+Das Fenster übernimmt standardmäßig den hell/dunkel-Modus des Systems —
+unter Windows, macOS und GNOME —, einmal beim Start gelesen. Unter
+**Settings → Appearance** lässt es sich auf **Light** oder **Dark**
+festlegen, oder wieder auf **System** zurückstellen — die Änderung wirkt
+sofort, ohne Neustart. Auf anderen Linux-Desktops, oder wenn sich der
+Systemwert gar nicht auslesen lässt, öffnet es sich bei **System** dunkel.
 
 ### Hotkey
 
