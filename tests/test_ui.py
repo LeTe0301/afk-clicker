@@ -85,6 +85,26 @@ class UITestCase(unittest.TestCase):
             self.root.update()
             time.sleep(0.025)
 
+    def pump_until(self, predicate, timeout=3.0):
+        """
+        Pump in small steps until `predicate()` is true, instead of a fixed
+        sleep long enough to hope.
+
+        Anything that reaches Tk through _ui() -- a background thread's
+        start(), a capture thread's result -- only lands inside a
+        root.update() call, on _drain_ui's 40 ms timer. A fixed pump()
+        assumes that timer wins the GIL against whatever else is running
+        within the window given; on a loaded shared runner it sometimes
+        doesn't. Returns without failing if the predicate never becomes
+        true, so the caller's own assertion still reports the regression.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.root.update()
+            if predicate():
+                return
+            time.sleep(0.02)
+
     def restart(self):
         self.ui.on_close()
         self.root = tk.Tk()
@@ -482,7 +502,8 @@ class NumBoxFocus(UITestCase):
         worker = threading.Thread(target=self.ui.start, daemon=True)
         worker.start()
         worker.join(timeout=2)
-        self.pump(0.1)                      # let _drain_ui's 40 ms tick land
+        self.pump_until(
+            lambda: self.root.focus_get() is not self.ui.click_ms.entry)
         self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
         self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.LINE)
         self.ui.stop()
