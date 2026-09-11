@@ -1,9 +1,12 @@
 """The window: per-game settings, persistence, detection and the click loop."""
 import json
 import os
+import subprocess
+import sys
 import threading
 import tempfile
 import time
+import types
 import unittest
 
 from .context import app, kb, needs_display, hotkey
@@ -840,6 +843,296 @@ class Lighten(unittest.TestCase):
         lightened = app._lighten("#000000", 0.5)
         r, g, b = (int(lightened[i:i + 2], 16) for i in (1, 3, 5))
         self.assertTrue(all(0 < c < 255 for c in (r, g, b)))
+
+    def test_out_of_range_factor_above_one_clamps_to_white(self):
+        # PR #28 review concern: an unclamped factor=2.0 walked r/g/b past
+        # 255, producing a 9-character string like "#17e17e17e" instead of
+        # raising or saturating -- Feature 3 will give this a second caller,
+        # so a bad input from there must not corrupt a widget's fill string.
+        self.assertEqual(app._lighten("#808080", 2.0), "#ffffff")
+
+    def test_out_of_range_factor_below_zero_clamps_to_unchanged(self):
+        self.assertEqual(app._lighten("#123456", -1.0), "#123456")
+
+    def test_non_hex_color_raises_value_error(self):
+        for bad in ("purple", "#12345", "#1234567", "123456", "#gggggg", ""):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    app._lighten(bad, 0.5)
+
+
+@needs_display
+class SetActiveThemeUnknownName(unittest.TestCase):
+    """detect_os_theme() only ever produces "dark"/"light", so this branch
+    is unreachable from detection itself -- it only fires if a caller
+    (Feature 3's override, or a test) passes a typo/garbage name."""
+
+    def test_unknown_name_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            app.set_active_theme("solarized")
+
+
+@needs_display
+class SetActiveThemeWidgets(unittest.TestCase):
+    """set_active_theme has to reach every place a palette color was
+    captured, not just the eleven module globals -- every widget built from
+    them at construction time too. Sampling the root window, a card shell,
+    a primary button's fill and a NumBox's focus-ring wrap is enough: the
+    only place any of the eleven THEMES colors are captured anywhere in this
+    file is those bare module globals, read at widget-construction time (no
+    default argument, class attribute, or module-level dict/tuple bakes one
+    in independently -- confirmed by grep, see docs/implementation.md)."""
+
+    def setUp(self):
+        self.config = os.path.join(tempfile.mkdtemp(), "settings.json")
+
+    def tearDown(self):
+        # Unconditional: no later test in the suite may inherit Quartz.
+        app.set_active_theme("dark")
+
+    def _build(self):
+        root = tk.Tk()
+        ui = app.AfkAutoclicker(root, store=app.Store(self.config))
+        root.update()
+
+        def _cleanup():
+            try:
+                ui.on_close()
+            except tk.TclError:
+                pass
+        self.addCleanup(_cleanup)
+        return ui
+
+    def _assert_matches(self, ui, palette):
+        self.assertEqual(ui.root.cget("bg"), palette["BG"])
+        self.assertEqual(ui.eat_card_inner.cget("bg"), palette["CARD"])
+        # apply_button starts disabled (set_enabled(False) right after
+        # construction, afk_clicker.py:1331), which paints CARD regardless
+        # of its primary flag -- enable it to sample its actual primary fill.
+        ui.apply_button.set_enabled(True)
+        self.assertEqual(
+            ui.apply_button.itemcget(ui.apply_button.shape, "fill"),
+            palette["ACCENT"])
+        self.assertEqual(ui.click_ms.wrap.cget("bg"), palette["LINE"])
+
+    def test_light_theme_reaches_every_sampled_widget(self):
+        app.set_active_theme("light")
+        self._assert_matches(self._build(), app.THEMES["light"])
+
+    def test_dark_is_restored_after_light(self):
+        app.set_active_theme("light")
+        self._build()
+        app.set_active_theme("dark")
+        self._assert_matches(self._build(), app.THEMES["dark"])
+
+    def test_no_theme_call_at_all_still_defaults_to_dark(self):
+        # Today's unchanged default: proves this feature adds a new path
+        # without disturbing the old one.
+        self._assert_matches(self._build(), app.THEMES["dark"])
+
+
+@needs_display
+class DetectOsTheme(unittest.TestCase):
+    """detect_os_theme()'s three platform branches and their documented
+    failure modes, exercised entirely through the three injectable seams
+    (tests/test_hotkey.py:290-316's monkeypatch-and-restore style, no
+    unittest.mock anywhere in this suite)."""
+
+    def setUp(self):
+        self._platform = app.sys.platform
+        self._run_theme_command = app._run_theme_command
+        self._read_windows_theme_registry = app._read_windows_theme_registry
+
+    def tearDown(self):
+        app.sys.platform = self._platform
+        app._run_theme_command = self._run_theme_command
+        app._read_windows_theme_registry = self._read_windows_theme_registry
+
+    # -- Windows: winreg via the _read_windows_theme_registry seam --
+
+    def test_windows_registry_value_0_is_dark(self):
+        app.sys.platform = "win32"
+        app._read_windows_theme_registry = lambda: 0
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_windows_registry_value_1_is_light(self):
+        app.sys.platform = "win32"
+        app._read_windows_theme_registry = lambda: 1
+        self.assertEqual(app.detect_os_theme(), "light")
+
+    def test_windows_registry_garbage_value_is_dark(self):
+        app.sys.platform = "win32"
+        app._read_windows_theme_registry = lambda: 2
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_windows_registry_missing_key_is_dark(self):
+        # FileNotFoundError is an OSError -- older Windows / never-opened
+        # Personalization settings.
+        app.sys.platform = "win32"
+        def raise_missing():
+            raise FileNotFoundError("key/value missing")
+        app._read_windows_theme_registry = raise_missing
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_windows_registry_unexpected_oserror_is_dark(self):
+        app.sys.platform = "win32"
+        def raise_oserror():
+            raise PermissionError("access denied")
+        app._read_windows_theme_registry = raise_oserror
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_windows_registry_any_other_exception_is_dark(self):
+        app.sys.platform = "win32"
+        def raise_generic():
+            raise RuntimeError("unexpected winreg failure")
+        app._read_windows_theme_registry = raise_generic
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    # -- macOS: `defaults` via the _run_theme_command seam --
+
+    def test_macos_clean_exit_0_is_dark_regardless_of_stdout(self):
+        # detect_os_theme's macOS branch never reads _run_theme_command's
+        # stdout at all -- per Apple's own convention (see the comment in
+        # detect_os_theme), AppleInterfaceStyle exists, with any value,
+        # only in dark mode, so exit status alone decides. stdout is left
+        # empty here on purpose, to not imply parsing that doesn't happen.
+        app.sys.platform = "darwin"
+        app._run_theme_command = lambda args: types.SimpleNamespace(stdout="")
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_macos_key_absent_nonzero_exit_is_light(self):
+        # Apple's own convention: no key at all in light mode, so the "clean
+        # nonzero exit" CalledProcessError *is* a successful detection.
+        app.sys.platform = "darwin"
+        def raise_called_process_error(args):
+            raise subprocess.CalledProcessError(1, args)
+        app._run_theme_command = raise_called_process_error
+        self.assertEqual(app.detect_os_theme(), "light")
+
+    def test_macos_defaults_binary_missing_is_dark(self):
+        app.sys.platform = "darwin"
+        def raise_missing(args):
+            raise FileNotFoundError("no defaults binary")
+        app._run_theme_command = raise_missing
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_macos_timeout_is_dark(self):
+        app.sys.platform = "darwin"
+        def raise_timeout(args):
+            raise subprocess.TimeoutExpired(args, app._THEME_DETECT_TIMEOUT)
+        app._run_theme_command = raise_timeout
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_macos_non_utf8_output_is_dark(self):
+        # subprocess.run(text=True) raises UnicodeDecodeError on an invalid
+        # byte before _run_theme_command ever returns; the outer catch must
+        # not let that escape detect_os_theme().
+        app.sys.platform = "darwin"
+        def raise_decode(args):
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte")
+        app._run_theme_command = raise_decode
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    # -- Linux: gsettings color-scheme, then gtk-theme, via the same seam --
+
+    def test_linux_prefer_dark_short_circuits_before_the_fallback(self):
+        app.sys.platform = "linux"
+        calls = []
+        def fake(args):
+            calls.append(args)
+            return types.SimpleNamespace(stdout="'prefer-dark'\n")
+        app._run_theme_command = fake
+        self.assertEqual(app.detect_os_theme(), "dark")
+        self.assertEqual(len(calls), 1, "gtk-theme fallback should not run")
+
+    def test_linux_prefer_light(self):
+        app.sys.platform = "linux"
+        app._run_theme_command = (
+            lambda args: types.SimpleNamespace(stdout="'prefer-light'\n"))
+        self.assertEqual(app.detect_os_theme(), "light")
+
+    def test_linux_default_falls_through_to_dark_gtk_theme(self):
+        app.sys.platform = "linux"
+        def fake(args):
+            if "color-scheme" in args:
+                return types.SimpleNamespace(stdout="'default'\n")
+            return types.SimpleNamespace(stdout="'Yaru-dark'\n")
+        app._run_theme_command = fake
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_linux_default_falls_through_to_light_gtk_theme(self):
+        app.sys.platform = "linux"
+        def fake(args):
+            if "color-scheme" in args:
+                return types.SimpleNamespace(stdout="'default'\n")
+            return types.SimpleNamespace(stdout="'Adwaita'\n")
+        app._run_theme_command = fake
+        self.assertEqual(app.detect_os_theme(), "light")
+
+    def test_linux_gtk_theme_fallback_known_limitation_dark_theme_without_dark_in_name(self):
+        # Documents a known limitation, doesn't assert desired behaviour:
+        # "Dracula" is a real, actively-distributed dark GTK theme, but the
+        # substring heuristic has no way to know that without "dark" in its
+        # name, so it (wrongly) returns "light" here. See the comment above
+        # _detect_linux_theme's `return "dark" if "dark" in name else
+        # "light"` line -- this pins the current, imperfect behaviour so a
+        # future change to the heuristic is a deliberate choice, not an
+        # accidental regression this test would silently paper over.
+        app.sys.platform = "linux"
+        def fake(args):
+            if "color-scheme" in args:
+                return types.SimpleNamespace(stdout="'default'\n")
+            return types.SimpleNamespace(stdout="'Dracula'\n")
+        app._run_theme_command = fake
+        self.assertEqual(app.detect_os_theme(), "light")
+
+    def test_linux_first_call_raises_second_call_names_dark_case_insensitive(self):
+        app.sys.platform = "linux"
+        def fake(args):
+            if "color-scheme" in args:
+                raise FileNotFoundError("no gsettings/schema")
+            return types.SimpleNamespace(stdout="'HighContrastDark'\n")
+        app._run_theme_command = fake
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_linux_both_calls_raise_is_dark(self):
+        app.sys.platform = "linux"
+        def fake(args):
+            raise FileNotFoundError("no gsettings")
+        app._run_theme_command = fake
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    def test_linux_both_calls_empty_output_is_dark(self):
+        app.sys.platform = "linux"
+        app._run_theme_command = lambda args: types.SimpleNamespace(stdout="")
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+    # -- Anything else --
+
+    def test_unrecognized_platform_is_dark(self):
+        app.sys.platform = "sunos5"
+        self.assertEqual(app.detect_os_theme(), "dark")
+
+
+@needs_display
+class RunThemeCommandSeam(unittest.TestCase):
+    """_run_theme_command itself, invoking a real subprocess -- the seam
+    tests above only ever simulate this function, they never exercise its
+    own argv/timeout/decoding plumbing for real."""
+
+    def test_real_invocation_captures_stdout(self):
+        result = app._run_theme_command([sys.executable, "-c", "print('hello')"])
+        self.assertEqual(result.stdout.strip(), "hello")
+
+    def test_invalid_utf8_byte_in_output_does_not_raise(self):
+        # A stray non-UTF-8 byte must not turn into an uncaught
+        # UnicodeDecodeError -- errors="replace" turns it into U+FFFD, which
+        # the normal "unrecognized value" fallthrough already handles,
+        # rather than adding a third failure mode needing its own catch.
+        result = app._run_theme_command(
+            [sys.executable, "-c",
+             "import sys; sys.stdout.buffer.write(b'\\xff\\xfe')"])
+        self.assertIn("�", result.stdout)
 
 
 @needs_display

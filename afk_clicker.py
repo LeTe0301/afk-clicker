@@ -50,6 +50,19 @@ def _lighten(hex6, factor):
     # Blends a hex color toward white by `factor` (0-1). Used only to derive
     # a primary button's hover fill from its own ACCENT, so a new theme
     # never needs a fourth hand-picked hex just for hovering.
+    #
+    # An out-of-range factor (e.g. 2.0) used to walk r/g/b past 255 and
+    # produce a malformed string like "#17e17e17e" instead of a real color
+    # (PR #28 review concern) -- Feature 3 gives this a second caller, so a
+    # bad factor from there must not corrupt a widget's fill. Clamped rather
+    # than validated: any factor is a meaningful request ("as light as this
+    # can go"), so there's nothing to reject. hex6 is the opposite -- a
+    # malformed color has no reasonable interpretation, so it's rejected
+    # outright rather than silently coerced into a wrong color.
+    if not (isinstance(hex6, str) and len(hex6) == 7 and hex6[0] == "#"
+            and all(c in "0123456789abcdefABCDEF" for c in hex6[1:])):
+        raise ValueError(f"not a #rrggbb hex color: {hex6!r}")
+    factor = max(0.0, min(1.0, factor))
     r, g, b = (int(hex6[i:i + 2], 16) for i in (1, 3, 5))
     r, g, b = (int(c + (255 - c) * factor) for c in (r, g, b))
     return f"#{r:02x}{g:02x}{b:02x}"
@@ -76,6 +89,35 @@ BG, CARD, CARD_HI, LINE, INK, MUTED = (
 ACCENT, ACCENT_INK, ACCENT_HI, OK, BAD = (
     _ACTIVE["ACCENT"], _ACTIVE["ACCENT_INK"], _ACTIVE["ACCENT_HI"],
     _ACTIVE["OK"], _ACTIVE["BAD"])
+
+
+def set_active_theme(name):
+    """Point the module's palette globals at THEMES[name]. Every widget in
+    this file reads BG/CARD/... as bare module globals at construction time
+    (not as function-default values, see docs/spec.md background), so
+    reassigning them here before any widget is built is sufficient -- no
+    widget code changes, no theme reference threaded onto self anywhere.
+    Feature 3 reuses this unchanged for its System/Light/Dark override,
+    followed by its own widget-tree rebuild.
+
+    An unknown name raises ValueError rather than silently falling back to
+    Dark: detect_os_theme() below only ever returns "dark"/"light" by
+    construction, so this branch is unreachable from real detection and only
+    fires if a caller (Feature 3's override UI, or a test) passes a
+    typo/garbage string -- a programming error that should fail loudly
+    during development, not silently paint a plausible-but-wrong theme."""
+    if name not in THEMES:
+        raise ValueError(f"unknown theme {name!r}; expected one of {sorted(THEMES)}")
+    global _ACTIVE, BG, CARD, CARD_HI, LINE, INK, MUTED
+    global ACCENT, ACCENT_INK, ACCENT_HI, OK, BAD
+    _ACTIVE = THEMES[name]
+    BG, CARD, CARD_HI, LINE, INK, MUTED = (
+        _ACTIVE["BG"], _ACTIVE["CARD"], _ACTIVE["CARD_HI"], _ACTIVE["LINE"],
+        _ACTIVE["INK"], _ACTIVE["MUTED"])
+    ACCENT, ACCENT_INK, ACCENT_HI, OK, BAD = (
+        _ACTIVE["ACCENT"], _ACTIVE["ACCENT_INK"], _ACTIVE["ACCENT_HI"],
+        _ACTIVE["OK"], _ACTIVE["BAD"])
+
 
 PILL_R = 999      # self-clamps to height/2 via round_rect's own min() -- a
                    # true capsule regardless of the widget's exact height.
@@ -114,6 +156,12 @@ def selftest():
     """
     Controller()                                  # pynput mouse backend
     macos_input_permitted()                       # the guard itself must load
+    detect_os_theme()                             # real registry/defaults/
+                                                    # gsettings backend must
+                                                    # load and never raise --
+                                                    # the only place this runs
+                                                    # against the frozen build
+
     if macos_input_permitted():
         kb.Listener(on_press=lambda k: False)     # pynput keyboard backend
     Hotkey({"ctrl"}, [_record(kb.KeyCode.from_char("h"))]).label()
@@ -839,6 +887,126 @@ def make_profile(game_id, name, title_fragment):
             "defaults": dict(GENERIC_DEFAULTS), "custom": True}
 
 
+
+
+_THEME_DETECT_TIMEOUT = 2   # generous for a local registry/gsettings/defaults
+                             # call, short enough to never visibly stall the
+                             # first frame -- shorter than _window_titles's 5s
+                             # because that's a background poll, this blocks
+                             # startup once.
+
+
+def _run_theme_command(args):
+    """The command-runner seam: real subprocess in production, swapped out
+    wholesale in tests so no real `defaults`/`gsettings` call happens on a
+    machine that may not have one. Never shell=True -- args is always a
+    list. Only ever invoked from the darwin/linux branches below, so unlike
+    the swap-script Popen call (afk_clicker.py:1528-1529) there is no
+    Windows console-flash to guard against with creationflags here -- this
+    never runs on win32 at all; Windows reads the registry directly instead.
+    errors="replace" keeps a stray non-UTF-8 byte from raising
+    UnicodeDecodeError: the garbled-but-decodable result then falls through
+    the normal "unrecognized value" handling in _detect_linux_theme/
+    detect_os_theme, rather than needing a fourth failure mode of its own.
+    encoding="utf-8" is explicit rather than left to default: without it,
+    text=True decodes with subprocess._text_encoding()'s fallback,
+    locale.getencoding(), which is cp1252 on Windows -- a single-byte
+    codepage with a glyph for every byte, so it never raises
+    UnicodeDecodeError and errors="replace" never fires.
+    gsettings/defaults both emit UTF-8 regardless of the host locale, so
+    decoding as UTF-8 is correct on every platform this ever runs on
+    (darwin/linux only -- see the docstring above)."""
+    return subprocess.run(args, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace",
+                           timeout=_THEME_DETECT_TIMEOUT, check=True)
+
+
+def _read_windows_theme_registry():
+    """The registry-reader seam. winreg only exists on Windows, so the import
+    stays lazy and inside this one function -- same reason ctypes.windll is
+    imported inside _window_titles's win32 branch, not at module level.
+    Any failure here (missing key/value -> FileNotFoundError, or any other
+    OSError/PermissionError) is an OSError, which the caller's blanket
+    `except Exception` in detect_os_theme already catches -- no separate
+    try/except needed in this function itself."""
+    import winreg
+    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+    try:
+        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return value
+    finally:
+        winreg.CloseKey(key)
+
+
+def _detect_linux_theme():
+    """gsettings color-scheme first (GNOME 42+); gtk-theme name as the
+    fallback for older GNOME. A 'default'/unrecognized/failed color-scheme
+    falls through to gtk-theme rather than going straight to Dark --
+    'default' means "no explicit preference stated", not "detection
+    failed", and giving up there would make Light mode unreachable for most
+    non-bleeding-edge GNOME desktops, defeating the whole point of the
+    fallback."""
+    try:
+        out = _run_theme_command(["gsettings", "get",
+            "org.gnome.desktop.interface", "color-scheme"])
+        value = out.stdout.strip().strip("'")
+        if value == "prefer-dark":
+            return "dark"
+        if value == "prefer-light":
+            return "light"
+        # "default", empty, or anything else unrecognized: fall through.
+    except Exception:
+        pass   # missing gsettings, missing schema/key (older GNOME), timeout
+    try:
+        out = _run_theme_command(["gsettings", "get",
+            "org.gnome.desktop.interface", "gtk-theme"])
+        name = out.stdout.strip().strip("'").lower()
+        if not name:
+            return "dark"   # exit 0 with nothing to read is the "unparseable
+                             # output" case -- fail safe, don't guess.
+        # Known limitation: this substring check misclassifies real, popular
+        # dark GTK themes whose names don't contain "dark" (e.g. "Dracula",
+        # "Nordic" -> "light"). A name list would never be complete, so this
+        # is left as-is; Feature 3's Settings-tab override is the intended
+        # way for an affected user to correct it, not a growing allow-list
+        # here.
+        return "dark" if "dark" in name else "light"
+    except Exception:
+        return "dark"   # chain ends here; no further fallback.
+
+
+def detect_os_theme():
+    """
+    Which THEMES key best matches the OS's own light/dark setting, checked
+    once at startup (no runtime polling -- ROADMAP.md already flags the
+    existing 5s X11 walk as a battery cost, and this is a purely cosmetic
+    follow that doesn't need to be live). Never raises: any exception, a
+    missing binary/registry value, a timeout, or output that doesn't parse
+    all resolve to "dark", because that's what the app already ships today
+    -- an undetectable OS is the least-surprising possible regression, never
+    a broken or half-themed window.
+    """
+    try:
+        if sys.platform == "win32":
+            return "light" if _read_windows_theme_registry() == 1 else "dark"
+        if sys.platform == "darwin":
+            # Apple's own convention: AppleInterfaceStyle exists (and reads
+            # "Dark") only in dark mode; light mode has no key at all, so a
+            # clean nonzero exit *is* light, not a failure. Only a launch
+            # failure/timeout -- caught by the outer except below -- means
+            # "couldn't tell".
+            try:
+                _run_theme_command(["defaults", "read", "-g",
+                                     "AppleInterfaceStyle"])
+            except subprocess.CalledProcessError:
+                return "light"
+            return "dark"
+        if sys.platform.startswith("linux"):
+            return _detect_linux_theme()
+    except Exception:
+        pass
+    return "dark"
 
 
 def _window_titles():
@@ -1827,6 +1995,7 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         sys.exit(selftest())
     enable_dpi_awareness()
+    set_active_theme(detect_os_theme())
     root = tk.Tk()
     # Segoe UI is the Windows system face; falling back keeps Linux usable.
     if "Segoe UI" not in tkfont.families():
