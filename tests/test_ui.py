@@ -772,5 +772,307 @@ class HotkeyPersistence(UITestCase):
         finally:
             app.macos_input_permitted = original
 
+
+@needs_display
+class Themes(unittest.TestCase):
+    """THEMES holds both palettes; the app still ships Deepslate only."""
+
+    DARK_HEX = {"BG": "#15171a", "CARD": "#1c1f23", "CARD_HI": "#262a30",
+                "LINE": "#3a4048", "INK": "#e4e7ea", "MUTED": "#9299a3",
+                "ACCENT": "#e08a55", "ACCENT_INK": "#1a0f08",
+                "OK": "#5cc9a4", "BAD": "#f06262"}
+    LIGHT_HEX = {"BG": "#e8ebf0", "CARD": "#ffffff", "CARD_HI": "#eff2f7",
+                 "LINE": "#d3d8e0", "INK": "#161a22", "MUTED": "#596170",
+                 "ACCENT": "#2b58cc", "ACCENT_INK": "#ffffff",
+                 "OK": "#0f7f4c", "BAD": "#cc3527"}
+    KEYS = {"BG", "CARD", "CARD_HI", "LINE", "INK", "MUTED", "ACCENT",
+            "ACCENT_INK", "ACCENT_HI", "OK", "BAD"}
+
+    def test_dark_and_light_both_hold_every_key(self):
+        self.assertEqual(set(app.THEMES["dark"]), self.KEYS)
+        self.assertEqual(set(app.THEMES["light"]), self.KEYS)
+
+    def test_dark_matches_the_deepslate_hex_exactly(self):
+        for name, hexval in self.DARK_HEX.items():
+            with self.subTest(name=name):
+                self.assertEqual(app.THEMES["dark"][name], hexval)
+
+    def test_light_matches_the_quartz_hex_exactly(self):
+        for name, hexval in self.LIGHT_HEX.items():
+            with self.subTest(name=name):
+                self.assertEqual(app.THEMES["light"][name], hexval)
+
+    def test_module_globals_still_ship_dark_only(self):
+        names = ("BG", "CARD", "CARD_HI", "LINE", "INK", "MUTED", "ACCENT",
+                 "ACCENT_INK", "ACCENT_HI", "OK", "BAD")
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(getattr(app, name), app.THEMES["dark"][name])
+
+    def test_accent_hi_is_computed_not_a_fourth_hand_picked_hex(self):
+        # Not in the ticket at all -- if it were hand-picked, this equality
+        # with the pure function's own output would be a coincidence.
+        self.assertEqual(app.THEMES["dark"]["ACCENT_HI"],
+                         app._lighten(app.THEMES["dark"]["ACCENT"], 0.18))
+        self.assertEqual(app.THEMES["light"]["ACCENT_HI"],
+                         app._lighten(app.THEMES["light"]["ACCENT"], 0.18))
+
+    def test_card_inner_w_has_no_border_allowance_left(self):
+        # A full-width card's shell sits inside body's own CONTENT_PAD inset
+        # before the card's own CARD_R padding starts -- a control sized off
+        # CONTENT_W alone, skipping that body inset, overruns the card.
+        self.assertEqual(app.CARD_INNER_W,
+                         app.CONTENT_W - 2 * app.CONTENT_PAD - 2 * app.CARD_R)
+        self.assertEqual(app.CARD_INNER_W, 396)
+
+
+@needs_display
+class Lighten(unittest.TestCase):
+    """The pure helper behind ACCENT_HI -- no theme or canvas involved."""
+
+    def test_factor_zero_is_unchanged(self):
+        self.assertEqual(app._lighten("#e08a55", 0.0), "#e08a55")
+
+    def test_factor_one_is_pure_white(self):
+        self.assertEqual(app._lighten("#123456", 1.0), "#ffffff")
+
+    def test_a_partial_factor_blends_toward_white(self):
+        lightened = app._lighten("#000000", 0.5)
+        r, g, b = (int(lightened[i:i + 2], 16) for i in (1, 3, 5))
+        self.assertTrue(all(0 < c < 255 for c in (r, g, b)))
+
+
+@needs_display
+class PillAndCardRadii(unittest.TestCase):
+    """Buttons/segmented/status become true pills; cards/rows stay at 12px."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.update()
+        self.recorded = []
+        self._orig_round_rect = app.round_rect
+
+        def _record(cv, x1, y1, x2, y2, r, **kw):
+            self.recorded.append(r)
+            return self._orig_round_rect(cv, x1, y1, x2, y2, r, **kw)
+
+        app.round_rect = _record
+
+    def tearDown(self):
+        app.round_rect = self._orig_round_rect
+        self.root.destroy()
+
+    def test_button_shape_uses_pill_radius(self):
+        app.Button(self.root, "Go", lambda: None, 1.0)
+        self.assertEqual(self.recorded, [app.PILL_R * 1.0])
+
+    def test_segmented_track_and_selection_pill_use_pill_radius(self):
+        var = tk.StringVar(value="a")
+        app.Segmented(self.root, [("a", "A"), ("b", "B")], var, 1.0)
+        # Two round_rect calls at construction: the outer track, then the
+        # selection pill -- both must move together or the pill's shape
+        # "jumps" when the selected segment changes.
+        self.assertEqual(self.recorded, [app.PILL_R * 1.0, app.PILL_R * 1.0])
+
+    def test_pill_pts_stays_in_sync_with_the_constructors_radius(self):
+        # _pill_pts recomputes the selection pill's corners on every value
+        # change without going through round_rect -- exercised directly so a
+        # regression there (still hard-coded at 7) is caught even though it
+        # never calls the monkeypatched round_rect above.
+        var = tk.StringVar(value="a")
+        seg = app.Segmented(self.root, [("a", "A"), ("b", "B")], var, 1.0)
+        pts = seg._pill_pts(2, 2, 200, 32)
+        half_h = (32 - 2) / 2
+        self.assertEqual(pts[0], 2 + half_h, "corner radius is not a true pill")
+
+    def test_round_rect_draws_a_true_capsule_not_a_smoothed_approximation(self):
+        # The old construction fed 12 corner *control* points -- including
+        # the exact, sharp (x2, y1) corner itself -- to a smoothed spline,
+        # which only ever approaches the radius it is asked for and, at
+        # r = h/2, still has that sharp point sitting at distance r*sqrt(2)
+        # from the nearest end-cap centre, not r. This checks the actual
+        # points fed to the canvas, so it fails against that old shape even
+        # though its clamped `r` parameter is the correct PILL_R value.
+        cv = tk.Canvas(self.root)
+        x1, y1, x2, y2 = 0, 0, 60, 32
+        r = (y2 - y1) / 2   # a true pill: radius is exactly half the height
+        item = app.round_rect(cv, x1, y1, x2, y2, r, fill="black")
+
+        self.assertEqual(cv.itemcget(item, "smooth"), "0",
+                         "a smoothed polygon never reaches the radius it is given")
+
+        coords = cv.coords(item)
+        pts = list(zip(coords[0::2], coords[1::2]))
+        left_c, right_c = (x1 + r, (y1 + y2) / 2), (x2 - r, (y1 + y2) / 2)
+        for px, py in pts:
+            d_left = ((px - left_c[0]) ** 2 + (py - left_c[1]) ** 2) ** 0.5
+            d_right = ((px - right_c[0]) ** 2 + (py - right_c[1]) ** 2) ** 0.5
+            self.assertAlmostEqual(min(d_left, d_right), r, delta=1.0,
+                                   msg=f"point {(px, py)} is not on either end-cap")
+
+        self.assertIn((x2, (y1 + y2) / 2), pts,
+                      "right edge midpoint is not on the outline")
+
+    def test_segmented_selection_pill_matches_round_rects_true_capsule(self):
+        # _pill_pts feeds coords() on the very item round_rect created, so
+        # its geometry has to stay a true capsule too, not just its own r.
+        var = tk.StringVar(value="a")
+        seg = app.Segmented(self.root, [("a", "A"), ("b", "B")], var, 1.0)
+        x1, y1, x2, y2 = 2, 2, 200, 32
+        r = min(app.PILL_R, (x2 - x1) / 2, (y2 - y1) / 2)
+        pts = list(zip(*[iter(seg._pill_pts(x1, y1, x2, y2))] * 2))
+        left_c, right_c = (x1 + r, (y1 + y2) / 2), (x2 - r, (y1 + y2) / 2)
+        for px, py in pts:
+            d_left = ((px - left_c[0]) ** 2 + (py - left_c[1]) ** 2) ** 0.5
+            d_right = ((px - right_c[0]) ** 2 + (py - right_c[1]) ** 2) ** 0.5
+            self.assertAlmostEqual(min(d_left, d_right), r, delta=1.0,
+                                   msg=f"point {(px, py)} is not on either end-cap")
+
+    def test_status_pill_shape_uses_pill_radius(self):
+        app.StatusPill(self.root, 1.0)
+        self.assertEqual(self.recorded, [app.PILL_R * 1.0])
+
+    def test_game_item_shape_uses_card_radius_not_pill_radius(self):
+        app.GameItem(self.root, {"id": "x", "name": "X"}, lambda gid: None, 1.0)
+        self.assertEqual(self.recorded, [app.CARD_R * 1.0])
+
+    def test_card_shell_shape_uses_card_radius(self):
+        app.card(self.root, 1.0)
+        self.assertIn(app.CARD_R * 1.0, self.recorded)
+        self.assertNotIn(app.PILL_R * 1.0, self.recorded)
+
+
+@needs_display
+class PrimaryButtonTheme(unittest.TestCase):
+    """The old hardcoded '#ffd66b'/'#12131a' literals are gone."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.update()
+
+    def tearDown(self):
+        self.root.destroy()
+
+    def test_rest_uses_accent_and_accent_ink(self):
+        b = app.Button(self.root, "Go", lambda: None, 1.0, primary=True)
+        self.assertEqual(b.itemcget(b.shape, "fill"), app.ACCENT)
+        self.assertEqual(b.itemcget(b.label, "fill"), app.ACCENT_INK)
+
+    def test_hover_uses_accent_hi_and_accent_ink(self):
+        b = app.Button(self.root, "Go", lambda: None, 1.0, primary=True)
+        b._paint(hover=True)
+        self.assertEqual(b.itemcget(b.shape, "fill"), app.ACCENT_HI)
+        self.assertEqual(b.itemcget(b.label, "fill"), app.ACCENT_INK)
+
+
+@needs_display
+class CardShell(unittest.TestCase):
+    """card() becomes a borderless canvas hosting the returned Frame."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.geometry("500x400")
+        self.parent = tk.Frame(self.root, bg=app.BG)
+        self.parent.pack(fill="both", expand=True)
+        self.root.update()
+
+    def tearDown(self):
+        self.root.destroy()
+
+    def test_shell_is_a_borderless_canvas(self):
+        inner = app.card(self.parent, 1.0)
+        shell = inner.master
+        self.assertIsInstance(shell, tk.Canvas)
+        self.assertEqual(int(shell.cget("highlightthickness")), 0)
+        shape = shell.find_all()[0]
+        self.assertEqual(shell.itemcget(shape, "outline"), "")
+
+    def test_callers_still_get_a_packable_frame_back(self):
+        inner = app.card(self.parent, 1.0)
+        self.assertIsInstance(inner, tk.Frame)
+
+    def test_shell_redraws_when_the_content_pane_widens(self):
+        inner = app.card(self.parent, 1.0)
+        tk.Label(inner, text="hello", bg=app.CARD).pack()
+        shell = inner.master
+        self.root.update()
+        before = shell.bbox(shell.find_all()[0])
+
+        self.root.geometry("900x700")
+        self.root.update()
+        after = shell.bbox(shell.find_all()[0])
+
+        self.assertGreater(after[2] - after[0], before[2] - before[0])
+        # The shape's own bounding box must track the shell's real size, not
+        # go stale or clip -- a `<Configure>` storm or a redraw that only
+        # fires once would leave this mismatched.
+        self.assertAlmostEqual(after[2] - after[0], shell.winfo_width(), delta=2)
+
+
+class EatingCardCanvas(UITestCase):
+    """Non-regression: `.pack()/.pack_forget()` on `eat_card` still works
+    now that it is a Canvas shell rather than a bordered Frame."""
+
+    def test_eat_card_is_now_a_canvas(self):
+        self.assertIsInstance(self.ui.eat_card, tk.Canvas)
+
+    def test_show_and_hide_still_toggle_the_manager(self):
+        self.ui._select("minecraft")
+        self.assertEqual(self.ui.eat_card.winfo_manager(), "pack")
+        self.ui._select("global")
+        self.assertEqual(self.ui.eat_card.winfo_manager(), "")
+        self.ui._select("minecraft")
+        self.assertEqual(self.ui.eat_card.winfo_manager(), "pack")
+
+
+class CardResize(UITestCase):
+    """A real card in the running app tracks #14's resizable window."""
+
+    def _hotkey_card_shell(self):
+        # apply_button -> btns -> hk (the inner Frame `card()` returned) ->
+        # the shell Canvas. No attribute holds the shell directly, since
+        # `_build_content`'s call sites only keep the returned inner Frame.
+        return self.ui.apply_button.master.master.master
+
+    def test_the_hotkey_cards_shell_widens_with_the_content_pane(self):
+        shell = self._hotkey_card_shell()
+        self.assertIsInstance(shell, tk.Canvas)
+        before = shell.winfo_width()
+
+        self.root.geometry("1000x900")
+        self.root.update()
+
+        self.assertGreater(shell.winfo_width(), before)
+        bbox = shell.bbox(shell.find_all()[0])
+        self.assertAlmostEqual(bbox[2] - bbox[0], shell.winfo_width(), delta=2)
+
+
+class RoundedCanvasBackgrounds(UITestCase):
+    """Every canvas that draws a round_rect shape must paint its parent's own
+    background outside the rounded shape -- otherwise the shape's corners
+    sit on a mismatched square (docs/design.md item 3). round_rect is the
+    only thing in the app that calls create_polygon, so any canvas holding a
+    polygon item is one of these and gets checked, with no per-widget-class
+    list to keep in sync by hand."""
+
+    def _rounded_canvases(self, widget):
+        found = []
+        if isinstance(widget, tk.Canvas):
+            if any(widget.type(item) == "polygon" for item in widget.find_all()):
+                found.append(widget)
+        for child in widget.winfo_children():
+            found.extend(self._rounded_canvases(child))
+        return found
+
+    def test_every_rounded_canvas_matches_its_parents_background(self):
+        canvases = self._rounded_canvases(self.root)
+        self.assertTrue(canvases, "setup failed to find any rounded canvas")
+        mismatches = [(str(cv), cv.cget("bg"), cv.master.cget("bg"))
+                     for cv in canvases if cv.cget("bg") != cv.master.cget("bg")]
+        self.assertEqual(mismatches, [],
+            "canvas bg must match its parent's bg, or the area outside the "
+            "rounded shape paints a visible mismatched rectangle")
+
+
 if __name__ == "__main__":
     unittest.main()
