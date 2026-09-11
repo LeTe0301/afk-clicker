@@ -94,7 +94,7 @@ ACCENT, ACCENT_INK, ACCENT_HI, OK, BAD = (
 def set_active_theme(name):
     """Point the module's palette globals at THEMES[name]. Every widget in
     this file reads BG/CARD/... as bare module globals at construction time
-    (not as function-default values, see docs/spec.md background), so
+    (not as function-default values, see docs/history/ac-17-f2-spec.md background), so
     reassigning them here before any widget is built is sufficient -- no
     widget code changes, no theme reference threaded onto self anywhere.
     Feature 3 reuses this unchanged for its System/Light/Dark override,
@@ -122,7 +122,7 @@ def set_active_theme(name):
 # A persisted enum key -> the concrete value it resolves to, same category as
 # THEMES above: "ui_scale" in settings.json is one of these four strings, and
 # self.s (AfkAutoclicker.__init__) multiplies the DPI factor by the matching
-# float. See docs/spec.md §1 for why 4 explicit percentage steps rather than
+# float. See docs/history/ac-17-f4-spec.md §1 for why 4 explicit percentage steps rather than
 # a slider or named sizes.
 UI_SCALE_FACTORS = {"90": 0.9, "100": 1.0, "115": 1.15, "130": 1.3}
 UI_SCALE_DEFAULT = "100"
@@ -1377,7 +1377,7 @@ class SettingsItem(tk.Canvas):
 
     Feature 3b's `has_update` is the off-screen signal for a pending update
     found while Settings isn't open (or never opened this session) -- see
-    docs/spec.md §1. Deliberately text, not a dot: 3a's own design already
+    docs/history/ac-17-f3b-spec.md §1. Deliberately text, not a dot: 3a's own design already
     rejected a dot for this row."""
 
     def __init__(self, parent, on_click, s, has_update=False, width=SIDEBAR_W - 16, height=38):
@@ -1460,7 +1460,7 @@ class AfkAutoclicker:
         self.store = store if store is not None else Store()
         # DPI half of self.s, named separately from the combined value below
         # -- a UI-scale change (_apply_ui_scale) recomputes self.s from this
-        # unchanged, never re-reads "tk scaling" (docs/spec.md §2: the DPI
+        # unchanged, never re-reads "tk scaling" (docs/history/ac-17-f4-spec.md §2: the DPI
         # half is still detected once, at startup).
         self._dpi_s = root.tk.call("tk", "scaling") / 1.333  # 1.0 at 96 dpi
         self.s = s = self._dpi_s * UI_SCALE_FACTORS[self.store.data["ui_scale"]]
@@ -1504,7 +1504,7 @@ class AfkAutoclicker:
                                 # a plain tuple, not a Tk object, so (like
                                 # self._pending) never reset by a rebuild;
                                 # replayed onto update_button/version_label
-                                # by _build_ui()'s tail. See docs/spec.md §3.
+                                # by _build_ui()'s tail. See docs/history/ac-17-f3b-spec.md §3.
         self._ui_queue = queue.SimpleQueue()   # one queue for the app's whole
                                                 # lifetime -- never swapped by
                                                 # a rebuild (see _rebuild_ui())
@@ -1554,7 +1554,7 @@ class AfkAutoclicker:
         when the window's current size is now below the new floor -- so a
         smaller step never shrinks a window the user made bigger, and a
         bigger step only grows whichever axis actually falls short (see
-        docs/spec.md §2)."""
+        docs/history/ac-17-f4-spec.md §2)."""
         minw, minh = int((SIDEBAR_W + 1 + CONTENT_W) * self.s), int(690 * self.s)
         self.root.minsize(minw, minh)
         if not grow_only:
@@ -1627,7 +1627,7 @@ class AfkAutoclicker:
         # A thin divider separates the action button above from the Settings
         # entry below -- without it the two rows read as one stack of
         # similar pill buttons instead of "an action" vs. "a navigation
-        # destination" (docs/test-review.md's UX judgment on 3a). Same LINE
+        # destination" (docs/history/ac-17-f3a-test-review.md's UX judgment on 3a). Same LINE
         # color as the sidebar/content divider below, just laid out
         # horizontally here. "Check for updates"/the version string moved
         # into the Settings page's own Updates section in Feature 3b -- this
@@ -1640,7 +1640,7 @@ class AfkAutoclicker:
         # fresh from self._pending here so a rebuild that happens while
         # Settings is closed (an Appearance change on a game page, with an
         # offer already pending from an earlier Settings visit) still shows
-        # the indicator correctly -- see docs/spec.md §1.
+        # the indicator correctly -- see docs/history/ac-17-f3b-spec.md §1.
         self.settings_item = SettingsItem(side, self._show_settings, s,
                                           has_update=(self._pending is not None))
         self.settings_item.pack(pady=(0, int(7 * s)))
@@ -1663,7 +1663,7 @@ class AfkAutoclicker:
             # outstanding, then self._update_text unconditionally overlays
             # the most recent _set_update_state() text/enabled/colour on
             # top -- reproducing the exact layering the widgets would have
-            # accumulated live, without a rebuild (see docs/spec.md §3):
+            # accumulated live, without a rebuild (see docs/history/ac-17-f3b-spec.md §3):
             # idle/checking has no offer to restore and the overlay alone
             # is correct; an offer with nothing since is idempotent (the
             # overlay re-applies the same text _offer_update just set); a
@@ -1708,7 +1708,7 @@ class AfkAutoclicker:
         the window without a restart. Never touches self.running/self.worker/
         self.hk_listener/self.registered_hotkey/self.profiles/self.store --
         none of those are Tk objects, and a rebuild must not reset any of
-        them (see docs/spec.md §2).
+        them (see docs/history/ac-17-f3a-spec.md §2).
 
         Also absorbs any still-pending after_idle(self._rebuild_ui) job
         scheduled by _apply_appearance(): whichever caller actually runs a
@@ -1723,7 +1723,7 @@ class AfkAutoclicker:
         rebuild's still-being-built widgets out from under it, and the
         first rebuild's next card() call then raises TclError on the now-
         destroyed shell it was still holding a reference to (see
-        docs/test-review.md Defect 1 / docs/implementation.md "Round 2").
+        docs/history/ac-17-f3a-test-review.md Defect 1 / docs/history/ac-17-f3a-implementation.md "Round 2").
 
         At most one rebuild is ever actually RUNNING too, not just pending:
         self._rebuilding, set for the duration of the body below, is what
@@ -1737,7 +1737,7 @@ class AfkAutoclicker:
         would see None and schedule a fresh after_idle job, which the SAME
         still-running rebuild's own card() calls would then reentrantly
         service via update_idletasks() -- reproducing the exact Defect 1
-        crash through a different door (docs/test-review.md Round 2 review,
+        crash through a different door (docs/history/ac-17-f3a-test-review.md Round 2 review,
         Finding #1; probe5_reentrant_card.py). self._rebuilding closes that
         door: _apply_appearance() (and any other rebuild request) checks it
         and, while it is set, only marks self._rebuild_wanted instead of
@@ -1868,7 +1868,7 @@ class AfkAutoclicker:
         check_update/_set_update_state/_offer_update need no signature
         changes. Only the idle defaults are set here; the actual current
         state (idle, checking, an offer, downloading, an error) is applied
-        right after this returns, by _build_ui()'s tail (docs/spec.md §3)."""
+        right after this returns, by _build_ui()'s tail (docs/history/ac-17-f3b-spec.md §3)."""
         pad = int(CONTENT_PAD * s)
         body = tk.Frame(self.content, bg=BG)
         body.pack(fill="both", expand=True, padx=pad, pady=pad)
@@ -1890,13 +1890,13 @@ class AfkAutoclicker:
         Segmented(row.control, [("system", "System"), ("light", "Light"), ("dark", "Dark")],
                   self.appearance_var, s, width=180).pack()
 
-        # Second Row in the same card, below Theme (docs/spec.md §5) --
+        # Second Row in the same card, below Theme (docs/history/ac-17-f4-spec.md §5) --
         # 4-option Segmented, narrower per-option (55px) than Theme's own
         # 3-option control (60px/option) since "90%"/"100%"/"115%"/"130%"
         # are shorter per-character than "System", the longest Theme label;
         # still comfortably inside CARD_INNER_W (396px) alongside the short
         # "UI scale" label, at every step (the invariant-ratio argument,
-        # docs/spec.md §1).
+        # docs/history/ac-17-f4-spec.md §1).
         row2 = Row(ap, "UI scale", s)
         row2.pack(fill="x", pady=(int(8 * s), 0))
         self.ui_scale_var = tk.StringVar(value=self.store.data["ui_scale"])
@@ -1904,7 +1904,7 @@ class AfkAutoclicker:
                   [("90", "90%"), ("100", "100%"), ("115", "115%"), ("130", "130%")],
                   self.ui_scale_var, s, width=220).pack()
 
-        # Detected at most once per process (docs/spec.md §4) -- if nothing
+        # Detected at most once per process (docs/history/ac-17-f3a-spec.md §4) -- if nothing
         # has needed the real OS theme yet (appearance started as "light"/
         # "dark", so __main__ never detected it), this is that first need;
         # after this, self._os_theme is cached for the rest of the run.
@@ -1924,12 +1924,12 @@ class AfkAutoclicker:
         # _request_rebuild()/after_idle and never rebuilds synchronously
         # inside the trace (verified empirically -- reversing this
         # registration order and running the full suite still passes; see
-        # docs/implementation.md's fix-pass section). The ordering is kept
+        # docs/history/ac-17-f4-implementation.md's fix-pass section). The ordering is kept
         # anyway, matching Theme's, because it is the order that would be
         # required if _apply_ui_scale (or _apply_appearance) ever stopped
         # deferring and rebuilt synchronously instead: getting it backwards
         # in that scenario destroys the Segmented mid-repaint and raises
-        # TclError (docs/spec.md §2, same hazard as Theme's).
+        # TclError (docs/history/ac-17-f4-spec.md §2, same hazard as Theme's).
         self.ui_scale_var.trace_add("write",
             lambda *_a: self._apply_ui_scale(self.ui_scale_var.get()))
 
@@ -1973,7 +1973,7 @@ class AfkAutoclicker:
         # when the one pending rebuild finally runs is exactly what it
         # rebuilds against -- nothing further needs to be remembered here.
         #
-        # Reentrant call (docs/test-review.md Round 2 review, Finding #1):
+        # Reentrant call (docs/history/ac-17-f3a-test-review.md Round 2 review, Finding #1):
         # if _apply_appearance() is itself called while a rebuild is
         # already RUNNING (self._rebuilding), self._rebuild_after_id was
         # already cleared to None at that rebuild's own top -- scheduling a
@@ -2287,7 +2287,7 @@ class AfkAutoclicker:
         replace self.status with a new StatusPill between one of their
         self._ui(...) calls landing in the queue and _drain_ui() draining it;
         a captured self.status.set would target the old, now-destroyed
-        canvas and raise TclError (docs/spec.md "the actual correctness
+        canvas and raise TclError (docs/history/ac-17-f3a-spec.md "the actual correctness
         fix"). Every other queued callback (_offer_update, _set_update_state,
         _mark_running, ...) already resolves its target this way -- this
         makes the status pill's the same."""
