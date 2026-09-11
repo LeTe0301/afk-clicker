@@ -82,11 +82,12 @@ class Staging(unittest.TestCase):
                              ("tar.gz", "linux-x86_64.tar.gz")):
             with self.subTest(kind=kind):
                 archive = self._archive(kind)
+                name = "x-" + suffix
                 staged = app.download_and_stage(
                     # as_uri(), not "file://" + path: a Windows drive path is
                     # not a valid file URL.
-                    {"name": "x-" + suffix,
-                     "browser_download_url": pathlib.Path(archive).as_uri()})
+                    {"name": name, "browser_download_url": pathlib.Path(archive).as_uri()},
+                    checksums={name: app.file_digest(archive)})
                 marker = os.path.join(staged, "marker.txt")
                 self.assertTrue(os.path.isfile(marker))
                 # Check the content, not merely that a file exists -- the old
@@ -164,10 +165,43 @@ class StagingSafety(unittest.TestCase):
             app.download_and_stage(asset, checksums={asset["name"]: "c" * 64})
         self.assertIn("mismatch", str(caught.exception))
 
+    def test_the_mismatch_message_survives_status_line_truncation(self):
+        # Same 40-char budget as the unlisted case, exercised with a
+        # realistic release asset name to confirm the fixed "checksum
+        # mismatch" prefix (which does not embed the asset name at all)
+        # already keeps the category intact -- unlike the unlisted-archive
+        # message before its fix.
+        base = tempfile.mkdtemp()
+        real_path = os.path.join(base, "AFK-Farm-Clicker-macos-arm64.zip")
+        with zipfile.ZipFile(real_path, "w") as zf:
+            zf.writestr("AFK Farm Clicker/marker.txt", "hello")
+        asset = self._asset(real_path)
+        with self.assertRaises(app.ChecksumError) as caught:
+            app.download_and_stage(asset, checksums={asset["name"]: "d" * 64})
+        shown = str(caught.exception)[:40].lower()
+        self.assertIn("mismatch", shown, f"status line {shown!r} does not read as a checksum failure")
+
     def test_an_unlisted_archive_is_refused(self):
         path = self._zip({"AFK Farm Clicker/marker.txt": "hello"})
         with self.assertRaises(app.ChecksumError):
             app.download_and_stage(self._asset(path), checksums={"other.zip": "d" * 64})
+
+    def test_the_unlisted_message_survives_status_line_truncation(self):
+        # _install_worker shows str(exc)[:40] (afk_clicker.py:1376), and a real
+        # release asset is named like the release workflow does it --
+        # "AFK-Farm-Clicker-windows-x64.zip", not "pkg-windows-x64.zip". At that
+        # length the reason is pushed past character 40 and the user sees only
+        # "<name> is not ", with no word telling them it is a checksum problem.
+        base = tempfile.mkdtemp()
+        real_path = os.path.join(base, "AFK-Farm-Clicker-windows-x64.zip")
+        with zipfile.ZipFile(real_path, "w") as zf:
+            zf.writestr("AFK Farm Clicker/marker.txt", "hello")
+        asset = self._asset(real_path)
+        with self.assertRaises(app.ChecksumError) as caught:
+            app.download_and_stage(asset, checksums={"other.zip": "d" * 64})
+        shown = str(caught.exception)[:40].lower()
+        self.assertTrue("checksum" in shown or "sha256sums" in shown,
+                         f"status line {shown!r} does not read as a checksum failure")
 
     def test_nothing_is_extracted_when_the_digest_is_wrong(self):
         # Verification must come first: extraction is the step that puts
@@ -188,6 +222,18 @@ class StagingSafety(unittest.TestCase):
         with self.assertRaises(app.ChecksumError) as caught:
             app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
         self.assertIn("escapes", str(caught.exception))
+
+    def test_the_escape_message_survives_status_line_truncation(self):
+        # The archive entry name -- not the asset name -- is the
+        # attacker-controlled variable-length part here. A long enough entry
+        # name must not push "escapes" past the 40-character budget either.
+        long_name = "../../" + "nested-directory-component/" * 4 + "escaped.txt"
+        path = self._zip({long_name: "gotcha"})
+        asset = self._asset(path)
+        with self.assertRaises(app.ChecksumError) as caught:
+            app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
+        shown = str(caught.exception)[:40].lower()
+        self.assertIn("escapes", shown, f"status line {shown!r} does not read as an unsafe-entry failure")
 
     def test_an_absolute_entry_is_refused(self):
         path = self._zip({"/tmp/afk-clicker-escape.txt": "gotcha"})
@@ -225,6 +271,16 @@ class StagingSafety(unittest.TestCase):
             app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
         self.assertIn("link entry", str(caught.exception))
 
+    def test_the_link_message_survives_status_line_truncation(self):
+        long_name = "deeply-nested-symlink-name-" * 3
+        path = self._tar_with(
+            lambda d: os.symlink("/etc/passwd", os.path.join(d, long_name)))
+        asset = self._asset(path)
+        with self.assertRaises(app.ChecksumError) as caught:
+            app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
+        shown = str(caught.exception)[:40].lower()
+        self.assertIn("link entry", shown, f"status line {shown!r} does not read as an unsafe-entry failure")
+
     def test_a_tar_hardlink_is_refused(self):
         def add_hardlink(d):
             os.link(os.path.join(d, "marker.txt"), os.path.join(d, "hard"))
@@ -239,6 +295,15 @@ class StagingSafety(unittest.TestCase):
         with self.assertRaises(app.ChecksumError) as caught:
             app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
         self.assertIn("device entry", str(caught.exception))
+
+    def test_the_device_message_survives_status_line_truncation(self):
+        long_name = "deeply-nested-fifo-name-" * 3
+        path = self._tar_with(lambda d: os.mkfifo(os.path.join(d, long_name)))
+        asset = self._asset(path)
+        with self.assertRaises(app.ChecksumError) as caught:
+            app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
+        shown = str(caught.exception)[:40].lower()
+        self.assertIn("device entry", shown, f"status line {shown!r} does not read as an unsafe-entry failure")
 
 
 @needs_display

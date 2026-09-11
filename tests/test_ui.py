@@ -382,6 +382,78 @@ class ButtonRelease(UITestCase):
         self.pump(0.2)
 
 
+class InstallWorker(UITestCase):
+    """
+    `_install_worker` end to end, not just the module-level helpers it calls.
+
+    AC1/AC2/AC4/AC6 are written at the level of "the install path" / "the
+    user" -- the wired-up AfkAutoclicker flow -- so a test that only calls
+    download_and_stage directly cannot cover the fail-closed branch or the
+    truncated status line the user actually sees. `_install_worker` is called
+    directly rather than through a thread: it never touches Tk except via
+    self._ui(), so calling it inline on the test thread is safe, and it makes
+    the assertions below deterministic instead of racing a background thread.
+    """
+
+    def _drain(self):
+        # _install_worker only ever queues UI updates through self._ui();
+        # _drain_ui() is what turns those into real widget state. It is
+        # normally reached via the 40 ms timer started in __init__ -- call it
+        # directly here rather than waiting on the clock.
+        self.ui._drain_ui()
+
+    def _button_text(self):
+        return self.ui.update_button.itemcget(self.ui.update_button.label, "text")
+
+    def test_a_release_without_checksums_is_refused_and_nothing_is_downloaded(self):
+        # AC4: a release that publishes no SHA256SUMS is refused, fail
+        # closed, and download_and_stage is never reached -- not just
+        # pick_checksums(release) is None at the unit level.
+        calls = []
+        original = app.download_and_stage
+        app.download_and_stage = lambda *a, **k: calls.append((a, k))
+        try:
+            release = {"assets": [
+                {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
+            self.ui._pending = ("v9.9.9", release["assets"][0], release)
+            self.ui._install_worker()
+            self._drain()
+        finally:
+            app.download_and_stage = original
+        self.assertEqual(calls, [], "download_and_stage was called despite no SHA256SUMS")
+        self.assertIn("SHA256SUMS", self._button_text())
+        self.assertTrue(self.ui.update_button._enabled, "the button was left disabled after a refusal")
+
+    def test_a_checksum_error_reaches_the_status_line_with_its_meaning_intact(self):
+        # AC6, driven through the real worker rather than by calling
+        # download_and_stage directly -- this is the path that would have
+        # caught the truncated "is not listed" message before it shipped.
+        # The network is mocked (fetch_checksums, download_and_stage); this
+        # test never reaches GitHub.
+        def fake_fetch(asset, timeout=30):
+            return {}
+
+        def fake_stage(asset, checksums, on_progress=None):
+            raise app.ChecksumError(
+                f"checksum: not in {app.CHECKSUM_ASSET}: {asset['name']}")
+
+        original_fetch, original_stage = app.fetch_checksums, app.download_and_stage
+        app.fetch_checksums, app.download_and_stage = fake_fetch, fake_stage
+        try:
+            release = {"assets": [
+                {"name": "SHA256SUMS", "browser_download_url": "x"},
+                {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
+            self.ui._pending = ("v9.9.9", release["assets"][1], release)
+            self.ui._install_worker()
+            self._drain()
+        finally:
+            app.fetch_checksums, app.download_and_stage = original_fetch, original_stage
+        shown = self._button_text().lower()
+        self.assertIn("checksum", shown,
+                       f"status line {shown!r} does not read as a checksum failure")
+        self.assertTrue(self.ui.update_button._enabled, "the button was left disabled after a refusal")
+
+
 @needs_display
 class Selftest(unittest.TestCase):
     def test_selftest_passes(self):

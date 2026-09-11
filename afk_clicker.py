@@ -566,13 +566,18 @@ def _safe_tar_members(members, destination):
             raise ChecksumError(f"archive contains an unexpected entry: {member.name}")
 
 
-def download_and_stage(asset, on_progress=None, checksums=None):
+def download_and_stage(asset, checksums, on_progress=None):
     """
     Fetch the release archive and unpack it into a staging directory.
 
     Staged next to the installation rather than inside it: the swap script has
     to delete the old contents wholesale, and it must not be deleting the very
     files it is copying from.
+
+    checksums is required, not optional: it is the {filename: sha256} map the
+    downloaded archive is verified against before anything is extracted. A
+    default of None here would let a future caller skip verification just by
+    forgetting the keyword -- the one thing this function exists to enforce.
     """
     workdir = tempfile.mkdtemp(prefix="afkclicker-update-")
     archive = os.path.join(workdir, asset["name"])
@@ -597,7 +602,13 @@ def download_and_stage(asset, on_progress=None, checksums=None):
     if checksums is not None:
         expected = checksums.get(asset["name"])
         if expected is None:
-            raise ChecksumError(f"{asset['name']} is not listed in {CHECKSUM_ASSET}")
+            # The fixed words must come first: the status line keeps only the
+            # first 40 characters (afk_clicker.py:_install_worker), and a real
+            # asset name ("AFK-Farm-Clicker-linux-x86_64.tar.gz") is long
+            # enough on its own to push "not listed in SHA256SUMS" past that
+            # budget if it leads the message instead of trailing it.
+            raise ChecksumError(
+                f"checksum: not in {CHECKSUM_ASSET}: {asset['name']}")
         actual = file_digest(archive)
         if actual != expected:
             raise ChecksumError(
