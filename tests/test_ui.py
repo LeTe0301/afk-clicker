@@ -762,7 +762,7 @@ class WindowResize(UITestCase):
 
 
 class RowValueColumn(UITestCase):
-    """Row's fixed-width label column (docs/spec.md, story #24 Feature 1):
+    """Row's fixed-width label column (docs/history/ac-24-f1-spec.md):
     the control always starts at the same offset from the row's left edge,
     regardless of how wide a stretched card gets, so the label-to-control
     gap does not grow the way it did with the old pack-based Row -- extra
@@ -804,7 +804,7 @@ class RowValueColumn(UITestCase):
                         card.winfo_width())
 
     def test_ui_scale_row_never_overflows_its_card_at_any_scale_step(self):
-        # Constant-level check first (docs/spec.md's own fit-check
+        # Constant-level check first (docs/history/ac-24-f1-spec.md's fit-check
         # argument): the widest explicit control in the file (width=220,
         # the "UI scale" row) plus the fixed label column must fit inside
         # CARD_INNER_W, independent of any rendering: 152 + 220 = 372 <= 396.
