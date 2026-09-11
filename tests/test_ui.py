@@ -85,7 +85,7 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
             pass
         self._assert_no_callback_exceptions()
 
-    def settle(self, timeout=5.0):
+    def settle(self, timeout=15.0):
         """
         Wait for the startup game scan to land.
 
@@ -97,6 +97,13 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
 
         _seen_running only exists once _mark_running has run, so it is the
         signal to wait for rather than a sleep long enough to hope.
+
+        The 15s ceiling (not 5s) exists for a slow macOS CI runner: the scan
+        shells out to osascript, and a cold `osascript` start on a loaded
+        shared runner was observed timing out setUp() at 5s (PR #30 review
+        round 1, PerGameSettings::test_survives_a_restart). Costs nothing
+        when the scan is fast -- this returns the instant _seen_running
+        appears, it never waits out the full ceiling on a normal run.
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -1693,17 +1700,29 @@ class AfterJobsAreNotDuplicated(UITestCase):
         return len(self.root.tk.call("after", "info"))
 
     def test_exactly_three_after_jobs_survive_three_rebuilds(self):
-        # ui._timers is an ever-growing log -- each of the 3 self-rescheduling
-        # jobs appends a fresh id every time it fires, even with no rebuild
-        # at all, so its size only means "exactly 3" in the instant right
-        # after a rebuild resets it (_rebuild_ui does self._timers = []).
-        # Checked right after each rebuild, before its own jobs have had a
-        # chance to fire and grow the list again.
+        # ui._timers is a dict keyed by chain name ("poll_games", "drain",
+        # "sync_settings") -- each self-rescheduling job replaces its own
+        # entry every time it fires, rather than appending a fresh id, so
+        # its size is always exactly 3 for the app's whole life, not just
+        # in the instant right after a rebuild resets it. Checked right
+        # after each rebuild here mainly because that is when the *ids*
+        # inside it are new, not because the count would otherwise drift.
         for value in ("light", "dark", "light"):
             self.ui._apply_appearance(value)
             self.root.update()          # runs the after_idle-deferred rebuild
             self.assertEqual(len(self.ui._timers), 3)
             self.assertEqual(self._after_count(), 3)
+
+    def test_timer_count_does_not_grow_between_rebuilds(self):
+        # Each of the 3 self-rescheduling jobs (_poll_games/_drain_ui/
+        # _sync_settings) replaces its own dict entry on every fire instead
+        # of appending, so len(_timers) stays 3 no matter how many times
+        # they fire with no rebuild at all. On the old list-based
+        # self._timers.append(...) code this grows to roughly 30 after
+        # about 1s of pumping (the 40ms drain job alone fires ~25 times).
+        self.assertEqual(len(self.ui._timers), 3)
+        self.pump(1.0)
+        self.assertEqual(len(self.ui._timers), 3)
 
 
 class BindAllBoundOnce(UITestCase):

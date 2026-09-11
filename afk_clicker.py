@@ -1605,7 +1605,7 @@ class AfkAutoclicker:
         else:
             self.status.set("OFF", BAD,
                             self.registered_hotkey.label() if self.registered_hotkey else "")
-        self._timers = []
+        self._timers = {}
         self._sync_settings()
         self._drain_ui()
         self._poll_games()
@@ -1683,12 +1683,12 @@ class AfkAutoclicker:
         try:
             self._persist()                    # flush any in-progress field edit
                                                 # before its widget is destroyed
-            for job in self._timers:
+            for job in self._timers.values():
                 try:
                     self.root.after_cancel(job)
                 except tk.TclError:
                     pass
-            self._timers = []
+            self._timers = {}
             for w in self.root.winfo_children():
                 w.destroy()
             self._build_ui(self.s)
@@ -2042,7 +2042,7 @@ class AfkAutoclicker:
         def scan():
             self._ui(self._mark_running, detect_running(self.profiles))
         threading.Thread(target=scan, daemon=True).start()
-        self._timers.append(self.root.after(5000, self._poll_games))
+        self._timers["poll_games"] = self.root.after(5000, self._poll_games)
 
     def _mark_running(self, running_ids):
         for gid, item in self.items.items():
@@ -2101,7 +2101,7 @@ class AfkAutoclicker:
                     return                  # window is really going away
                 continue                    # a rebuilt/destroyed widget's stale
                                              # closure -- drop it, keep draining
-        self._timers.append(self.root.after(40, self._drain_ui))
+        self._timers["drain"] = self.root.after(40, self._drain_ui)
 
     def _set_status(self, text, color, hint=""):
         """Looked up fresh here, on the main thread when _drain_ui() actually
@@ -2137,7 +2137,7 @@ class AfkAutoclicker:
             }
         except tk.TclError:
             return
-        self._timers.append(self.root.after(200, self._sync_settings))
+        self._timers["sync_settings"] = self.root.after(200, self._sync_settings)
 
     # ---------- hotkey ----------
 
@@ -2325,12 +2325,12 @@ class AfkAutoclicker:
         self._persist()
         # Pending after() callbacks fire into a destroyed interpreter and Tcl
         # reports them as "invalid command name". Cancel them first.
-        for job in getattr(self, "_timers", []):
+        for job in getattr(self, "_timers", {}).values():
             try:
                 self.root.after_cancel(job)
             except tk.TclError:
                 pass
-        self._timers = []
+        self._timers = {}
         # Same reasoning as _timers above, for the one job not kept there:
         # an Appearance change's deferred after_idle(self._rebuild_ui) can
         # still be pending here (_apply_appearance() ran, _rebuild_ui()
