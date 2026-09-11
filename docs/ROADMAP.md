@@ -11,9 +11,12 @@ Until both are settled, the version stays in `0.x`.
 - [ ] **Settings schema version.** `settings.json` has no version field, so a
       future format change has no migration path and would silently reset
       everyone's per-game values.
-- [ ] **Update integrity.** The updater downloads over HTTPS and executes the
-      result. It should verify a checksum published with the release before
-      swapping anything in.
+- [x] **Update integrity.** The updater downloads over HTTPS and executes the
+      result. It now verifies the archive against the release's `SHA256SUMS`
+      before extracting anything, refuses a release that publishes none, and
+      refuses archive entries that escape the staging directory (#3, #11).
+      Digests from the same release catch a corrupt or swapped asset, not a
+      compromised release — that would need signing.
 - [ ] **macOS verification.** Built and smoke-tested in CI, never run by a
       human. Accessibility permission, the unsigned-app first launch and the
       hotkey listener are all unverified on real hardware.
