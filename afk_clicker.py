@@ -1075,6 +1075,13 @@ class NumBox(tk.Frame):
         entry.bind("<FocusIn>", lambda e: wrap.config(bg=ACCENT))
         entry.bind("<FocusOut>", lambda e: wrap.config(bg=LINE))
 
+        def _blur(e):
+            e.widget.winfo_toplevel().focus_set()
+        entry.bind("<Return>", _blur)
+        entry.bind("<Escape>", _blur)
+        self.wrap = wrap
+        self.entry = entry
+
 
 class AfkAutoclicker:
     def __init__(self, root, store=None):
@@ -1084,13 +1091,17 @@ class AfkAutoclicker:
 
         root.title("AFK Farm Clicker")
         root.config(bg=BG)
-        root.resizable(False, False)
-        # Both panes turn off geometry propagation to hold their widths, which
-        # means nothing is left to tell the window how tall to be -- without an
+        root.resizable(True, True)
+        # Both panes still turn off geometry propagation to hold their tuned
+        # widths, so nothing tells the window how tall to start -- without an
         # explicit size the body collapses to zero height and only the header
-        # shows.
-        root.geometry(f"{int((SIDEBAR_W + 1 + CONTENT_W) * s)}x{int(690 * s)}")
+        # shows. minsize keeps the window from ever being resized below the
+        # size the layout was tuned at, so nothing clips.
+        minw, minh = int((SIDEBAR_W + 1 + CONTENT_W) * s), int(690 * s)
+        root.minsize(minw, minh)
+        root.geometry(f"{minw}x{minh}")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        root.bind_all("<Button-1>", self._maybe_drop_focus)
 
         self.mouse = Controller()
         self.hotkey = None
@@ -1131,7 +1142,7 @@ class AfkAutoclicker:
         shell.pack(fill="both", expand=True)
 
         # ── sidebar ──
-        side = tk.Frame(shell, bg=BG, width=int(SIDEBAR_W * s))
+        side = self.side = tk.Frame(shell, bg=BG, width=int(SIDEBAR_W * s))
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
         self.count_label = tk.Label(side, text="GAMES", bg=BG, fg=MUTED, anchor="w",
@@ -1442,6 +1453,15 @@ class AfkAutoclicker:
         except (TypeError, ValueError):
             return fallback
 
+    def _maybe_drop_focus(self, event):
+        # Only an Entry's own class binding should keep it focused on click --
+        # every other click (background, a label, a card, the sidebar, a
+        # Button/Segmented/GameItem canvas) drops it, so a field stops looking
+        # and acting focused the moment you click away instead of only when
+        # Tk happens to hand focus to something else.
+        if not isinstance(event.widget, tk.Entry):
+            self.root.focus_set()
+
     def _ui(self, fn, *args):
         """
         Hand a widget update to the main thread.
@@ -1580,6 +1600,7 @@ class AfkAutoclicker:
             if self.worker.is_alive():
                 return                     # refuse rather than double-click
         self.running = True
+        self._ui(self.root.focus_set)
         self._ui(self.status.set, "RUNNING", OK,
                  self.registered_hotkey.label() if self.registered_hotkey else "")
         self.worker = threading.Thread(target=self.loop, daemon=True)

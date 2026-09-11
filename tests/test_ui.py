@@ -37,6 +37,13 @@ class UITestCase(unittest.TestCase):
         self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
         self.root.update()
         self.settle()
+        # Under Xvfb with no window manager, a freshly created tk.Tk() never
+        # actually owns X input focus, so focus_set() alone produces no
+        # <FocusIn>/<FocusOut> and focus_get() reads None no matter what.
+        # This one-time focus_force() makes the toplevel genuinely own input
+        # focus so every focus_set()-based assertion below observes something
+        # -- the app itself keeps using focus_set(), never focus_force().
+        self.root.focus_force()
 
     def tearDown(self):
         try:
@@ -452,6 +459,131 @@ class InstallWorker(UITestCase):
         self.assertIn("checksum", shown,
                        f"status line {shown!r} does not read as a checksum failure")
         self.assertTrue(self.ui.update_button._enabled, "the button was left disabled after a refusal")
+
+
+class NumBoxFocus(UITestCase):
+    """A field keeps eating keystrokes until something explicitly drops focus."""
+
+    def focus_and_settle(self, numbox):
+        numbox.entry.focus_set()
+        self.root.update()
+        self.assertEqual(self.root.focus_get(), numbox.entry,
+                         "setup failed to focus the entry")
+
+    def _find_segmented_for(self, variable):
+        def walk(widget):
+            if isinstance(widget, app.Segmented) and widget.var is variable:
+                return widget
+            for child in widget.winfo_children():
+                found = walk(child)
+                if found is not None:
+                    return found
+            return None
+        found = walk(self.ui.content)
+        self.assertIsNotNone(found, "no matching Segmented control found")
+        return found
+
+    def test_click_elsewhere_drops_focus(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.ACCENT)
+        self.ui.count_label.event_generate("<Button-1>", x=1, y=1)
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.LINE)
+
+    def test_click_the_entry_itself_keeps_it_focused(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.click_ms.entry.event_generate("<Button-1>", x=2, y=2)
+        self.root.update()
+        self.assertIsInstance(self.root.focus_get(), tk.Entry)
+
+    def test_click_a_different_numbox_switches_focus(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.jitter_ms.entry.event_generate("<Button-1>", x=2, y=2)
+        self.root.update()
+        self.assertEqual(self.root.focus_get(), self.ui.jitter_ms.entry)
+
+    def test_enter_blurs_without_reverting_the_value(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.click_ms.var.set("321")
+        self.ui.click_ms.entry.event_generate("<Return>")
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.LINE)
+        self.assertEqual(self.ui.click_ms.var.get(), "321")
+
+    def test_escape_blurs_without_reverting_the_value(self):
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.click_ms.var.set("321")
+        self.ui.click_ms.entry.event_generate("<Escape>")
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.LINE)
+        self.assertEqual(self.ui.click_ms.var.get(), "321")
+
+    def test_tab_still_moves_focus(self):
+        # Non-regression: not a pinned order, just proof traversal survives.
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.click_ms.entry.event_generate("<Tab>")
+        self.root.update()
+        self.assertIsNotNone(self.root.focus_get())
+
+    def test_a_segmented_control_still_changes_its_variable(self):
+        seg = self._find_segmented_for(self.ui.button_name)
+        self.focus_and_settle(self.ui.click_ms)
+        self.ui.button_name.set("left")
+        # Third segment ("middle") of three, spanning seg.w wide.
+        seg.event_generate("<Button-1>", x=seg.w - 2, y=int(seg.h / 2))
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.button_name.get(), "middle")
+
+    def test_a_game_item_still_selects(self):
+        self.focus_and_settle(self.ui.click_ms)
+        item = self.ui.items["minecraft"]
+        item.event_generate("<Button-1>", x=5, y=5)
+        self.root.update()
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.current, "minecraft")
+
+    def test_starting_from_a_background_thread_drops_focus(self):
+        # The real hotkey callback runs on the pynput listener thread, never
+        # the Tk main thread -- prove the same is true here.
+        self.ui.mouse = FakeMouse()
+        self.focus_and_settle(self.ui.click_ms)
+        worker = threading.Thread(target=self.ui.start, daemon=True)
+        worker.start()
+        worker.join(timeout=2)
+        self.pump(0.1)                      # let _drain_ui's 40 ms tick land
+        self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+        self.assertEqual(self.ui.click_ms.wrap.cget("bg"), app.LINE)
+        self.ui.stop()
+        self.pump(0.2)
+
+
+class WindowResize(UITestCase):
+    def test_both_axes_are_resizable(self):
+        self.assertEqual(self.root.resizable(), (1, 1))
+
+    def test_minsize_matches_todays_default_size(self):
+        s = self.ui.s
+        expected = (int((app.SIDEBAR_W + 1 + app.CONTENT_W) * s), int(690 * s))
+        self.assertEqual(self.root.minsize(), expected)
+
+    def test_growing_the_window_expands_content_not_the_sidebar(self):
+        content_before = self.ui.content.winfo_width()
+        side_before = self.ui.side.winfo_width()
+        self.root.geometry("1000x900")
+        self.root.update()
+        self.assertGreater(self.ui.content.winfo_width(), content_before)
+        self.assertEqual(self.ui.side.winfo_width(), side_before)
+
+    def test_shrinking_below_minsize_is_clamped(self):
+        self.root.geometry("50x50")
+        self.root.update()
+        minw, minh = self.root.minsize()
+        self.assertGreaterEqual(self.root.winfo_width(), minw)
+        self.assertGreaterEqual(self.root.winfo_height(), minh)
 
 
 @needs_display
