@@ -215,6 +215,20 @@ class StagingSafety(unittest.TestCase):
         self.assertFalse(os.path.exists(marker))
         self.assertEqual(set(os.listdir(os.path.dirname(path))) - before, set())
 
+    def test_checksums_none_extracts_nothing(self):
+        # checksums is a required argument (afk_clicker.py:download_and_stage);
+        # an explicit None is a caller bug, not a request to skip
+        # verification. Whatever exception that raises, extraction must not
+        # have happened -- the same guarantee as a wrong digest.
+        path = self._zip({"AFK Farm Clicker/marker.txt": "hello"})
+        asset = self._asset(path)
+        before = set(os.listdir(os.path.dirname(path)))
+        with self.assertRaises(Exception):
+            app.download_and_stage(asset, checksums=None)
+        marker = os.path.join(os.path.dirname(path), "staged")
+        self.assertFalse(os.path.exists(marker))
+        self.assertEqual(set(os.listdir(os.path.dirname(path))) - before, set())
+
     def test_an_entry_escaping_the_directory_is_refused(self):
         # zipfile writes the member name as given; "../.." lands outside.
         path = self._zip({"../../escaped.txt": "gotcha"})
@@ -251,6 +265,28 @@ class StagingSafety(unittest.TestCase):
         path = os.path.join(base, "pkg-linux-x86_64.tar.gz")
         with tarfile.open(path, "w:gz") as tf:
             tf.add(payload, arcname="AFK Farm Clicker")
+        return path
+
+    def _tar_with_entry_type(self, name, entry_type):
+        """
+        Like _tar_with, but for entry kinds that cannot be created as real
+        files cross-platform -- os.mkfifo does not exist on Windows, and
+        device nodes need root everywhere. These tests check tarfile's own
+        type byte, not any filesystem behaviour, so the archive entry is
+        built directly with a TarInfo and addfile() instead of created on
+        disk and then tarred up.
+        """
+        base = tempfile.mkdtemp()
+        payload = os.path.join(base, "tree")
+        os.makedirs(payload)
+        with open(os.path.join(payload, "marker.txt"), "w") as fh:
+            fh.write("hello")
+        path = os.path.join(base, "pkg-linux-x86_64.tar.gz")
+        with tarfile.open(path, "w:gz") as tf:
+            tf.add(payload, arcname="AFK Farm Clicker")
+            info = tarfile.TarInfo(name=f"AFK Farm Clicker/{name}")
+            info.type = entry_type
+            tf.addfile(info)
         return path
 
     def test_a_plain_tar_is_accepted(self):
@@ -290,7 +326,7 @@ class StagingSafety(unittest.TestCase):
             app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
 
     def test_a_tar_fifo_is_refused(self):
-        path = self._tar_with(lambda d: os.mkfifo(os.path.join(d, "pipe")))
+        path = self._tar_with_entry_type("pipe", tarfile.FIFOTYPE)
         asset = self._asset(path)
         with self.assertRaises(app.ChecksumError) as caught:
             app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})
@@ -298,7 +334,7 @@ class StagingSafety(unittest.TestCase):
 
     def test_the_device_message_survives_status_line_truncation(self):
         long_name = "deeply-nested-fifo-name-" * 3
-        path = self._tar_with(lambda d: os.mkfifo(os.path.join(d, long_name)))
+        path = self._tar_with_entry_type(long_name, tarfile.FIFOTYPE)
         asset = self._asset(path)
         with self.assertRaises(app.ChecksumError) as caught:
             app.download_and_stage(asset, checksums={asset["name"]: app.file_digest(path)})

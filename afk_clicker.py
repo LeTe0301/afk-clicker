@@ -599,20 +599,25 @@ def download_and_stage(asset, checksums, on_progress=None):
 
     # Verify before unpacking, not after: extraction is the step that puts
     # attacker-controlled names onto the filesystem.
-    if checksums is not None:
-        expected = checksums.get(asset["name"])
-        if expected is None:
-            # The fixed words must come first: the status line keeps only the
-            # first 40 characters (afk_clicker.py:_install_worker), and a real
-            # asset name ("AFK-Farm-Clicker-linux-x86_64.tar.gz") is long
-            # enough on its own to push "not listed in SHA256SUMS" past that
-            # budget if it leads the message instead of trailing it.
-            raise ChecksumError(
-                f"checksum: not in {CHECKSUM_ASSET}: {asset['name']}")
-        actual = file_digest(archive)
-        if actual != expected:
-            raise ChecksumError(
-                f"checksum mismatch: expected {expected[:12]}…, got {actual[:12]}…")
+    #
+    # No "if checksums is not None" guard here on purpose: checksums is a
+    # required argument (see the docstring above), and a caller that passes
+    # None explicitly has a bug, not a request to skip verification. Letting
+    # `.get` raise AttributeError surfaces that immediately instead of
+    # silently extracting an unverified archive.
+    expected = checksums.get(asset["name"])
+    if expected is None:
+        # The fixed words must come first: the status line keeps only the
+        # first 40 characters (afk_clicker.py:_install_worker), and a real
+        # asset name ("AFK-Farm-Clicker-linux-x86_64.tar.gz") is long
+        # enough on its own to push "not listed in SHA256SUMS" past that
+        # budget if it leads the message instead of trailing it.
+        raise ChecksumError(
+            f"checksum: not in {CHECKSUM_ASSET}: {asset['name']}")
+    actual = file_digest(archive)
+    if actual != expected:
+        raise ChecksumError(
+            f"checksum mismatch: expected {expected[:12]}…, got {actual[:12]}…")
 
     staged = os.path.join(workdir, "staged")
     os.makedirs(staged, exist_ok=True)
