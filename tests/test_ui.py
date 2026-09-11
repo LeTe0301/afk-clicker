@@ -833,9 +833,26 @@ class RowValueColumn(UITestCase):
         row = self.ui.jitter_ms.master.master
         text = row.grid_slaves(row=0, column=0)[0]
         _label, hint = text.winfo_children()
-        expected = int(app.ROW_LABEL_W * self.ui.s)
-        self.assertEqual(hint.cget("wraplength"), expected)
-        self.assertLessEqual(hint.winfo_reqwidth(), expected)
+        self.assertEqual(hint.cget("wraplength"), int(app.ROW_LABEL_W * self.ui.s))
+
+        # That it actually wrapped, said in a way no font can argue with: the
+        # jitter hint is the only one long enough to need two lines, so it must
+        # stand taller than one that fits on one. Asserting its requested WIDTH
+        # against wraplength instead compares a widget's width -- text plus the
+        # Label's own padx and border -- against a text-wrapping limit, which
+        # are different quantities. That passed here on DejaVu Sans and failed
+        # on Windows' Segoe UI by exactly one pixel (141 > 140).
+        short = self.ui.autostop_min.master.master
+        _short_label, short_hint = short.grid_slaves(
+            row=0, column=0)[0].winfo_children()
+        self.root.update()
+        self.assertGreater(hint.winfo_reqheight(), short_hint.winfo_reqheight())
+
+        # And the thing this test is actually named for, which it never
+        # previously checked: the wrapped hint must not run into the control.
+        self.assertLessEqual(
+            hint.winfo_rootx() + hint.winfo_width(),
+            self.ui.jitter_ms.winfo_rootx())
 
 
 @needs_display
