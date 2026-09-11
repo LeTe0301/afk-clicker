@@ -2006,6 +2006,19 @@ class AfkAutoclicker:
     # ---------- updates ----------
 
     def check_update(self):
+        # A new check supersedes any previous offer (PR #31 review, Round 2
+        # BLOCKER): _check_worker's own branches (unchanged below) never
+        # touch self._pending/settings_item -- they only ever add an offer,
+        # never retract one. Without this, a stale offer's sidebar mark and
+        # the button's install_update wiring could survive past the very
+        # check that resolves it (e.g. "Up to date" landing right after an
+        # earlier offer). The install-failure retry path is untouched: a
+        # checksum/verification error still leaves self._pending set, so
+        # retrying the same install stays possible.
+        self._pending = None
+        self.settings_item.set_state(has_update=False)
+        if self._settings_open:
+            self.update_button.command = self.check_update
         self._set_update_state("Checking…", enabled=False)
         threading.Thread(target=self._check_worker, daemon=True).start()
 

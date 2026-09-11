@@ -1831,6 +1831,115 @@ class SettingsUpdates(UITestCase):
         self.assertEqual(self._button_text(), "Checking…")
         self.assertFalse(self.ui.update_button._enabled)
 
+    def test_a_fresh_check_supersedes_a_superseded_offer(self):
+        # PR #31 review, Round 2 BLOCKER: offer -> a checksum-failure install
+        # (retry stays wired to install_update, intended -- unchanged) -> a
+        # later check_update() that resolves "up to date". Without check_
+        # update() clearing self._pending/the sidebar mark/the button's
+        # command first, the stale offer survives the very check that
+        # resolves it: the sidebar keeps reading "Settings · Update" right
+        # next to a button that reads "Up to date" but is still wired to
+        # install_update() against the superseded release.
+        self.ui._show_settings()
+        self.root.update()
+        release = {"assets": [
+            {"name": "SHA256SUMS", "browser_download_url": "x"},
+            {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
+        self.ui._pending = ("v9.9.9", release["assets"][1], release)
+        self.ui._offer_update("v9.9.9")
+        self.assertEqual(self.ui.update_button.command, self.ui.install_update)
+
+        def fake_fetch(asset, timeout=30):
+            return {}
+
+        def fake_stage(asset, checksums, on_progress=None):
+            raise app.ChecksumError(
+                f"checksum: not in {app.CHECKSUM_ASSET}: {asset['name']}")
+
+        original_fetch, original_stage = app.fetch_checksums, app.download_and_stage
+        app.fetch_checksums, app.download_and_stage = fake_fetch, fake_stage
+        try:
+            self.ui._install_worker()
+            self.ui._drain_ui()
+        finally:
+            app.fetch_checksums, app.download_and_stage = original_fetch, original_stage
+
+        # Retry stays possible after an install-time failure -- unchanged,
+        # intended (docs/implementation.md "Key decisions" / the PR review's
+        # own case 3).
+        self.assertIsNotNone(self.ui._pending)
+        self.assertTrue(self.ui.settings_item.has_update)
+        self.assertEqual(self.ui.update_button.command, self.ui.install_update)
+
+        original_latest = app.latest_release
+        app.latest_release = lambda timeout=10: {"tag_name": "v0.1.0", "assets": []}
+        try:
+            self.ui.check_update()
+            self.pump_until(lambda: self._button_text() != "Checking…")
+        finally:
+            app.latest_release = original_latest
+
+        self.assertEqual(self._button_text(), f"Up to date · {app.__version__}")
+        self.assertIsNone(self.ui._pending,
+                          "a fresh check must clear the superseded offer")
+        self.assertFalse(self.ui.settings_item.has_update,
+                         "the Settings row must not still claim an update is waiting")
+        self.assertEqual(
+            self.ui.settings_item.itemcget(self.ui.settings_item.text, "text"), "Settings")
+        self.assertEqual(self.ui.update_button.command, self.ui.check_update,
+                         "the button must point back at a fresh check, not the stale install")
+
+    def test_offer_lands_through_a_real_worker_thread_with_settings_closed(self):
+        # PR #31 review, Round 8 CONCERN: _offer_update was never driven
+        # through the real self._ui()/_drain_ui() marshaling from an actual
+        # background thread -- production only ever reaches it that way
+        # (_check_worker's own self._ui(self._offer_update, tag) call).
+        self.assertFalse(self.ui._settings_open)
+        self.assertFalse(hasattr(self.ui, "update_button"))
+        release = {"tag_name": "v9.9.9",
+                  "assets": [{"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz"}]}
+        original_latest, original_is_newer, original_pick = \
+            app.latest_release, app.is_newer, app.pick_asset
+        app.latest_release = lambda timeout=10: release
+        app.is_newer = lambda tag, current=app.__version__: True
+        app.pick_asset = lambda rel: rel["assets"][0]
+        try:
+            worker = threading.Thread(target=self.ui._check_worker, daemon=True)
+            worker.start()
+            worker.join(timeout=2)
+            self.pump_until(lambda: self.ui.settings_item.has_update)
+        finally:
+            app.latest_release, app.is_newer, app.pick_asset = \
+                original_latest, original_is_newer, original_pick
+
+        self.assertTrue(self.ui.settings_item.has_update)
+        self.assertIsNotNone(self.ui._pending)
+        self.assertEqual(self.ui._pending[0], "v9.9.9")
+
+    def test_offer_lands_through_a_real_worker_thread_with_settings_open(self):
+        self.ui._show_settings()
+        self.root.update()
+        release = {"tag_name": "v9.9.9",
+                  "assets": [{"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz"}]}
+        original_latest, original_is_newer, original_pick = \
+            app.latest_release, app.is_newer, app.pick_asset
+        app.latest_release = lambda timeout=10: release
+        app.is_newer = lambda tag, current=app.__version__: True
+        app.pick_asset = lambda rel: rel["assets"][0]
+        try:
+            worker = threading.Thread(target=self.ui._check_worker, daemon=True)
+            worker.start()
+            worker.join(timeout=2)
+            self.pump_until(lambda: self._button_text() == "Install v9.9.9")
+        finally:
+            app.latest_release, app.is_newer, app.pick_asset = \
+                original_latest, original_is_newer, original_pick
+
+        self.assertEqual(self._button_text(), "Install v9.9.9")
+        self.assertTrue(self.ui.settings_item.has_update)
+        self.assertIsNotNone(self.ui._pending)
+        self.assertEqual(self.ui._pending[0], "v9.9.9")
+
 
 class RunningClickerSurvivesRebuild(UITestCase):
     def tearDown(self):
