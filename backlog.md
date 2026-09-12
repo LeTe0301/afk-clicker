@@ -12,24 +12,22 @@ GitHub number. Shown below as **G#** / **GH#**.
 ## In progress
 
 - [ ] **Story: responsive layout and an icon-led minimal restyle** — G#24 / GH#36.
-      **Features 1 and 2 of 5 are merged** — PR #37 (`db20af2`, row value-column
-      alignment) and PR #40 (`5ab0196`, the horizontal tab bar).
-      Next: feature 3, the icon rail — the story's own riskiest item, because it
-      drives `_request_rebuild()` from a continuous `<Configure>` stream when
-      every existing trigger is discrete. `docs/history/ac-24-story.md` recommends
-      debouncing on threshold-crossing rather than per-pixel, and notes
-      `_apply_minsize()`'s floor has to be rederived for a collapsed rail.
+      **Features 1, 2 and 3 of 5 are merged** — PR #37 (`db20af2`, row value-column
+      alignment), PR #40 (`5ab0196`, horizontal tab bar), PR #41 (`18c6f7c`, icon rail).
+      Next: feature 4, content filling the available vertical height (no dead band
+      below the last card). Depends on feature 2, which is in. Feature 5 (flat
+      minimal restyle) is last and depends on all of 1-4.
       Branch `feature/ac-24/responsive-layout-icon-restyle`, worktree `ac-24`.
-      Reference screenshots: `handoff/nvidia-reference/`. Settled: two nav levels,
-      flat surfaces instead of rounded cards, rows aligned into a value column.
-      Still open: whether the accent moves from red toward the reference's green.
+      Reference screenshots: `handoff/nvidia-reference/`.
+      Still open: whether the accent moves from red toward the reference's green —
+      that decision belongs to feature 5, not earlier.
 
-      Feature 2 cost four review rounds plus a CI round, and only one of those was
-      about the tab bar. Rounds 2-4 chased a `NumBoxFocus` flake that turned out to
-      be shared-display X focus contention in the test harness; the CI round was an
-      unmapped-widget geometry assertion that only Windows can catch. Both traps are
-      written up under Housekeeping — read them before feature 3, which touches
-      geometry and rebuilds far more than feature 2 did.
+      Feature 3 shipped the same crash twice before CI caught it, both times because
+      Xvfb has no window manager and so never generates the post-map root
+      `<Configure>` a real WM does. A green local suite was never evidence for that
+      path. See `docs/history/ac-24-f3-implementation.md` round 3 before adding any
+      resize- or rebuild-driven behaviour, and read the Housekeeping traps below
+      before feature 4 — it is another geometry feature.
 
 Story G#17 / GH#20 (themes that follow the system, and a Settings tab) closed
 2026-09-11: features 1, 2, 3a, 3b and 4 merged (PRs #28–#31, #34), story-level
