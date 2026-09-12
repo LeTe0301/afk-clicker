@@ -87,7 +87,7 @@ Features:
 
 Housekeeping:
 - [ ] Branches `feature/ac-12/…` and `feature/ac-13/…` are stacked on `901f0a4`, whose FIFO tests fail on Windows. They stay red on CI until rebased onto `main`.
-- [ ] Release: `main` carries #19, #21, #24, #27, #28–#31 since v0.3.1. `release.yml` needs `__version__` to match the `release/x.y.z` branch, so bump it there (0.4.0 suggested, since Settings is new UI).
+- [ ] Release: `main` carries #19, #21, #24, #27, #28–#31, #37, #39, #40, #41 since v0.3.1. `release.yml` needs `__version__` to match the `release/x.y.z` branch, so bump it there (0.4.0 suggested, since Settings is new UI).
 - [ ] The GitHub token in `~/.config/afk-clicker/gh-token` can't re-run Actions jobs (no `actions:write`). A flaky run needs a new push to go again.
 - [ ] **Stress-testing the suite needs two Xvfb displays, not one.** There is no
       window manager, so X input focus is a single global resource:
@@ -100,6 +100,27 @@ Housekeeping:
       flaky focus test, run the load loop on `:98` and the test under scrutiny on
       `:99` — a shared display manufactures its own failures. Worth a comment
       beside `focus_force()` so the next person doesn't rediscover it.
+- [ ] **Unmapped-widget geometry passes on Linux and fails only on Windows.** On
+      X11 a widget whose pane was packed then `pack_forget()`'d keeps returning its
+      last real `winfo_rootx()`/`winfo_width()`; on Windows Tk returns 0 and 1 for
+      the same unmapped widget. A test measuring a widget in a hidden pane therefore
+      passes here on stale-but-plausible numbers and fails only on the Windows leg —
+      `AssertionError: 1 not less than or equal to 0` is the signature. Distinguish
+      `winfo_x()` (parent-relative, assigned at pack time, valid while unmapped)
+      from `winfo_rootx()` (absolute screen position, not valid). Cost story #24
+      feature 2 a CI round. Make the pane genuinely visible before measuring.
+- [ ] **Xvfb has no window manager, so WM-driven events never fire locally.** Most
+      importantly it never generates the root-targeted `<Configure>` a real WM
+      (macOS WindowServer, Windows) sends after mapping. Story #24 feature 3 shipped
+      the same crash twice behind this: binding `<Configure>` before `__init__`'s
+      first `_build_ui()` returned let a genuine WM resize reenter the rebuild
+      mid-construction and die on `AttributeError: ... has no attribute 'click_ms'`
+      — green on every Linux run, red on macOS CI. Note the first fix
+      (`event.widget is self.root`) addressed a *different* hazard (spurious
+      `<Configure>` from descendants, via bindtags), and reading a green suite as
+      proof it fixed both is what cost the second round. For anything resize-,
+      mapping- or focus-driven, ask what a real WM would do that Xvfb will not, and
+      treat CI as the only evidence.
 - [x] **Pipeline-doc references — resolved 2026-09-11** (G#25 / GH#38, PR #39).
       The real count was 44, not 39 — the original grep omitted `implementation`.
       40 now resolve into `docs/history/`; 4 cite sections in documents overwritten
@@ -111,65 +132,92 @@ Housekeeping:
       the last stage to touch a worktree before the next cycle overwrites those files.
       Arguably belongs in the global pipeline description in `~/.claude/CLAUDE.md`
       too — left alone, as that's the owner's file.
-## Session handoff — 2026-09-11
+## Session handoff — 2026-09-12
 
 **Where things stand:**
-- `main` is at `0d6e784`, CI green on all three platforms, 240 tests.
-- The local checkout is on `main`, clean apart from this file (deliberately left
-  uncommitted — the owner said "we commit later on").
-- **Story G#17 / GH#20 is closed.** Nothing is in flight.
+- `main` is at `bc13350`, CI green on all three platforms, **269 tests**.
+- The local checkout is on `main` and clean. The `ac-24` worktree is on
+  `feature/ac-24/responsive-layout-icon-restyle` at merged `main`, clean, with
+  its `docs/*.md` ready to be overwritten by feature 4.
+- **Story G#24 / GH#36 is 3 of 5 features done. Nothing is in flight.**
 
 Merged this session, each after a critical PR review posted on the PR:
 
-| PR | What |
-|---|---|
-| #19, #21, #24, #26, #27 | Updater checksums, focus release, Minecraft 650 ms, CI triggers, flaky macOS test |
-| #28–#31 | Theme story features 1–3b |
-| #34 | Feature 4, UI scale — `5619c5d` (feature) + `d7a2f46` (cross-platform geometry test fix) |
+| PR | What | Merge |
+|---|---|---|
+| #40 | Feature 2 — horizontal tab bar (`Hotkey \| Clicking`, `Appearance \| Updates`) | `5ab0196` |
+| #41 | Feature 3 — icon rail, window floor rederived | `18c6f7c` |
 
-**Next:** the responsive-layout + icon restyle story above. It is agreed but
-unspecced, and **its design half is blocked on the NVIDIA App reference
-screenshot**, which was mentioned as sent but never arrived — ask for it again.
+(Feature 1, the row value column, merged as PR #37 / `db20af2` at the end of the
+previous session.)
 
-**Working docs:** every story and cycle doc, the PR reviews, and
-`story-17-e2e.md` are in `/home/dev/projects/.worktrees/afk-clicker/handoff/`,
-along with the theme mock `theme-board.html`. The `ac-17` worktree's `docs/*.md`
-are feature 4's and are untracked scratch — a new story needs a fresh spec.
+**Next:** feature 4 — content fills the available vertical height, no dead band
+below the last card. It depends on feature 2, which is in. Feature 5 (the flat
+minimal restyle, and the red-vs-green accent decision) is last and depends on
+all of 1–4. The feature breakdown is `docs/history/ac-24-story.md`; the accent
+question must not be decided before feature 5.
+
+**Read before starting feature 4** — it is another geometry feature, and both
+traps below are geometry traps:
+- `docs/history/ac-24-f3-implementation.md` round 3 (the WM/`<Configure>` crash).
+- The two CI-only entries under Housekeeping above.
+
+**Working docs:** each cycle's spec/design/implementation/test-review is archived
+into `docs/history/ac-24-f{1,2,3}-*.md` as the last step of that cycle. The
+`ac-24` worktree's own `docs/*.md` are scratch for the *current* cycle only.
 
 **Workflow:**
 1. The pipeline runs product-manager → ux-designer → developer → reviewer.
 2. An approved cycle is pushed and PR'd without asking.
-3. The review agent gives each PR a critical review, using the token to read CI —
-   including the Windows and macOS logs, not just pass/fail.
-4. The review is posted on the PR.
-5. The PR merges only on the owner's say-so, with green CI on all three platforms.
+3. The review agent gives each PR a critical review in the ten-round format of
+   `docs/REVIEW-PROTOCOL.md`, re-deriving claims rather than trusting the cycle's
+   own docs, and posts it on the PR.
+4. Merge on a `MERGE` verdict **and** green CI on all three platforms. A red leg
+   routes back to the developer as a new round — never merge through it.
+5. If a fix lands after a verdict, ask the same reviewer to verify the delta and
+   re-issue, rather than paying for a fresh ten-round pass.
 
 **Running tests here:** the README's `xvfb-run` needs `xauth`, which this
 container lacks. Start `Xvfb :99` directly and use a venv with `pynput`:
-`DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .` — 240 tests
-on `main`. The venv lives in the session scratchpad and does not survive a
-container reset; rebuild it with `python3 -m venv` + `pip install pynput`.
+`DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .` — 269 tests on
+`main`. The venv lives in the session scratchpad and does not survive a container
+reset; rebuild with `python3 -m venv` + `pip install pynput`. Keep a second
+display (`:98`) for load loops — see Housekeeping.
 
 **Lessons that cost a round each:**
 - Tk prints callback exceptions instead of raising them. `UITestCase` records them.
-- Local runs are Linux-only. CI's Windows and macOS legs have now caught five
-  things the cycle reviews missed. **Three of them were the same mistake**: a test
-  asserting an exact pixel quantity that this box happens to satisfy and another
-  platform does not.
+- Local runs are Linux-only. CI's Windows and macOS legs have now caught **eight**
+  things the cycle reviews missed. The recurring shape: *a green local run is not
+  evidence for behaviour this box cannot produce.*
   1. A window geometry assumed granted — the WM clamps to the screen (~1024x768
      on the runners), so a requested size is not the size you get.
   2. The same test's premise unsatisfiable on a short screen, needing an honest
      skip rather than a looser assertion.
   3. A Label's `winfo_reqwidth()` compared against its own `wraplength` — different
-     quantities (reqwidth includes padx and border), so the result is decided by
-     the font. 144 vs 145 passed on DejaVu Sans; 141 vs 140 failed on Segoe UI.
+     quantities, so the font decides. 144 vs 145 passed on DejaVu Sans; 141 vs 140
+     failed on Segoe UI.
+  4. A geometry assertion on a widget inside a hidden pane — stale-but-plausible on
+     X11, 0 and 1 on Windows.
+  5. A fixed pixel headroom on a window height — real WM/DPI rounding overshot it
+     by 24px on macOS and 148px on Windows. No constant fixes that; assert only the
+     axis the property under test actually depends on.
+  6. A `<Configure>` handler bound before construction finished — only a real WM
+     generates the event that triggers it.
   Before asserting a pixel value, ask what else could legitimately produce a
-  different number on another machine — the font, the screen, the DPI, the WM.
-  Prefer an assertion that is true by construction: compare two things measured
-  the same way (a wrapped label is *taller* than an unwrapped one) rather than one
-  measurement against a constant.
+  different number elsewhere — the font, the screen, the DPI, the WM. Prefer an
+  assertion true by construction: compare two things measured the same way rather
+  than one measurement against a constant.
 - Design docs' contrast numbers were wrong three times. Recompute with the WCAG
-  formula.
+  formula. The compound scale is `_dpi_s * UI_SCALE_FACTORS[...]` — the two
+  **multiply**, so the worst case is low-DPI *and* the 90% step together
+  (`s = 0.675`), not either alone. A design that reasons about them separately is
+  wrong; this is the same error as open ticket G#23.
 - A comment asserting a hazard is worth empirically testing before trusting it.
-  The trace-ordering `TclError` this codebase documents in two places turned out
-  to be unobservable, because the rebuild always defers via `after_idle`.
+  Two of this story's comments claimed safety properties that were simply false:
+  the trace-ordering `TclError` (unobservable — the rebuild always defers via
+  `after_idle`), and `<Configure>`'s bind site claiming "placed after every
+  attribute `_request_rebuild()` reads already exists" when `_persist()` reads
+  `click_ms`, created later in `_build_ui()`.
+- Verify a stress-test harness before trusting its numbers. A load loop killed by
+  PID rather than process group leaves an orphan hammering the display, which
+  produced a fake 25% failure rate that was briefly reported as a real regression.
