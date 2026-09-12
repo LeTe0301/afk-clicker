@@ -1,10 +1,17 @@
-# Review protocol — ten rounds
+# Review protocol — one in-depth pass
 
-The review agent runs every pull request through these ten rounds, in order,
-before anything is merged. Each round is a different lens; a change that
-survives one can still fail the next, which is the point of separating them.
+The review agent runs every pull request through **one** review, in depth,
+before anything is merged. The ten sections below are the lenses that review
+covers, in order — not ten separate reviews. Each is a different way of looking
+at the same diff; a change that survives one can still fail the next, which is
+why they are listed separately rather than blurred into "review the code".
 
-**Every round produces exactly one verdict:**
+Depth is the point. One lens examined properly, with something actually run,
+beats ten passes that each re-read the diff. The ten-round loop this document
+used to describe existed to refine the reviewer agent itself, not as a
+per-pull-request procedure.
+
+**Every lens produces exactly one verdict:**
 
 | Verdict | Meaning |
 |---|---|
@@ -13,9 +20,10 @@ survives one can still fail the next, which is the point of separating them.
 | `BLOCKER` | Must be fixed before merge. |
 
 A verdict without evidence is not a verdict. Quote the file and line, or say
-what you ran. **"Looks fine" is not a review** — if a round genuinely has
+what you ran. **"Looks fine" is not a review** — if a lens genuinely has
 nothing to examine (no threading in the diff, say), state that explicitly:
-`PASS — no threaded code touched`.
+`PASS — no threaded code touched`. Saying so is a real answer; skipping it
+silently is not.
 
 The three reference documents are the standard. Where this protocol and a
 reference document disagree, the reference document wins:
@@ -26,7 +34,7 @@ reference document disagree, the reference document wins:
 
 ---
 
-## Round 1 — Ticket fidelity
+## 1. Ticket fidelity
 
 Does the change do what the ticket says, and only that?
 
@@ -36,7 +44,7 @@ makes both harder to review and impossible to revert cleanly. Check the branch
 name matches `feature/{ab}-{ticket}/{description}` or
 `hotfix/{ab}-{ticket}/{description}`, and that the ticket number is real.
 
-## Round 2 — Correctness
+## 2. Correctness
 
 Walk the changed logic and find the input that breaks it.
 
@@ -46,7 +54,7 @@ inputs and the wrong result — not a category of concern. If you cannot name a
 failing case, the finding is speculation, and speculation is a `CONCERN` at
 most.
 
-## Round 3 — Threading and Tk safety
+## 3. Threading and Tk safety
 
 `CODING-GUIDELINES.md`: **only the main thread may touch Tk.** Not a widget,
 not a `StringVar`, not `root.after()`.
@@ -60,7 +68,7 @@ Check every new or moved line that runs off the main thread:
 This round has caught a silent worker-thread death before. Treat a violation as
 a `BLOCKER` even when the code appears to work.
 
-## Round 4 — Naming and shadowing
+## 4. Naming and shadowing
 
 Does any new name shadow an import, a builtin, or an existing class?
 
@@ -68,7 +76,7 @@ The Tk widget class `Button` once shadowed `pynput.mouse.Button` and turned
 every `Button.right` in the click loop into a latent `AttributeError` that only
 the eating path reached. Check the module namespace, not just the diff.
 
-## Round 5 — Untrusted input
+## 5. Untrusted input
 
 Anything from disk, the network, or a text field is untrusted.
 
@@ -79,7 +87,7 @@ Anything from disk, the network, or a text field is untrusted.
 - Does a numeric field get clamped at the point of use, not at entry?
 - Does downloaded content get executed without a check?
 
-## Round 6 — Tech stack conformance
+## 6. Tech stack conformance
 
 `TECHSTACK.md` is not a list of preferences.
 
@@ -89,7 +97,7 @@ Anything from disk, the network, or a text field is untrusted.
   `--hidden-import`, `--selftest` still exercised.
 - Anything resolved at import time needs a matching hidden import.
 
-## Round 7 — Cross-platform behaviour
+## 7. Cross-platform behaviour
 
 The project ships Windows, Linux and macOS from one source file.
 
@@ -100,7 +108,7 @@ finding. macOS is the least verified target — changes touching it deserve
 scepticism, and say so plainly rather than implying coverage that does not
 exist.
 
-## Round 8 — Tests
+## 8. Tests
 
 Every fix lands with a test that fails without it.
 
@@ -111,7 +119,7 @@ Every fix lands with a test that fails without it.
 - Do network tests skip cleanly offline rather than failing?
 - Is a slow test in the right place — the release suite, not the PR suite?
 
-## Round 9 — Comments and documentation
+## 9. Comments and documentation
 
 `CODING-GUIDELINES.md`: comment the **why**, never the what.
 
@@ -121,7 +129,7 @@ Every fix lands with a test that fails without it.
 - If a constraint was discovered here, is it written down where the next person
   will look — or only in this PR's description, where it will be lost?
 
-## Round 10 — Roadmap and release readiness
+## 10. Roadmap and release readiness
 
 - Does this move something on `ROADMAP.md`? Update it if so.
 - Does it do something the roadmap explicitly rules out? That is a `BLOCKER`
@@ -135,7 +143,7 @@ Every fix lands with a test that fails without it.
 
 ## Reporting
 
-Post one comment on the pull request containing all ten rounds, in order, each
+Post one comment on the pull request containing all ten lenses, in order, each
 with its verdict and evidence. Then a closing block:
 
 ```
@@ -144,8 +152,10 @@ BLOCKERS: <count>
 CONCERNS: <count>
 ```
 
-`ANOTHER ROUND` whenever there is at least one `BLOCKER`. With only concerns,
-recommend `MERGE` and list them — the product manager decides whether they wait.
+`ANOTHER ROUND` whenever there is at least one `BLOCKER`. It means **this pull
+request needs more work, and then a fresh review of the new diff** — never
+re-reviewing the same diff a second time. With only concerns, recommend `MERGE`
+and list them — the product manager decides whether they wait.
 
 Then notify the product manager with the verdict and the single most important
 finding. The decision to merge is theirs, not the review agent's.
