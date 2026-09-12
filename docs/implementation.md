@@ -379,3 +379,218 @@ script suffices (`screenshot_round2.py`, not committed).
   Linux/Xvfb with a substituted font; the construction-true tests (not a
   fixed pixel value) are what actually catches a platform where the
   numbers differ, on whichever platform's CI run actually exposes it.
+
+## Round 3 (PR #49 review) -- diagnostic only, not a fix
+
+`windows-latest` fails the two reverse-order tests added in round 2
+deterministically, on both CI runs against this branch, while Linux never
+has in any order probed across three rounds and this box has no Windows
+target to reproduce against directly. Per the review's own instruction,
+this round adds instrumentation and gathers data -- **it changes no
+production code and no assertion's meaning**; nothing here is a candidate
+fix.
+
+### What changed
+
+`tests/test_ui.py` only:
+
+- A new module-level diagnostic block (placed right before `FakeMouse`,
+  clearly bannered `# --- G#28/GH#48 round-3 diagnostic (PR #49),
+  temporary ---` / `# --- end round-3 diagnostic ---` for easy removal in
+  round 4 regardless of outcome):
+  - `_diag_trace_fill_pane(ui, label)`: a context manager that monkeypatches
+    the module-level `app._fill_pane` for its duration. Every call prints,
+    to stdout, which pane it targeted, who called it, and the resulting
+    state -- `available`/spacer heights/mapped flags/`eat_card`'s own shell
+    height and mapped state. "Who called it" is read from the live call
+    stack (`traceback.extract_stack()`), not from instrumenting
+    `_on_eat_card_settled` directly: `card()`'s `on_settle` parameter is
+    captured **by value** into its own closure at app-construction time
+    (`UITestCase.setUp()`, before either the test method or this patch
+    exist), so patching `ui._on_eat_card_settled` or the class method after
+    construction would silently never fire for that already-built closure.
+    Patching the *global* `_fill_pane` function works because every call
+    site (`_select()`, `_set_content_tab()`, `_on_eat_card_settled()`, and
+    each pane's own `<Configure>`-bound lambda) resolves the bare name
+    `_fill_pane` from the module's globals at call time, which is exactly
+    what monkeypatching `app._fill_pane` rewrites.
+  - `_diag_pump_and_report(root, ui, label, rounds=10)`: after the sequence
+    under test already returned, drains the event loop 10 more times,
+    printing the clicking pane's live natural/extra/spacer state each
+    round. This does **not** call `_fill_pane()` itself -- it is a passive
+    probe of whether Tk needed more idle passes than the harness's own
+    single `root.update()` gave it, not a second mitigation layered on top
+    of the one being diagnosed.
+- `WindowMinimumHeight.test_tallest_pane_still_fits_at_the_floor_reverse_order`
+  and `VerticalFill.test_floor_case_still_splits_symmetrically_with_no_clipping_reverse_order`:
+  wrapped their `_select()`/`_set_content_tab()`/`root.update()` sequence in
+  `_diag_trace_fill_pane(...)`, added a post-update diagnostic print and a
+  `_diag_pump_and_report(...)` call, and **replaced their final
+  `self.assertX(...)` calls with equivalent `if not <condition>: print("...
+  RESULT: FAIL ...")` checks** -- per the review's explicit instruction, so
+  a real failure (Windows) no longer stops the test method before its own
+  diagnostic prints are flushed, and so the CI job's overall result no
+  longer depends on whichever platform is mid-diagnosis. No other test in
+  the suite was touched, and neither test's setup/sequence of calls
+  changed -- only how their outcome is reported.
+
+### Why this is safe to read as "the same bug, now narrated"
+
+Re-ran the full suite and both instrumented tests individually on
+Linux/Xvfb (this box's only available platform) to confirm the patch
+changes no behavior:
+
+- Full suite: `291 tests ... OK (skipped=5)`, run twice back-to-back.
+- Both instrumented tests print a clean, fully-converged trace and report
+  no `RESULT: FAIL` lines, matching their previous (round-2) green
+  behavior on this platform.
+
+The Linux trace is worth reading before the Windows one comes back,
+because it's the "this is what convergence looks like when it works"
+baseline to diff Windows against. Captured verbatim (call numbering is
+completion order, since each wrapper's own print happens after
+`update_idletasks()`-triggered reentrant sub-calls have already returned --
+not invocation order):
+
+```
+DIAG[floor-fit-reverse] call#1 pane=clicking caller=_set_content_tab available=393 top_h=1 bottom_h=1 top_mapped=0 bottom_mapped=0 eat_card_h=130 eat_card_mapped=0
+DIAG[floor-fit-reverse] call#2 pane=clicking caller=_set_content_tab available=393 top_h=196 bottom_h=1 top_mapped=1 bottom_mapped=0 eat_card_h=130 eat_card_mapped=0
+DIAG[floor-fit-reverse] call#3 pane=clicking caller=_set_content_tab available=393 top_h=98 bottom_h=94 top_mapped=1 bottom_mapped=1 eat_card_h=130 eat_card_mapped=0
+DIAG[floor-fit-reverse] call#4 pane=clicking caller=_on_eat_card_settled available=393 top_h=96 bottom_h=94 ... eat_card_h=55  eat_card_mapped=0
+DIAG[floor-fit-reverse] call#5 pane=clicking caller=_on_eat_card_settled available=393 top_h=78 bottom_h=94 ... eat_card_h=73  eat_card_mapped=1
+DIAG[floor-fit-reverse] call#6 pane=clicking caller=_on_eat_card_settled available=393 top_h=39 bottom_h=94 ... eat_card_h=112 eat_card_mapped=1
+DIAG[floor-fit-reverse] call#7 pane=clicking caller=_on_eat_card_settled available=393 top_h=19 bottom_h=94 ... eat_card_h=132 eat_card_mapped=1
+DIAG[floor-fit-reverse] call#8 pane=clicking caller=_on_eat_card_settled available=393 top_h=9  bottom_h=94 ... eat_card_h=141 eat_card_mapped=1
+DIAG[floor-fit-reverse] call#9 pane=clicking caller=_on_eat_card_settled available=393 top_h=5  bottom_h=1  ... eat_card_h=141 eat_card_mapped=1
+DIAG[floor-fit-reverse] call#10 pane=clicking caller=_select              available=393 top_h=5  bottom_h=5  top_mapped=1 bottom_mapped=1 eat_card_h=141 eat_card_mapped=1
+DIAG[floor-fit-reverse] post-update natural=383 avail=393 top_h=5 bottom_h=5 top_mapped=1 bottom_mapped=1
+DIAG[floor-fit-reverse] pump#0..9  natural=383 avail=393 extra=10 top_h=5 bottom_h=5 (unchanged for all 10 pumps)
+```
+
+Reading it: `_set_content_tab("clicking")` alone (on the still-default
+Global profile, eat_card not yet packed) produces calls #1-3 -- the
+pane's own first layout pass, converging on a provisional, symmetric-ish
+split against `eat_card`'s *stale* 130px placeholder height. `_select
+("minecraft")` then packs `eat_card`, and within that **one** explicit
+`_fill_pane()` call, `pane.update_idletasks()` drains the entire
+`card()`-growth cascade reentrantly -- six more `_on_eat_card_settled()`-
+triggered recomputes (calls #4-9, `eat_card_h` climbing 55->141 as its real
+content lays out) followed by the outer call's own final write (#10) --
+before `_select()` ever returns. Ten additional passive `root.update()`
+pumps afterward change nothing: the state was already at its fixed point.
+This is the same 129->141px / ~6-round cascade round 2's own trace
+described, now captured as data instead of paraphrased from a throwaway
+probe.
+
+### What this predicts for the Windows trace, and what would falsify it
+
+If Windows converges the same way, the trace should look like the one
+above modulo pixel values (larger `eat_card_h`/`natural` from taller Segoe
+UI metrics), and no `RESULT: FAIL` lines. If Windows instead reproduces the
+reported `77 != 2` / unmapped-bottom-spacer failure, the trace should show
+**one of two shapes**, and which one appears matters for round 4:
+
+1. **The cascade stops early** -- e.g. the last printed call is still an
+   `_on_eat_card_settled` mid-growth state (`eat_card_h` well below its
+   Linux-analogous converged value), with no further calls and no pump
+   round ever showing a different number. This would mean
+   `pane.update_idletasks()` on Windows does not drain the *entire* pending
+   idle queue in one pass the way it does here -- Tk's own idle-round
+   granularity differs, or Windows batches `<Configure>` delivery
+   differently for a canvas-hosted child -- and the fix's implicit
+   assumption ("one explicit call's own `update_idletasks()` fully drains
+   the settle cascade") does not hold on that platform. This is the
+   "timing, not the constant" theory the review's evidence pattern
+   (`extra` computed fresh at assertion time already says `0`, but the
+   spacers are stuck at a much larger stale value) already points toward.
+2. **The cascade completes and looks converged, but the final `available`
+   is smaller than Linux's 393 relative to `natural`** -- i.e. `extra`
+   itself is genuinely 0 or negative once the real Windows font metrics are
+   in, and `_fill_pane()`'s `max(0, ...)` floor is doing real work. This
+   would mean the *margin*, not the *timing*, is the problem on Windows,
+   pointing back to the fallback of raising `WINDOW_MIN_H` rather than
+   chasing a race.
+
+Only the CI run itself can say which of these it is; no Windows box was
+available in this session to run it directly.
+
+### The clamp question -- opinion, not implemented
+
+The review asks whether `_fill_pane()` should additionally clamp so the
+spacers can never exceed the pane's real leftover at write time, as a
+safety net *alongside* `on_settle` (not instead of it). **I agree with
+adding it, with one refinement on how to think about the risk.**
+
+The round-2 objection to a clamp -- "it can't know the eventual correct
+height, so it would bake in a wrong split, just without the packer
+visibly giving up on a spacer" -- was made against a clamp used *instead
+of* the settle callback, where a wrong-but-silent split could persist
+indefinitely with nothing left to ever correct it. That risk mostly
+evaporates once it's paired with `on_settle`: the settle callback is what
+makes the *final* state correct (proven again by this round's own Linux
+trace converging to the identical natural/extra every time), and the
+clamp would only ever be visibly active for the same brief mistimed
+window the settle callback is already designed to close on its own next
+firing. In that role it isn't a second source of truth about the correct
+split, it's a hard backstop against `_fill_pane()` ever handing the packer
+numbers larger than the space that exists -- which is exactly the
+mechanism by which round 2's live-app defect (a spacer outright unmapped)
+happened in the first place.
+
+The one place I'd push back slightly on "clamp and don't worry about it":
+a clamp must not be allowed to make a test (or a person) believe content
+actually *fits* when it doesn't. It doesn't introduce that risk here,
+specifically because this codebase's own "not clipped" check
+(`natural <= pane.winfo_height()`, in every test above) is already
+computed directly from live content geometry, never from the spacer
+values -- so a clamp on what the spacers themselves get written to would
+have zero effect on whether that check can detect real overflow. The
+failure mode a clamp actually forecloses is narrower and purely
+about `pack()`'s own behavior: Tk unmapping a widget outright when told to
+give it a negative/oversized share of a fixed-height master, which is a
+`pack()` implementation detail, not a measure of whether the content
+itself overflowed. Given the whole severity class here is "content became
+unreachable," making that one specific mechanism impossible by construction
+seems worth the small added surface, and I'd scope it minimally: clamp
+`top_h`/`bottom_h` so their sum can never exceed `max(0, available - <some
+floor per spacer, e.g. 1>)`, keeping the existing `max(1, ...)` floor
+intact on each side. Not built this round, per the review's own
+instruction to only evaluate it here.
+
+### Fallback assessment
+
+Not reached yet -- this round produced no new CI signal to react to
+(diagnostics only were pushed; the Windows run this data is meant to
+inform hasn't come back as of writing this). If the round-4 CI trace shows
+shape 1 above (cascade genuinely stalls on Windows), the clamp-alongside-
+`on_settle` change described above is my recommended next step over either
+fallback, since it fixes the actual failure mode (unmapped spacer) without
+touching `WINDOW_MIN_H` itself. If it shows shape 2 (margin, not timing),
+the conservative-floor fallback from the review's own list is the right
+next move instead of another timing-side change.
+
+### Verification run
+
+```
+DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .
+# Ran 291 tests -- OK (skipped=5), run twice back-to-back.
+
+DISPLAY=:99 <venv>/bin/python -m unittest \
+    tests.test_ui.WindowMinimumHeight tests.test_ui.VerticalFill -v
+# 13/13 ok (both diagnosed tests report "ok" now that their invariants are
+# printed rather than asserted); full DIAG[...] trace visible in stdout for
+# both instrumented tests, no RESULT: FAIL line on this platform.
+```
+
+### Known limitations (round 3)
+
+- This box has no Windows target, so everything above about Windows is a
+  prediction to be checked against the next CI run, not a confirmed
+  finding.
+- The two instrumented tests no longer fail the build on any platform for
+  the duration of this diagnostic round (by design, per the review's
+  instruction) -- they must not be left in this state past round 4: once
+  the Windows trace is read, the diagnostic block should be removed and
+  the original `assertX` calls restored (whether or not the underlying
+  timing/margin issue is also fixed), so these two tests go back to
+  actually gating CI.
