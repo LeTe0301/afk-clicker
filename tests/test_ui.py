@@ -81,10 +81,19 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
         self.root.focus_force()
 
     def tearDown(self):
+        # G#27/GH#46: pairs with context.py's gc.disable() -- see the
+        # comment there for the full mechanism and measurements. With
+        # automatic collection off for the whole suite, this explicit
+        # collect() is the only place a Variable orphaned by this test's
+        # on_close() gets finalised, and it always runs on the
+        # main/test-running thread, which is exactly what avoids the
+        # off-thread Variable.__del__ ("RuntimeError: main thread is not
+        # in main loop", or, rarely, a fatal Tcl_AsyncDelete abort).
         try:
             self.ui.on_close()
         except tk.TclError:
             pass
+        gc.collect()
         self._assert_no_callback_exceptions()
 
     def settle(self, timeout=15.0):
@@ -2413,10 +2422,15 @@ class AppearanceThemeSwitch(CapturesCallbackExceptions, unittest.TestCase):
         self.root.update()
 
     def tearDown(self):
+        # See UITestCase.tearDown()'s comment (G#27/GH#46): this class
+        # builds and closes its own UI the same way, so it needs the same
+        # main-thread collection to avoid leaving Variable finalisation for
+        # a later test's worker thread.
         try:
             self.ui.on_close()
         except tk.TclError:
             pass
+        gc.collect()
         self._assert_no_callback_exceptions()
         # Unconditional: no later test in the suite may inherit Quartz.
         app.set_active_theme("dark")
