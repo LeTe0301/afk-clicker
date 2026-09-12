@@ -170,6 +170,11 @@ ROW_LABEL_W = 140    # widest existing Row label ("Mouse button"/"Random
 ROW_LABEL_GAP = 12    # breathing room between the label column and the
     # value column that starts right after it.
 
+TAB_HEIGHT = 32       # TabBar's own canvas height (story #24 feature 2)
+TAB_GAP = 28          # horizontal gap between adjacent tab labels
+TAB_PAD_BOTTOM = 6    # space between text baseline and the underline
+TAB_UNDERLINE_H = 2   # active-tab underline thickness
+
 
 def selftest():
     """
@@ -1255,6 +1260,66 @@ class Segmented(tk.Canvas):
         return _round_rect_points(x1, y1, x2, y2, r)
 
 
+class TabBar(tk.Canvas):
+    """Left-aligned, natural-width tabs with an active-tab underline -- the
+    NVIDIA-reference pattern (handoff/nvidia-reference/*.png), distinct from
+    Segmented's equal-width filled-pill selector (see docs/spec.md's 'Why
+    Segmented cannot serve as the tab bar' section, story #24 feature 2)."""
+
+    def __init__(self, parent, options, variable, s, height=TAB_HEIGHT):
+        self.s = s
+        self.options = options                # [(value, label), ...]
+        self.var = variable
+        # Bold width is the layout width for every tab, active or not, so
+        # the active tab going bold never shifts anything else -- all
+        # geometry is computed once here, and only fill colors and the
+        # underline's position change afterward, in _paint().
+        font = ("Segoe UI", int(9.5 * s), "bold")
+        measurer = tkfont.Font(family="Segoe UI", size=int(9.5 * s), weight="bold")
+        gap = int(TAB_GAP * s)
+        x = 0
+        self._tabs = []                       # [(value, label, x1, x2, text_id), ...]
+        for value, label in options:
+            w = measurer.measure(label)
+            self._tabs.append([value, label, x, x + w, None])
+            x += w + gap
+        total_w = max(x - gap, 0)
+        h = int(height * s)
+        super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0,
+                         width=total_w, height=h, cursor="hand2")
+        # Full-width separator first (bottom of the pane's z-order), so the
+        # active-tab underline -- created last, below -- paints on top of it
+        # where their y-ranges overlap; elsewhere the faint LINE divider
+        # shows through under every inactive tab.
+        self.create_line(0, h - 1, total_w, h - 1, fill=LINE, width=1)
+        for tab in self._tabs:
+            value, label, x1, x2, _tid = tab
+            tab[4] = self.create_text((x1 + x2) / 2, (h - TAB_PAD_BOTTOM * s) / 2,
+                                      text=label, font=font)
+        underline_h = int(TAB_UNDERLINE_H * s)
+        self.underline = self.create_rectangle(0, h - underline_h, 0, h,
+                                               fill=ACCENT, outline="")
+        self.bind("<Button-1>", self._click)
+        self.var.trace_add("write", lambda *_a: self._paint())
+        self._paint()
+
+    def _click(self, event):
+        for value, _label, x1, x2, _tid in self._tabs:
+            if x1 <= event.x < x2 + int(TAB_GAP * self.s):
+                self.var.set(value)
+                return
+
+    def _paint(self):
+        current = self.var.get()
+        h = int(TAB_HEIGHT * self.s)
+        for value, _label, x1, x2, text_id in self._tabs:
+            self.itemconfig(text_id, fill=INK if value == current else MUTED)
+        active = next((t for t in self._tabs if t[0] == current), self._tabs[0])
+        _value, _label, x1, x2, _tid = active
+        underline_h = int(TAB_UNDERLINE_H * self.s)
+        self.coords(self.underline, x1, h - underline_h, x2, h)
+
+
 class StatusPill(tk.Canvas):
     """The one thing you read from across the room, so it gets real estate."""
 
@@ -1523,6 +1588,15 @@ class AfkAutoclicker:
                                                 # a rebuild (see _rebuild_ui())
         self._loading = False          # suppress saves while filling the form
         self._settings_open = False    # which content-pane body is showing
+        self._content_tab = "hotkey"       # which game-page tab is showing:
+                                            # "hotkey" / "clicking" -- a plain
+                                            # attribute, same precedent as
+                                            # self._settings_open above:
+                                            # never persisted to settings.json,
+                                            # survives _rebuild_ui() untouched.
+        self._settings_tab = "appearance"  # which Settings tab is showing:
+                                            # "appearance" / "updates" -- same
+                                            # precedent as self._content_tab.
         self._rebuild_after_id = None  # the one after_idle(self._rebuild_ui)
                                         # job currently pending, if any -- see
                                         # _apply_appearance()/_rebuild_ui()
@@ -1822,8 +1896,28 @@ class AfkAutoclicker:
                                   font=("Segoe UI", int(8.5 * s)))
         self.game_note.pack(fill="x", pady=(int(2 * s), int(12 * s)))
 
-        section(body, "Hotkey  ·  shared by every game", s, top=0)
-        hk = card(body, s)
+        # ── tab bar (story #24 feature 2): Hotkey | Clicking ──
+        self.content_tab_var = tk.StringVar(value=self._content_tab)
+        TabBar(body, [("hotkey", "Hotkey"), ("clicking", "Clicking")],
+              self.content_tab_var, s).pack(anchor="w", pady=(0, int(12 * s)))
+        self.content_tab_var.trace_add("write",
+            lambda *_a: self._set_content_tab(self.content_tab_var.get()))
+
+        # Both panes are built in full, always, whichever tab is active --
+        # _select()/_persist()/_sync_settings() all read/write Clicking/
+        # Eating widgets unconditionally (docs/spec.md's "Cross-references
+        # into hidden widgets" section), so lazily building only the active
+        # pane would break them the moment a different tab was showing.
+        # Build order matters: both panes are built and packed here, in
+        # this stacked order, and only hidden by _set_content_tab() at the
+        # very end -- card()'s own _redraw() reads real geometry off a
+        # still-mapped shell, and pack_forget() afterward does not erase an
+        # already-computed width (verified empirically, see docs/spec.md's
+        # "Test impact" section).
+        self.hotkey_pane = tk.Frame(body, bg=BG)
+        self.hotkey_pane.pack(fill="both", expand=True)
+        section(self.hotkey_pane, "Hotkey  ·  shared by every game", s, top=0)
+        hk = card(self.hotkey_pane, s)
         row = Row(hk, "Toggle", s)
         row.pack(fill="x")
         self.hotkey_label = tk.Label(row.control, text="Not set", bg=CARD, fg=MUTED,
@@ -1837,8 +1931,11 @@ class AfkAutoclicker:
         self.apply_button.pack(side="right")
         self.apply_button.set_enabled(False)
 
-        section(body, "Clicking", s)
-        cl = card(body, s)
+        self.clicking_pane = tk.Frame(body, bg=BG)
+        self.clicking_pane.pack(fill="both", expand=True)
+        # No "Clicking" section header here -- the tab label above already
+        # names the pane (docs/design.md's redundant-header decision).
+        cl = card(self.clicking_pane, s)
         r = Row(cl, "Interval", s); r.pack(fill="x")
         self.click_ms = NumBox(r.control, DEFAULT_CLICK_MS, "ms", s)
         self.click_ms.pack()
@@ -1852,8 +1949,11 @@ class AfkAutoclicker:
         Segmented(r.control, [("left", "Left"), ("right", "Right"), ("middle", "Mid")],
                   self.button_name, s, width=180).pack()
 
-        self.eat_section = section(body, "Eating", s)
-        self.eat_card_inner = card(body, s)
+        # "Eating" is kept -- it is a sub-section within Clicking, not a
+        # tab (docs/design.md), still Minecraft-only and conditionally
+        # shown by _select() exactly as today.
+        self.eat_section = section(self.clicking_pane, "Eating", s)
+        self.eat_card_inner = card(self.clicking_pane, s)
         self.eat_card = self.eat_card_inner.master
         self.eat_mode = tk.StringVar(value="off")
         Segmented(self.eat_card_inner,
@@ -1869,6 +1969,8 @@ class AfkAutoclicker:
                     self.button_name, self.eat_mode, self.eat_every.var,
                     self.eat_hold.var):
             var.trace_add("write", lambda *_a: self._persist())
+
+        self._set_content_tab(self._content_tab)   # hide the inactive pane last
 
     def _build_settings(self, s):
         """The Settings page: Appearance (3a), Updates (3b) -- structurally
@@ -1891,8 +1993,24 @@ class AfkAutoclicker:
         tk.Label(title, text="Settings", bg=BG, fg=INK, anchor="w",
                  font=("Segoe UI", int(14 * s), "bold")).pack(side="left")
 
-        section(body, "Appearance", s)
-        ap = card(body, s)
+        # ── tab bar (story #24 feature 2): Appearance | Updates ──
+        self.settings_tab_var = tk.StringVar(value=self._settings_tab)
+        TabBar(body, [("appearance", "Appearance"), ("updates", "Updates")],
+              self.settings_tab_var, s).pack(anchor="w", pady=(int(12 * s), int(12 * s)))
+        self.settings_tab_var.trace_add("write",
+            lambda *_a: self._set_settings_tab(self.settings_tab_var.get()))
+
+        # Both panes are built in full, always -- update_button/version_
+        # label must exist unconditionally whenever Settings is open (the
+        # existing `if not self._settings_open` guard in _offer_update()/
+        # _set_update_state() already assumes exactly this contract, and
+        # this feature does not change either method). See _build_content()'s
+        # own comment for why build-then-pack-then-hide is the required order.
+        self.appearance_pane = tk.Frame(body, bg=BG)
+        self.appearance_pane.pack(fill="both", expand=True)
+        # No "Appearance" section header here -- the tab label above
+        # already names the pane (docs/design.md's redundant-header decision).
+        ap = card(self.appearance_pane, s)
         row = Row(ap, "Theme", s)
         row.pack(fill="x")
         self.appearance_var = tk.StringVar(value=self.store.data["appearance"])
@@ -1950,8 +2068,11 @@ class AfkAutoclicker:
         self.ui_scale_var.trace_add("write",
             lambda *_a: self._apply_ui_scale(self.ui_scale_var.get()))
 
-        section(body, "Updates", s)
-        up = card(body, s)
+        self.updates_pane = tk.Frame(body, bg=BG)
+        self.updates_pane.pack(fill="both", expand=True)
+        # No "Updates" section header here -- same redundant-header decision
+        # as Appearance above.
+        up = card(self.updates_pane, s)
         row = Row(up, "Version", s)
         row.pack(fill="x")
         self.version_label = tk.Label(row.control, text=f"v{__version__}", bg=CARD,
@@ -1960,6 +2081,8 @@ class AfkAutoclicker:
         self.update_button = Button(up, "Check for updates", self.check_update, s,
                                     width=CARD_INNER_W)
         self.update_button.pack(pady=(int(8 * s), 0))
+
+        self._set_settings_tab(self._settings_tab)   # hide the inactive pane last
 
     def _apply_appearance(self, value):
         self.store.data["appearance"] = value
@@ -2030,6 +2153,54 @@ class AfkAutoclicker:
             return
         self._settings_open = True
         self._rebuild_ui()
+
+    def _set_content_tab(self, value):
+        """Toggle which game-page pane is packed. Both panes are always
+        built in full by _build_content() before this ever runs (see its
+        own comment) -- this only ever changes which one is visible, never
+        which widgets exist, so _select()/_persist()/_sync_settings() keep
+        reading/writing Clicking/Eating widgets exactly as before regardless
+        of which tab happens to be showing.
+
+        Also keeps content_tab_var (the TabBar's own indicator) in step,
+        since this method is reachable two ways: a real tab click (the
+        var's own "write" trace calls this) and a direct call (e.g. this
+        pane's own end-of-build line, or a future caller like a game switch
+        that wants to force a tab). Without this, a direct call would move
+        the pane but leave the underline pointing at the old tab. The
+        `!=` guard is not an optimization: Tcl fires a variable's write
+        traces even when the new value equals the old one, so writing the
+        var unconditionally here would immediately re-enter this method via
+        that trace -- and again, since the value is already `value`, forever.
+        Guarding on an actual change makes that second call a no-op (its own
+        `!=` check now says "already equal") and terminates one call deep."""
+        if value not in ("hotkey", "clicking"):
+            value = "hotkey"
+        self._content_tab = value
+        if self.content_tab_var.get() != value:
+            self.content_tab_var.set(value)
+        self.hotkey_pane.pack_forget()
+        self.clicking_pane.pack_forget()
+        (self.hotkey_pane if value == "hotkey" else self.clicking_pane).pack(
+            fill="both", expand=True)
+
+    def _set_settings_tab(self, value):
+        """Same toggle as _set_content_tab(), for the Settings page's
+        Appearance/Updates panes -- update_button/version_label stay built
+        unconditionally whenever Settings is open, matching the existing
+        `if not self._settings_open` guard in _offer_update()/
+        _set_update_state(). Keeps settings_tab_var in step for the same
+        reason and with the same re-entrancy guard as _set_content_tab()
+        above -- see its docstring."""
+        if value not in ("appearance", "updates"):
+            value = "appearance"
+        self._settings_tab = value
+        if self.settings_tab_var.get() != value:
+            self.settings_tab_var.set(value)
+        self.appearance_pane.pack_forget()
+        self.updates_pane.pack_forget()
+        (self.appearance_pane if value == "appearance" else self.updates_pane).pack(
+            fill="both", expand=True)
 
     # ---------- game list ----------
 
