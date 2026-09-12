@@ -160,6 +160,21 @@ else:
 
 SIDEBAR_W = 208
 CONTENT_W = 452
+WINDOW_MIN_H = 560   # the window's hard height floor, and (see
+    # _apply_minsize()) today's default launch height too -- they are
+    # deliberately the same number, unlike minw/default_w after story
+    # #24 feature 3 (docs/spec.md's "Why height doesn't get the width
+    # axis's floor/default split", G#28/GH#48). Was 690 (#14, tuned for
+    # the old single combined page before PR #40 split it into tabs),
+    # which left the tallest real pane (Clicking+Eating, Minecraft) in
+    # ~148-163px of dead space it can never use and the shortest
+    # (Hotkey) ~78% empty at the floor. Re-derived from the tallest
+    # pane's own real, live-measured content span (title+note+tab bar
+    # overhead plus Clicking+Eating's own content, ~500-510px unscaled
+    # measured at both s≈1 and the documented worst-case compound scale
+    # s≈0.675) plus a ~40-60px margin for cross-platform font-metric
+    # variance this measurement can't check locally -- see docs/spec.md
+    # for the exact method, re-verify before retuning further.
 CONTENT_PAD = 16   # _build_content's own outer padx/pady around body
 CARD_INNER_W = CONTENT_W - 2 * CONTENT_PAD - 2 * CARD_PAD    # a full-width
     # card's real inner width: body sits CONTENT_PAD in from CONTENT_W on
@@ -1804,12 +1819,12 @@ class AfkAutoclicker:
             self.apply_hotkey()
 
     def _apply_minsize(self, grow_only=False):
-        """The tuned-default-size mechanism (#14): establishes/updates
-        root.minsize() from self.s. Called once, unconditionally, from
-        __init__ (grow_only=False, the byte-identical first-launch
-        behavior the two inline lines this replaces always had -- also
-        sets geometry() to that exact size). A UI-scale change calls this
-        again with grow_only=True: minsize is always updated (a WM-level
+        """The tuned-default-size mechanism (#14, retuned by G#28/GH#48):
+        establishes/updates root.minsize() from self.s. Called once,
+        unconditionally, from __init__ (grow_only=False, the byte-identical
+        first-launch behavior the two inline lines this replaces always had
+        -- also sets geometry() to that exact size). A UI-scale change calls
+        this again with grow_only=True: minsize is always updated (a WM-level
         constraint, safe to change regardless of the window's current
         actual size), but geometry() is only invoked, and only per-axis,
         when the window's current size is now below the new floor -- so a
@@ -1818,14 +1833,20 @@ class AfkAutoclicker:
         docs/history/ac-17-f4-spec.md §2).
 
         Story #24 feature 3: minsize (the hard floor) and the default launch
-        geometry are no longer the same number. minw is derived from
-        SIDEBAR_RAIL_W -- the collapsed-rail floor -- so the window can
-        actually be dragged down far enough to reach RAIL_COLLAPSE_THRESHOLD
-        and collapse; the not-grow_only branch's own default_w keeps using
-        the old SIDEBAR_W-based formula so the app still *launches* at
-        today's familiar expanded size, not immediately at the new, smaller
-        floor."""
-        minw, minh = int((SIDEBAR_RAIL_W + 1 + CONTENT_W) * self.s), int(690 * self.s)
+        geometry are no longer the same number *on the width axis*. minw is
+        derived from SIDEBAR_RAIL_W -- the collapsed-rail floor -- so the
+        window can actually be dragged down far enough to reach
+        RAIL_COLLAPSE_THRESHOLD and collapse; the not-grow_only branch's own
+        default_w keeps using the old SIDEBAR_W-based formula so the app
+        still *launches* at today's familiar expanded size, not immediately
+        at the new, smaller floor. Height has no equivalent second state --
+        there is no collapsed vertical mode for a floor to admit -- so minh
+        stays a single WINDOW_MIN_H-derived number used for both minsize()
+        and (when not grow_only) geometry()'s height (see docs/spec.md's
+        "Why height doesn't get the width axis's floor/default split",
+        G#28/GH#48)."""
+        minw, minh = (int((SIDEBAR_RAIL_W + 1 + CONTENT_W) * self.s),
+                      int(WINDOW_MIN_H * self.s))
         self.root.minsize(minw, minh)
         if not grow_only:
             default_w = int((SIDEBAR_W + 1 + CONTENT_W) * self.s)
