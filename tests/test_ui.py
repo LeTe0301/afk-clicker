@@ -1644,10 +1644,10 @@ class Themes(unittest.TestCase):
 
     def test_card_inner_w_has_no_border_allowance_left(self):
         # A full-width card's shell sits inside body's own CONTENT_PAD inset
-        # before the card's own CARD_R padding starts -- a control sized off
-        # CONTENT_W alone, skipping that body inset, overruns the card.
+        # before the card's own CARD_PAD padding starts -- a control sized
+        # off CONTENT_W alone, skipping that body inset, overruns the card.
         self.assertEqual(app.CARD_INNER_W,
-                         app.CONTENT_W - 2 * app.CONTENT_PAD - 2 * app.CARD_R)
+                         app.CONTENT_W - 2 * app.CONTENT_PAD - 2 * app.CARD_PAD)
         self.assertEqual(app.CARD_INNER_W, 396)
 
 
@@ -1958,103 +1958,167 @@ class RunThemeCommandSeam(unittest.TestCase):
 
 
 @needs_display
-class PillAndCardRadii(unittest.TestCase):
-    """Buttons/segmented/status become true pills; cards/rows stay at 12px."""
+class FlatChrome(unittest.TestCase):
+    """Story #24 feature 5: round_rect() is gone outright, and every widget
+    that used to draw a pill/rounded-card shape now paints a plain
+    create_rectangle -- checked per widget, same granularity the old
+    radius-recording assertions had, just against shape kind instead of a
+    now-nonexistent radius argument."""
 
     def setUp(self):
         self.root = tk.Tk()
         self.root.update()
-        self.recorded = []
-        self._orig_round_rect = app.round_rect
-
-        def _record(cv, x1, y1, x2, y2, r, **kw):
-            self.recorded.append(r)
-            return self._orig_round_rect(cv, x1, y1, x2, y2, r, **kw)
-
-        app.round_rect = _record
 
     def tearDown(self):
-        app.round_rect = self._orig_round_rect
         self.root.destroy()
 
-    def test_button_shape_uses_pill_radius(self):
-        app.Button(self.root, "Go", lambda: None, 1.0)
-        self.assertEqual(self.recorded, [app.PILL_R * 1.0])
+    def test_no_widget_calls_round_rect(self):
+        self.assertFalse(hasattr(app, "round_rect"))
 
-    def test_segmented_track_and_selection_pill_use_pill_radius(self):
-        var = tk.StringVar(value="a")
-        app.Segmented(self.root, [("a", "A"), ("b", "B")], var, 1.0)
-        # Two round_rect calls at construction: the outer track, then the
-        # selection pill -- both must move together or the pill's shape
-        # "jumps" when the selected segment changes.
-        self.assertEqual(self.recorded, [app.PILL_R * 1.0, app.PILL_R * 1.0])
+    def test_card_r_and_pill_r_are_gone(self):
+        self.assertFalse(hasattr(app, "CARD_R"))
+        self.assertFalse(hasattr(app, "PILL_R"))
 
-    def test_pill_pts_stays_in_sync_with_the_constructors_radius(self):
-        # _pill_pts recomputes the selection pill's corners on every value
-        # change without going through round_rect -- exercised directly so a
-        # regression there (still hard-coded at 7) is caught even though it
-        # never calls the monkeypatched round_rect above.
+    def test_button_shape_is_a_plain_rectangle(self):
+        btn = app.Button(self.root, "Go", lambda: None, 1.0)
+        self.assertEqual(btn.type(btn.shape), "rectangle")
+
+    def test_segmented_track_shape_is_a_plain_rectangle(self):
         var = tk.StringVar(value="a")
         seg = app.Segmented(self.root, [("a", "A"), ("b", "B")], var, 1.0)
-        pts = seg._pill_pts(2, 2, 200, 32)
-        half_h = (32 - 2) / 2
-        self.assertEqual(pts[0], 2 + half_h, "corner radius is not a true pill")
+        track = seg.find_all()[0]     # the outer track is the first item
+                                       # created, before the selection pill
+        self.assertEqual(seg.type(track), "rectangle")
 
-    def test_round_rect_draws_a_true_capsule_not_a_smoothed_approximation(self):
-        # The old construction fed 12 corner *control* points -- including
-        # the exact, sharp (x2, y1) corner itself -- to a smoothed spline,
-        # which only ever approaches the radius it is asked for and, at
-        # r = h/2, still has that sharp point sitting at distance r*sqrt(2)
-        # from the nearest end-cap centre, not r. This checks the actual
-        # points fed to the canvas, so it fails against that old shape even
-        # though its clamped `r` parameter is the correct PILL_R value.
-        cv = tk.Canvas(self.root)
-        x1, y1, x2, y2 = 0, 0, 60, 32
-        r = (y2 - y1) / 2   # a true pill: radius is exactly half the height
-        item = app.round_rect(cv, x1, y1, x2, y2, r, fill="black")
-
-        self.assertEqual(cv.itemcget(item, "smooth"), "0",
-                         "a smoothed polygon never reaches the radius it is given")
-
-        coords = cv.coords(item)
-        pts = list(zip(coords[0::2], coords[1::2]))
-        left_c, right_c = (x1 + r, (y1 + y2) / 2), (x2 - r, (y1 + y2) / 2)
-        for px, py in pts:
-            d_left = ((px - left_c[0]) ** 2 + (py - left_c[1]) ** 2) ** 0.5
-            d_right = ((px - right_c[0]) ** 2 + (py - right_c[1]) ** 2) ** 0.5
-            self.assertAlmostEqual(min(d_left, d_right), r, delta=1.0,
-                                   msg=f"point {(px, py)} is not on either end-cap")
-
-        self.assertIn((x2, (y1 + y2) / 2), pts,
-                      "right edge midpoint is not on the outline")
-
-    def test_segmented_selection_pill_matches_round_rects_true_capsule(self):
-        # _pill_pts feeds coords() on the very item round_rect created, so
-        # its geometry has to stay a true capsule too, not just its own r.
+    def test_segmented_selection_pill_moves_to_the_correct_segment(self):
+        # Replaces the old capsule-geometry assertions: position, not
+        # capsule shape, which no longer exists.
         var = tk.StringVar(value="a")
         seg = app.Segmented(self.root, [("a", "A"), ("b", "B")], var, 1.0)
-        x1, y1, x2, y2 = 2, 2, 200, 32
-        r = min(app.PILL_R, (x2 - x1) / 2, (y2 - y1) / 2)
-        pts = list(zip(*[iter(seg._pill_pts(x1, y1, x2, y2))] * 2))
-        left_c, right_c = (x1 + r, (y1 + y2) / 2), (x2 - r, (y1 + y2) / 2)
-        for px, py in pts:
-            d_left = ((px - left_c[0]) ** 2 + (py - left_c[1]) ** 2) ** 0.5
-            d_right = ((px - right_c[0]) ** 2 + (py - right_c[1]) ** 2) ** 0.5
-            self.assertAlmostEqual(min(d_left, d_right), r, delta=1.0,
-                                   msg=f"point {(px, py)} is not on either end-cap")
+        seg.var.set("b")
+        self.root.update()
+        seg_w = seg.w / len(seg.options)
+        expected = [seg_w * 1 + 2, 2, seg_w * 2 - 2, seg.h - 2]
+        self.assertEqual(seg.coords(seg.pill), expected)
 
-    def test_status_pill_shape_uses_pill_radius(self):
-        app.StatusPill(self.root, 1.0)
-        self.assertEqual(self.recorded, [app.PILL_R * 1.0])
+    def test_status_pill_shape_is_a_plain_rectangle(self):
+        pill = app.StatusPill(self.root, 1.0)
+        self.assertEqual(pill.type(pill.shape), "rectangle")
 
-    def test_game_item_shape_uses_card_radius_not_pill_radius(self):
-        app.GameItem(self.root, {"id": "x", "name": "X"}, lambda gid: None, 1.0)
-        self.assertEqual(self.recorded, [app.CARD_R * 1.0])
+    def test_game_item_shape_is_a_plain_rectangle(self):
+        item = app.GameItem(self.root, {"id": "x", "name": "X"}, lambda gid: None, 1.0)
+        self.assertEqual(item.type(item.shape), "rectangle")
 
-    def test_card_shell_shape_uses_card_radius(self):
-        app.card(self.root, 1.0)
-        self.assertIn(app.CARD_R * 1.0, self.recorded)
-        self.assertNotIn(app.PILL_R * 1.0, self.recorded)
+    def test_settings_item_shape_is_a_plain_rectangle(self):
+        item = app.SettingsItem(self.root, lambda: None, 1.0)
+        self.assertEqual(item.type(item.shape), "rectangle")
+
+    def test_card_shell_shape_is_a_plain_rectangle(self):
+        inner = app.card(self.root, 1.0)
+        shell = inner.master
+        shell.update_idletasks()
+        types = [shell.type(i) for i in shell.find_all()]
+        self.assertIn("rectangle", types)
+        self.assertNotIn("polygon", types)
+
+
+@needs_display
+class SectionHeader(unittest.TestCase):
+    """section() drops .upper() and gains an optional right-aligned
+    action_factory slot -- both real, tested mechanisms even though no
+    production call site passes action_factory today (this story's own
+    TabBar.height precedent: an accepted-but-ignored parameter is a latent
+    trap, so the slot gets direct coverage regardless of callers)."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.update()
+
+    def tearDown(self):
+        self.root.destroy()
+
+    def test_section_text_is_not_uppercased(self):
+        row = app.section(self.root, "Mixed Case", 1.0)
+        label = row.winfo_children()[0]
+        self.assertEqual(label.cget("text"), "Mixed Case")
+
+    def test_section_with_no_action_has_no_reserved_gap(self):
+        row = app.section(self.root, "Test", 1.0)
+        label = row.winfo_children()[0]
+        row.update_idletasks()
+        self.assertEqual(row.winfo_reqwidth(), label.winfo_reqwidth())
+
+    def test_section_action_factory_is_actually_wired(self):
+        # A bare tk.Tk() root shrink-wraps to its packed children's own
+        # requested size, so with no forced width there's no leftover space
+        # for pack(side="right") to push against -- side="right" and
+        # side="left" land the action widget at the *same* winfo_x() in an
+        # unconstrained parent (confirmed directly: 33 both ways). A fixed-
+        # width, pack_propagate(False) container -- the same shape every
+        # real content pane in this app already uses -- gives the row real
+        # slack, so "packed at the right edge" and "packed adjacent to the
+        # label" actually produce different numbers.
+        container = tk.Frame(self.root, width=500, height=50)
+        container.pack_propagate(False)
+        container.pack()
+        row = app.section(container, "Test", 1.0,
+                          action_factory=lambda r: tk.Button(r, text="Do"))
+        row.update_idletasks()
+        label, action = row.winfo_children()
+        # Right of the label, with a genuine gap now that one can exist.
+        self.assertGreater(action.winfo_x(), label.winfo_x() + label.winfo_width())
+        # Flush against the row's own right edge -- the direct proof that
+        # section() used pack(side="right"), not merely "somewhere right of
+        # the label" (which a left-packed-after-some-spacer layout could
+        # also satisfy).
+        self.assertEqual(action.winfo_x() + action.winfo_width(), row.winfo_width())
+
+
+@needs_display
+class RailAccent(unittest.TestCase):
+    """The rail's active item gets the one sparing-accent home it was
+    missing (docs/spec.md): a left-edge accent bar, toggled strictly on
+    `selected`, independent of any other per-item signal."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.update()
+
+    def tearDown(self):
+        self.root.destroy()
+
+    def test_selected_game_item_shows_the_accent_bar(self):
+        for collapsed in (False, True):
+            with self.subTest(collapsed=collapsed):
+                item = app.GameItem(self.root, {"id": "x", "name": "X"},
+                                    lambda gid: None, 1.0, collapsed=collapsed)
+                item.set_state(selected=True)
+                self.assertEqual(item.itemcget(item.accent_bar, "state"), "normal")
+
+    def test_unselected_game_item_hides_the_accent_bar(self):
+        for collapsed in (False, True):
+            with self.subTest(collapsed=collapsed):
+                item = app.GameItem(self.root, {"id": "x", "name": "X"},
+                                    lambda gid: None, 1.0, collapsed=collapsed)
+                item.set_state(selected=False)
+                self.assertEqual(item.itemcget(item.accent_bar, "state"), "hidden")
+
+    def test_settings_item_accent_bar_is_independent_of_has_update(self):
+        item = app.SettingsItem(self.root, lambda: None, 1.0,
+                                has_update=True, collapsed=False)
+        item.set_state(selected=False)
+        self.assertEqual(item.itemcget(item.accent_bar, "state"), "hidden")
+
+        item.set_state(selected=True, has_update=False)
+        self.assertEqual(item.itemcget(item.accent_bar, "state"), "normal")
+
+    def test_running_dot_and_accent_bar_coexist(self):
+        item = app.GameItem(self.root, {"id": "x", "name": "X"},
+                            lambda gid: None, 1.0)
+        item.set_state(selected=True, running=True)
+        self.assertEqual(item.itemcget(item.accent_bar, "state"), "normal")
+        self.assertEqual(item.itemcget(item.dot, "fill"), app.OK)
+        self.assertNotEqual(item.accent_bar, item.dot)
 
 
 @needs_display
@@ -2204,30 +2268,46 @@ class CardResize(UITestCase):
 
 
 class RoundedCanvasBackgrounds(UITestCase):
-    """Every canvas that draws a round_rect shape must paint its parent's own
-    background outside the rounded shape -- otherwise the shape's corners
-    sit on a mismatched square (docs/history/ac-17-f1-design.md item 3). round_rect is the
-    only thing in the app that calls create_polygon, so any canvas holding a
-    polygon item is one of these and gets checked, with no per-widget-class
-    list to keep in sync by hand."""
+    """Every canvas that draws a full-bleed flat background shape must paint
+    its parent's own background outside that shape -- otherwise the shape's
+    inset edges (the 1px outline-stroke margin most of these use) sit on a
+    mismatched square (docs/history/ac-17-f1-design.md item 3, originally
+    about round_rect()'s corners; the same invariant holds for a flat
+    inset rectangle). Story #24 feature 5 deleted round_rect() and its
+    single create_polygon call, so keying this off item type ("any canvas
+    holding a polygon") no longer finds anything.
 
-    def _rounded_canvases(self, widget):
+    Re-keying off "any canvas holding a create_rectangle item" instead
+    would misfire the other way: TabBar's own active-tab underline
+    (afk_clicker.py, a 2px-tall create_rectangle) and Segmented's selection
+    pill are both legitimate small rectangles that were never meant to
+    cover their canvas edge-to-edge. Keying off the widget *classes* that
+    draw a full-bleed background shape -- the six named in docs/spec.md's
+    mechanical swap list, plus card()'s shell (the only bare tk.Canvas()
+    construction anywhere in the file, grep-confirmed, so `type(widget) is
+    tk.Canvas` -- exact type, not isinstance/subclass -- uniquely finds it
+    without also matching Button/Segmented/etc, which are all tk.Canvas
+    subclasses) -- avoids both traps."""
+
+    _FLAT_BG_CLASSES = (app.Button, app.Segmented, app.StatusPill,
+                        app.GameItem, app.SettingsItem)
+
+    def _flat_bg_canvases(self, widget):
         found = []
-        if isinstance(widget, tk.Canvas):
-            if any(widget.type(item) == "polygon" for item in widget.find_all()):
-                found.append(widget)
+        if isinstance(widget, self._FLAT_BG_CLASSES) or type(widget) is tk.Canvas:
+            found.append(widget)
         for child in widget.winfo_children():
-            found.extend(self._rounded_canvases(child))
+            found.extend(self._flat_bg_canvases(child))
         return found
 
-    def test_every_rounded_canvas_matches_its_parents_background(self):
-        canvases = self._rounded_canvases(self.root)
-        self.assertTrue(canvases, "setup failed to find any rounded canvas")
+    def test_every_flat_bg_canvas_matches_its_parents_background(self):
+        canvases = self._flat_bg_canvases(self.root)
+        self.assertTrue(canvases, "setup failed to find any flat-bg canvas")
         mismatches = [(str(cv), cv.cget("bg"), cv.master.cget("bg"))
                      for cv in canvases if cv.cget("bg") != cv.master.cget("bg")]
         self.assertEqual(mismatches, [],
             "canvas bg must match its parent's bg, or the area outside the "
-            "rounded shape paints a visible mismatched rectangle")
+            "shape's own inset paints a visible mismatched rectangle")
 
 
 class AppearanceStore(UITestCase):
