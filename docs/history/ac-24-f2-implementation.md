@@ -528,3 +528,139 @@ Exactly three pre-existing tests (outside `TabBarNavigation`) were
 modified, matching `docs/spec.md`'s "Test impact" section precisely (one
 required helper fix covering 9 tests, one required direct fix, two
 recommended fixes) — no other pre-existing test was touched.
+
+## Post-review fix (round 5): a fourth `winfo_rootx()` assertion in `RowValueColumn` never observed a mapped widget, Windows-only
+
+PR #40 CI was red on Windows only (Ubuntu/macOS green), one failure:
+
+```
+FAIL: test_random_jitter_hint_wraps_instead_of_overlapping_the_control
+AssertionError: 1 not less than or equal to 0
+```
+
+### Root cause
+
+`tests/test_ui.py`, `RowValueColumn.test_random_jitter_hint_wraps_instead_of_overlapping_the_control`,
+its final assertion (`hint.winfo_rootx() + hint.winfo_width() <=
+self.ui.jitter_ms.winfo_rootx()`) measures two widgets that live inside
+`clicking_pane`, which feature 2 makes hidden by default (`hotkey` is the
+default active game-page tab) — and, unlike the two sibling tests directly
+above it in the same class, this one never called `self.ui._set_content_tab
+("clicking")` before measuring. `1` and `0` in the failure are Tk's
+placeholder values for an unmapped widget, not real geometry.
+
+This is the same defect class round 3/4's sibling tests
+(`test_offset_is_unchanged_when_the_card_stretches`,
+`test_extra_width_becomes_trailing_margin_not_a_growing_gap`,
+`tests/test_ui.py:829-858`) were already fixed for — a fourth instance in
+the same class was missed. The two already-fixed tests needed the switch
+for a *behavioral* reason (a hidden pane doesn't reflow on resize, so
+"before"/"after" would trivially match for the wrong reason); this one
+needs it because `winfo_rootx()` specifically — an absolute on-screen
+position — is invalid on an unmapped widget, which the app's own code
+comment (`afk_clicker.py:1906-1916`) already documents empirically:
+`pack_forget()` does **not** erase an already-computed *width*, but an
+absolute root position requires actual window-manager placement and Tk
+resets it (to 0 on Windows) once unmapped. That distinction — `winfo_x()`/
+`winfo_width()`/`winfo_height()` stay valid on an unmapped-but-previously-
+laid-out widget, `winfo_rootx()`/`winfo_rooty()` do not — is why only this
+one assertion, of the four in the class, ever failed.
+
+On Linux/X11 the bug was invisible: probing at `DISPLAY=:99` before any
+fix, `hint.winfo_rootx() + hint.winfo_width()` returned `389` and
+`jitter_ms.winfo_rootx()` returned `403` even while `clicking_pane`'s own
+`winfo_manager()` was `''` (unmanaged) — stale-but-plausible cached
+positions from before the pane was hidden during `__init__`, coincidentally
+satisfying `389 <= 403`. Windows resets root position to `0` on unmap
+instead of leaving it stale, so only the Windows leg could ever catch this.
+
+### Fix
+
+`tests/test_ui.py:916-925`: added the same `self.ui._set_content_tab
+("clicking")` + `self.root.update()` pair the two sibling tests already
+use, immediately before the `winfo_rootx()`-based assertion (left the two
+earlier assertions in the test — the `wraplength` check and the
+`winfo_reqheight()` comparison — untouched, since neither depends on the
+pane being mapped):
+```python
+self.ui._set_content_tab("clicking")
+self.root.update()
+self.assertLessEqual(
+    hint.winfo_rootx() + hint.winfo_width(),
+    self.ui.jitter_ms.winfo_rootx())
+```
+
+### Item 2: does the assertion hold for a real reason once genuinely mapped, or was this masking a real overlap bug?
+
+Probed directly (`DISPLAY=:99`, same venv) before and after the pane
+switch:
+
+| | `hint.winfo_rootx() + winfo_width()` | `jitter_ms.winfo_rootx()` | margin |
+|---|---|---|---|
+| Before switch (stale, pre-fix) | 389 | 403 | 14px (accidental) |
+| After switch + update (real) | 389 | 403 | 14px (genuine) |
+
+The numbers are identical before and after on Linux — expected, since X11
+never invalidated them in the first place; the value itself did not change,
+only whether it was trustworthy. With the pane actually mapped
+(`clicking_pane.winfo_manager() == 'pack'`, `hint.winfo_viewable() == 1`),
+the 14px margin is real, not coincidental: `hint`'s outer width is capped by
+its fixed `wraplength=int(ROW_LABEL_W * s)` (140px at `s=1`, measured
+`winfo_width() == 144` once the Label's own border/padding is added), while
+the label column itself (`Row`'s `grid_columnconfigure(0, minsize=int((
+ROW_LABEL_W + ROW_LABEL_GAP) * s))`, 152px at `s=1`) is 8px wider than that.
+`wraplength` is a fixed pixel limit, not a function of the rendered text or
+font — unlike the requested-width-vs-wraplength comparison this same test's
+own comment (lines 899-907) already flags as font-sensitive and previously
+broke on Segoe UI — so this margin holds on any platform/font, not just the
+one measured here. **No product bug**; the test's assertion was correct in
+intent, only its measurement was invalid before this fix.
+
+### Item 3: audit of every geometry-introspection call in `tests/test_ui.py`
+
+Checked every `winfo_rootx`/`winfo_width`/`winfo_height`/`winfo_x`/
+`winfo_y` call for the same class of defect: is the widget inside a pane
+feature 2 made hidden by default, and does the assertion depend on
+absolute root position (unsafe while unmapped) rather than a
+parent-relative size/position (safe, per the distinction established
+above)?
+
+| Lines | Widget(s) | Call | In a hidden-by-default pane? | Verdict |
+|---|---|---|---|---|
+| 791-796 | `self.ui.content`, `self.ui.side` | `winfo_width()` | No — always-mapped containers, not a tab-hidden pane | Safe |
+| 802-803, 2040-2041, 2062, 2077-2078 | `self.root` | `winfo_width()`/`winfo_height()` | No — the toplevel itself | Safe |
+| 822 (`_right_edge` helper) | varies (used at line 884) | `winfo_rootx()` | Used on `seg` from `_appearance_segment()`, Settings' Appearance pane — default active settings tab (`self._settings_tab = "appearance"`, `afk_clicker.py:1597`) | Safe — pane is genuinely mapped when this runs |
+| 824-827 | `self.ui.click_ms.master` | `winfo_x()` | Yes, `clicking_pane` (hidden by default) | Safe anyway — `winfo_x()` is parent-relative, assigned by the geometry manager at pack time regardless of ancestor mapping; this is the assertion that already passed on Windows in the same CI run |
+| 831, 846 | same | `winfo_x()` | Yes | Already fixed in an earlier round (`_set_content_tab("clicking")` present) — needed for a behavioral reason (hidden pane doesn't reflow on resize), not a `winfo_x()` validity issue |
+| 857-858 | `control`, `card` | `winfo_x()`, `winfo_width()` | Yes | Already fixed in an earlier round, same as above |
+| 884 | `seg` (via `_right_edge`) | `winfo_rootx()` (through helper) | No — Appearance pane, default active | Safe |
+| 916-925 | `hint`, `jitter_ms` | `winfo_rootx()`, `winfo_width()` | Yes, `clicking_pane` | **Fixed this round** |
+| 1745 | `shell` (standalone `CardShell` test fixture, not the app's own UI) | `winfo_width()` | N/A — its own bare `self.parent`, no tab bar involved at all | Safe |
+| 1815-1822 (`CardResize`) | `self.ui.apply_button.master.master.master` | `winfo_width()` | No — `apply_button` lives in `hotkey_pane`, the default active game-page tab | Safe |
+| 2033-2071 (`UIScale`) | `self.root` | `winfo_width()`/`winfo_height()`, `minsize()` | No — toplevel only | Safe |
+
+No further fixes required — the one instance found and fixed above was the
+only real gap. The rest either measure a widget outside any tab-hidden
+pane, measure a widget in the *default-active* pane for that page (Hotkey
+on the game page, Appearance on Settings), or use `winfo_x()`/`winfo_width()`
+on a widget already switched into view by an earlier round's fix.
+
+### Verification
+
+```
+DISPLAY=:99 .../venv/bin/python -m unittest tests.test_ui.RowValueColumn -v
+```
+→ `Ran 5 tests ... OK`, including the previously-failing test.
+
+Full suite, matching CI's own invocation (`python -m unittest discover -s
+tests -t .`):
+```
+DISPLAY=:99 .../venv/bin/python -m unittest discover -s tests -t .
+```
+→ `Ran 259 tests ... OK (skipped=5)`.
+
+A green Linux run is weak evidence for this specific defect class (it is
+exactly what missed it originally) — the confidence here comes from the
+mapping reasoning in items 2 and 3 above, not from the run itself. No
+product code (`afk_clicker.py`) touched this round; the fix is entirely in
+`tests/test_ui.py`.
