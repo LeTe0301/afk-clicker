@@ -148,8 +148,7 @@ Housekeeping:
 ## Session handoff — 2026-09-12 (end of session)
 
 **Where things stand:**
-- `main` is at `0a6ce58` (code at `06f5900`), CI green on all three platforms,
-  **284 tests**. Local checkout clean; the `ac-24` worktree is on its branch at
+- `main` is at `6c4de48`, CI green on all three platforms, **284 tests**. Local checkout clean; the `ac-24` worktree is on its branch at
   the merged state, clean.
 - **Story G#24 / GH#36 is closed — all five features merged.** Nothing is in
   flight. There is no story queued behind it.
@@ -169,6 +168,12 @@ previous session.)
 
 Story-level end-to-end pass: clean. `handoff/story-24-e2e.md`, screenshots in
 `handoff/story24-shots/`.
+
+Merged after the story closed: G#26 / GH#44 (PR #45, `6c4de48`) — the number in
+every numeric input sat flush against the field's right border, since
+`justify="right"` pins it to the entry's own edge and `pack`'s `ipadx` pads both
+sides equally. A background-coloured spacer insets it without changing the
+entry's character width, so feature 1's value column keeps its offsets.
 
 **Next:** nothing is queued. The open items are in the sections above — the
 largest are the `minh` window-floor question (a product decision, and the one
