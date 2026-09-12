@@ -1633,7 +1633,14 @@ class NumBox(tk.Frame):
         entry = tk.Entry(wrap, textvariable=self.var, width=width, bg=BG, fg=INK,
                          relief="flat", insertbackground=ACCENT, justify="right",
                          font=("Consolas", int(10 * s)), highlightthickness=0)
-        entry.pack(ipady=int(4 * s), ipadx=int(5 * s))
+        # justify="right" pins the digits to the entry's own right edge, which
+        # sits directly against wrap's 1px border -- pack's ipadx can't fix that
+        # on one side only, it pads both. This spacer carries the field's own
+        # background past the text instead, so the number reads inset rather
+        # than crowded against the border. Packed before the entry so pack's
+        # right-to-left order puts it outermost.
+        tk.Frame(wrap, bg=BG, width=int(6 * s)).pack(side="right", fill="y")
+        entry.pack(side="right", ipady=int(4 * s), ipadx=int(5 * s))
         entry.bind("<FocusIn>", lambda e: wrap.config(bg=ACCENT))
         entry.bind("<FocusOut>", lambda e: wrap.config(bg=LINE))
 
