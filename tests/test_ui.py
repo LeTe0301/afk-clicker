@@ -936,6 +936,33 @@ class WindowMinimumHeight(UITestCase):
                    - min(c.winfo_y() for c in kids))
         self.assertLessEqual(natural, pane.winfo_height())
 
+    def test_tallest_pane_still_fits_at_the_floor_reverse_order(self):
+        # Round 2 of G#28/GH#48 (docs/test-review.md Defect 1): the sibling
+        # test above only ever exercises _select() before _set_content_tab()
+        # ("order A"). The reverse -- clicking the Clicking tab first while
+        # still on the default Global profile (no Eating card packed at
+        # all), THEN selecting Minecraft -- is the branch inside _select()
+        # (afk_clicker.py's eat_section/eat_card pack() calls) that used to
+        # leave the pane's own _fill_pane() call reading the Eating card's
+        # canvas before its <Configure>-triggered redraw had grown it to
+        # its real height, oversizing `extra` enough that Tk's packer
+        # unmapped the bottom spacer outright -- genuine, permanent content
+        # clipping, not mere asymmetry. Asserts both "not clipped" (natural
+        # fits) and "not left unmapped" (the packer never gave up on a
+        # spacer), the two symptoms the live-app review actually observed.
+        self.ui._set_content_tab("clicking")
+        self.ui._select("minecraft")
+        self.root.update()
+        pane, top, bottom = self.ui._pane_fills["clicking"]
+        pane.update_idletasks()
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        self.assertLessEqual(natural, pane.winfo_height())
+        self.assertTrue(top.winfo_ismapped())
+        self.assertTrue(bottom.winfo_ismapped())
+
     def test_tallest_pane_still_fits_at_worst_case_compound_scale(self):
         # The documented worst case: low-DPI macOS (0.75) times the 90%
         # UI-scale step (0.9), s ~ 0.675. Safe to force directly -- _dpi_s
@@ -1184,37 +1211,47 @@ class VerticalFill(UITestCase):
         self.ui._set_content_tab("clicking")
         self.root.update()
         pane, top, bottom = self.ui._pane_fills["clicking"]
-        # Settling loop, added by G#28/GH#48 (see docs/implementation.md's
-        # "Deviations from spec"): _select()/_set_content_tab()'s own
-        # explicit _fill_pane() calls recompute against the eat card's
-        # canvas reqheight before that canvas's own <Configure>-triggered
-        # redraw has necessarily finished growing to its final size -- a
-        # pre-existing reentrancy gap in _fill_pane() itself (out of this
-        # ticket's scope, feature 4's mechanism), previously invisible only
-        # because the old, much bigger 690*s floor happened to let enough
-        # nested update_idletasks() recursion happen within one call to
-        # reach the fixed point anyway. At this ticket's smaller floor it
-        # does not always converge within that one call. A real user
-        # session self-heals within a frame or two (Tk's mainloop keeps
-        # servicing idle callbacks continuously; a single test-harness
-        # root.update() does not) -- this loop reproduces that same
-        # convergence deterministically rather than changing _fill_pane()'s
-        # own mechanism. Bounded to 10 rounds: every probed case converged
-        # within 3.
-        for _ in range(10):
-            kids = [c for c in pane.winfo_children()
-                    if c.winfo_ismapped() and c not in (top, bottom)]
-            natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
-                       - min(c.winfo_y() for c in kids))
-            extra = max(0, pane.winfo_height() - natural)
-            in_sync = (top.winfo_height() + bottom.winfo_height() == max(2, extra)
-                       and abs(top.winfo_height() - bottom.winfo_height()) <= 1)
-            if in_sync:
-                break
-            app._fill_pane(pane, top, bottom)
-            self.root.update()
+        # No settling loop needed (round 2 of G#28/GH#48 -- see
+        # docs/implementation.md's round-2 section): the reentrancy this
+        # test used to paper over with a bounded retry loop is now closed
+        # at the app level -- card()'s on_settle callback re-triggers
+        # _fill_pane() for the clicking pane every time the Eating card's
+        # own shell actually finishes resizing (_on_eat_card_settled()),
+        # so by the time _select()/_set_content_tab()'s own explicit
+        # _fill_pane() call returns, the pane's own update_idletasks() has
+        # already drained every intermediate settle step and the spacers
+        # already reflect the card's true final height -- one direct
+        # assertion, exactly like this test asserted before G#28/GH#48
+        # ever touched it.
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        extra = max(0, pane.winfo_height() - natural)
         self.assertEqual(top.winfo_height() + bottom.winfo_height(), max(2, extra))
         self.assertLessEqual(abs(top.winfo_height() - bottom.winfo_height()), 1)
+
+    def test_floor_case_still_splits_symmetrically_with_no_clipping_reverse_order(self):
+        # Same invariant as the sibling test above, reverse order: the
+        # Clicking tab clicked first while still on the default Global
+        # profile (no Eating card packed yet), THEN Minecraft selected --
+        # the branch inside _select() (afk_clicker.py's eat_section/
+        # eat_card pack() calls) that docs/test-review.md's Defect 1 found
+        # producing real, unmapped-spacer clipping before round 2 of
+        # G#28/GH#48. No settling loop here either, for the same reason.
+        self.ui._set_content_tab("clicking")
+        self.ui._select("minecraft")
+        self.root.update()
+        pane, top, bottom = self.ui._pane_fills["clicking"]
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        extra = max(0, pane.winfo_height() - natural)
+        self.assertEqual(top.winfo_height() + bottom.winfo_height(), max(2, extra))
+        self.assertLessEqual(abs(top.winfo_height() - bottom.winfo_height()), 1)
+        self.assertTrue(top.winfo_ismapped())
+        self.assertTrue(bottom.winfo_ismapped())
 
     def test_switching_tabs_recomputes_each_panes_own_margin(self):
         # Fill is computed per pane, not per page: Clicking's own content is
@@ -3495,8 +3532,8 @@ class ReentrantAppearanceChangeDuringRebuild(UITestCase):
         original_card = app.card
         fired = []
 
-        def patched_card(parent, s):
-            result = original_card(parent, s)
+        def patched_card(parent, s, on_settle=None):
+            result = original_card(parent, s, on_settle=on_settle)
             if not fired:
                 fired.append(1)
                 # Simulates a trace/callback re-entering _apply_appearance()

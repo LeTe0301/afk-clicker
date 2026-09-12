@@ -191,3 +191,191 @@ measure the `clicking` pane's content span the same way `_fill_pane()` does
 (see spec's "Deriving `WINDOW_MIN_H`" section for the exact snippet) — no
 code change required, a throwaway script is sufficient (none committed, per
 this project's convention).
+
+## Round 2 (docs/test-review.md, Defect 1 — blocking)
+
+The round-1 testing pass found the pane-refill reentrancy dismissed as a
+test-harness artifact in "Deviations from spec" above was in fact
+observable in the live, running app: at `WINDOW_MIN_H = 560`, the Minecraft
++ Clicking pane's spacers could settle on a wrong, permanently-lopsided
+split, and in one of the two ordinary click orders (Clicking tab clicked
+first on the default Global profile, then Minecraft selected), Tk's packer
+outright unmapped the bottom spacer and left the Eating card's "Hold for"
+row sliced off the bottom edge of the window — genuine, unreachable content
+clipping, not decorative asymmetry, confirmed stable after 2+ real seconds
+of continuous event-loop servicing. `_fill_pane()`/`card()` were
+respecified as in-scope at the app level by the review; fixed there, not in
+the test suite.
+
+### Root cause, fully traced
+
+`eat_card` (the Eating section's `card()` shell/canvas) is built once, at
+app-construction time, and its rows never change afterward — only its
+*pack state* toggles, via `_select()`'s `eat_card.pack(...)` /
+`pack_forget()`. Instrumenting `_fill_pane()` and `card()`'s `_redraw()`
+directly against the running app (throwaway probe, not committed) showed
+that re-packing an already-built `eat_card` does **not** give it its final
+on-screen height synchronously: Tk hands it a placeholder geometry first
+(`winfo_height()` well below its real `reqheight`), then `card()`'s own
+`shell.bind("<Configure>", _redraw)` handler grows it toward its real
+height across several more *idle-queued* steps (observed: ~6 rounds,
+`eat_card`'s height stepping 129→141px while `natural` climbed
+196→383px). `_select()`/`_set_content_tab()`'s own explicit `_fill_pane()`
+call happens once, synchronously, and nothing re-triggered it once those
+later idle-queued `_redraw()` steps actually landed — toggling a child's
+pack state inside an already-`expand=True`, `pack_propagate(False)` pane
+produces no `<Configure>` on the pane itself (the same "Empirical grounding
+#2" the code already documents for a different call site), so the pane's
+spacers stayed baked to whatever `_fill_pane()` measured *before* the card
+finished growing. At the old, much larger `690`-based floor this stale
+measurement still summed correctly by luck (enough leftover margin that a
+too-small `natural`'s resulting oversized spacers never exceeded the
+pane's real height); at `560`, the same staleness produces a genuinely
+larger, wrongly-sized `extra` than the pane can actually hold once the
+card finishes growing, which is exactly the overflow that made the packer
+give up on mapping the bottom spacer.
+
+### Fix chosen, and why
+
+Added an optional `on_settle` callback to `card()`, invoked at the tail of
+every `_redraw()` call — i.e. every single time a card's shell actually
+finishes resizing to a new real height, including from an idle callback
+serviced after whatever caller originally triggered it has already
+returned. Wired only for `eat_card`
+(`self.eat_card_inner = card(self.clicking_pane, s,
+on_settle=self._on_eat_card_settled)`), whose new `_on_eat_card_settled()`
+method re-runs `_fill_pane()` for the `clicking` pane, guarded on
+`self._pane_fills.get("clicking")` existing yet (it doesn't during
+`eat_card`'s own construction-time `_redraw()` call, before
+`_build_content()` populates that dict) and on `self._content_tab ==
+"clicking"` (the same unmapped-pane guard `_select()`'s own tail already
+uses).
+
+This was chosen over the review's other two offered directions:
+- **A defensive clamp on `_fill_pane()`'s own math** cannot fix this by
+  itself: the overflow isn't caused by a rounding error in how `extra` is
+  split, it's caused by `natural` itself being measured too small at
+  call time. A clamp operating on that same stale `natural` can only ever
+  prevent the *numeric* sum from exceeding `available` — it cannot know
+  the eventual, correct height, so it would still bake in a wrong
+  (clipped-adjacent or asymmetric) split, just without the packer visibly
+  giving up on a spacer. It trades one visible symptom for a quieter,
+  still-wrong one.
+- **Re-measuring once, after a fixed extra pass**, from inside
+  `_select()`/`_set_content_tab()`, was rejected as strictly worse than
+  hooking `card()` directly: it would need to guess how many extra
+  `update()`/`update_idletasks()` rounds are "enough" (the observed ~6
+  rounds is itself empirical, not a guaranteed bound), and it would only
+  cover the two call sites that happen to call `_fill_pane()` explicitly
+  today, not any future one.
+- The chosen fix ties the recompute to the actual event that was silently
+  going unheard (the card's own settle), so the invariant "the pane's
+  spacers reflect the card's true final height" holds **by construction**,
+  not probabilistically: as long as `card()`'s `_redraw()` converges to a
+  fixed height (guaranteed here — `eat_card`'s children are static once
+  built), the last `on_settle()` call it makes is guaranteed to leave
+  `_fill_pane()` holding the correct, final `natural`. This is not an
+  unbounded retry: `_on_eat_card_settled()`'s own call to
+  `_fill_pane()`'s `pane.update_idletasks()` further drains the remaining
+  settle steps within the same synchronous call in every case probed, so
+  in practice `_select()`/`_set_content_tab()`'s own explicit call already
+  returns fully converged — no residual staleness is left for a future
+  frame to paper over.
+
+### Verification — live app, both orders, not the suite
+
+Ran a throwaway script (`screenshot_round2.py`, scratchpad only) that
+builds the real app, drives both click orders, services the event loop
+continuously for 2 real seconds exactly like the review did, and takes a
+screenshot via `import -window <id>` on a private Xvfb display:
+
+- **Order A** (`_select("minecraft")` then `_set_content_tab("clicking")`):
+  `natural=383, pane_h=392, top=4, bottom=5`, both spacers mapped, not
+  clipped. Screenshot: `round2_orderA.png` — "Hold for" fully visible with
+  clean margin below it.
+- **Order B** (`_set_content_tab("clicking")` first on Global, then
+  `_select("minecraft")` — the branch that produced real clipping before
+  this fix): identical result, `natural=383, pane_h=392, top=4, bottom=5`,
+  both spacers mapped, not clipped. Screenshot: `round2_orderB.png` —
+  pixel-identical layout to order A.
+
+Both screenshots taken after 2 full seconds of continuous `root.update()`
+churn, matching how the review caught the original defect. Also
+re-confirmed order B no longer unmaps the bottom spacer even *before* that
+2-second settle window: `bottom.winfo_ismapped()` is `True` immediately
+after `_select("minecraft")` returns.
+
+### Floor value re-checked
+
+The fix changes *when* `_fill_pane()` recomputes, not how much space any
+pane's content actually needs, so `WINDOW_MIN_H = 560` itself does not
+need to move. Re-ran both derivation measurements against the fixed code,
+both orders:
+- Native scale (`s ≈ 1.043` on this box): `natural = 383px` — identical to
+  the round-1 measurement and to the spec's own number.
+- Compound worst case (`ui._dpi_s = 0.75; ui._apply_ui_scale("90")`,
+  `s ≈ 0.675`): `natural = 254px`, fits within the pane's `458px` at this
+  scale — identical to the round-1/spec measurement, both orders.
+
+No change to the constant.
+
+### Test changes
+
+- `VerticalFill.test_floor_case_still_splits_symmetrically_with_no_clipping`:
+  **removed the bounded settling loop added in round 1.** Per the review's
+  must-fix #3: the loop is no longer needed — the very first
+  `_fill_pane()` call (from `_set_content_tab()`) now already returns
+  fully converged, confirmed by 5 back-to-back runs. Its removal, not its
+  continued necessity, is the evidence this fix addressed the actual race
+  rather than papering over it again.
+- Added `VerticalFill.test_floor_case_still_splits_symmetrically_with_no_clipping_reverse_order`
+  and `WindowMinimumHeight.test_tallest_pane_still_fits_at_the_floor_reverse_order`:
+  order B (`_set_content_tab("clicking")` before `_select("minecraft")`)
+  coverage for both the symmetric-split invariant and the floor-fit
+  invariant, per the review's must-fix #2. The floor-fit reverse-order test
+  additionally asserts both spacers stay mapped, directly targeting the
+  packer-gives-up-on-a-widget symptom the review actually observed (a
+  `natural <= winfo_height()` check alone would not have caught an
+  *unmapped* spacer).
+- `card()`'s new `on_settle` parameter required updating
+  `ReentrantAppearanceChangeDuringRebuild.test_appearance_change_fired_from_inside_a_rebuild_does_not_crash`'s
+  `patched_card` shim (`tests/test_ui.py`) to accept and pass through the
+  new keyword — a signature-ripple fix, not a logic change; caught
+  immediately by the full suite (`TypeError: ... got an unexpected keyword
+  argument 'on_settle'`) before any manual review was needed.
+
+### Verification run
+
+```
+DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .
+# Ran 291 tests (289 baseline + 2 new reverse-order tests) -- OK (skipped=5), run twice back-to-back.
+
+DISPLAY=:99 <venv>/bin/python -m unittest tests.test_ui.WindowMinimumHeight \
+    tests.test_ui.VerticalFill.test_floor_case_still_splits_symmetrically_with_no_clipping \
+    tests.test_ui.VerticalFill.test_floor_case_still_splits_symmetrically_with_no_clipping_reverse_order -v
+# 7/7 green, run 5x back-to-back for determinism.
+```
+
+Live-app verification (both click orders, 2-second settle, screenshots) is
+described above; no code change is required to re-run it, a throwaway
+script suffices (`screenshot_round2.py`, not committed).
+
+### Known limitations (round 2)
+
+- `on_settle` fires on every `_redraw()` for `eat_card`, including ones
+  triggered by an ordinary window resize while Minecraft/Clicking is
+  showing — each now makes one extra (idempotent) `_fill_pane()` call.
+  `_fill_pane()`'s own docstring already documents it as safe to call
+  repeatedly, including from a live resize drag; no measurable cost
+  observed (full suite runtime unchanged, ~57s before and after).
+- The nested `update_idletasks()` recursion this fix relies on to drain
+  `eat_card`'s settle steps within one synchronous call is bounded by how
+  many idle rounds Tk's own geometry manager needs to converge
+  `eat_card`'s height (observed: ~6, on this box) — not by an explicit
+  iteration cap. This is the same class of reentrancy `_fill_pane()`'s own
+  docstring already documents and tolerates elsewhere; not new risk
+  surface introduced by this fix.
+- Same cross-platform font-metrics caveat as round 1: verified on
+  Linux/Xvfb with a substituted font; the construction-true tests (not a
+  fixed pixel value) are what actually catches a platform where the
+  numbers differ, on whichever platform's CI run actually exposes it.

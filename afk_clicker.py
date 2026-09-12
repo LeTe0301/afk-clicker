@@ -1367,10 +1367,27 @@ def section(parent, text, s, top=14, action_factory=None):
     return row
 
 
-def card(parent, s):
+def card(parent, s, on_settle=None):
     """Borderless flat card: a canvas shell hosting a plain Frame via
     create_window -- the standard Tk technique for placing a real widget
-    tree inside a canvas-drawn shape."""
+    tree inside a canvas-drawn shape.
+
+    `on_settle`, if given, is called at the tail of every _redraw() --
+    i.e. every single time this card's shell actually finishes resizing to
+    a new real height, including from an idle callback serviced well after
+    whatever caller originally triggered it has already returned (G#28/
+    GH#48). This is how a card whose visibility toggles at runtime (the
+    Eating card, story #24 feature 4) notifies its owning pane to recompute
+    its fill spacers once the card's own height is actually final, instead
+    of the pane measuring a `natural` span against content that may still
+    be mid-resize -- toggling a child's pack state inside a
+    pack_propagate(False) pane produces no <Configure> on the pane itself
+    (Empirical grounding #2, _select()'s own comment), so nothing else ever
+    re-triggers that recompute once this card's own deferred growth lands.
+    Harmless for a card whose content never changes after construction
+    (every other call site): _redraw() converges to a fixed height quickly
+    and on_settle() calling _fill_pane() again is already idempotent (see
+    its own docstring)."""
     pad = int(CARD_PAD * s)        # inset between the shell's own edge and
                                     # inner's content -- CARD_INNER_W's
                                     # formula depends on this exact value.
@@ -1403,6 +1420,8 @@ def card(parent, s):
         shape_id = shell.create_rectangle(0, 0, w, h, fill=CARD, outline="")
         shell.tag_lower(shape_id)      # behind inner, so inner's own content
                                         # paints on top of the shell's fill.
+        if on_settle is not None:
+            on_settle()
 
     shell.bind("<Configure>", _redraw)
     inner.bind("<Configure>", _redraw)
@@ -2249,7 +2268,8 @@ class AfkAutoclicker:
         # tab (docs/design.md), still Minecraft-only and conditionally
         # shown by _select() exactly as today.
         self.eat_section = section(self.clicking_pane, "Eating", s)
-        self.eat_card_inner = card(self.clicking_pane, s)
+        self.eat_card_inner = card(self.clicking_pane, s,
+                                    on_settle=self._on_eat_card_settled)
         self.eat_card = self.eat_card_inner.master
         self.eat_mode = tk.StringVar(value="off")
         Segmented(self.eat_card_inner,
@@ -2475,6 +2495,32 @@ class AfkAutoclicker:
             return
         self._settings_open = True
         self._rebuild_ui()
+
+    def _on_eat_card_settled(self):
+        """card()'s on_settle callback for eat_card (story #24 feature 4 /
+        G#28 GH#48): re-run _fill_pane() for the clicking pane every time
+        the Eating card's own shell actually finishes resizing, closing the
+        reentrancy gap _select()/_set_content_tab()'s own explicit
+        _fill_pane() calls leave open -- they can run before eat_card's
+        <Configure>-triggered _redraw() has settled to the card's real
+        final height, so the `natural` they measure can be stale-too-small
+        (see docs/implementation.md's round-2 section for the traced
+        mechanism). Whatever the stale call wrote gets overwritten here
+        with the correct split once the true height is known, instead of
+        depending on how many nested update_idletasks() passes happen to
+        land inside one synchronous call.
+
+        Two guards, both required: `_pane_fills` doesn't have "clicking"
+        yet the first time this fires (card()'s own unconditional initial
+        _redraw() call happens before _build_content() populates
+        `_pane_fills`, see its call site) -- `.get()` makes that a no-op
+        instead of a KeyError. And this must never touch the pane while
+        Clicking isn't the active tab: reading a hidden pane's
+        winfo_height() is the exact unmapped-widget hazard this story has
+        hit before (_select()'s own tail carries the identical guard)."""
+        fill = self._pane_fills.get("clicking")
+        if fill is not None and self._content_tab == "clicking":
+            _fill_pane(*fill)
 
     def _set_content_tab(self, value):
         """Toggle which game-page pane is packed. Both panes are always
