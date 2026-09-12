@@ -1678,26 +1678,27 @@ class AfkAutoclicker:
         # size the layout was tuned at, so nothing clips.
         self._apply_minsize()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
-        # bound once, here -- NOT inside _build_ui(): root itself survives
-        # every rebuild (only its *children* are destroyed), and this tag
-        # ("all") is interpreter-wide -- it already fires for every widget
-        # in every tree, including a rebuilt one and any future tab this
-        # grows. Re-issuing it inside _build_ui()/_rebuild_ui() would be a
-        # pointless duplicate binding on that same tag for a root that
-        # never goes away (see #18).
-        #
-        # bind_all's own funcid is kept (on_close() releases it) because
-        # bind_all registers its Tcl command with needcleanup=0 -- unlike a
-        # plain widget bind(), destroying root does not release it. Left
-        # alone, the registered command -- and the bound method it wraps,
-        # and everything that bound method's self (this whole UI, every
-        # tkinter.Variable it owns) reaches -- stays referenced past
-        # on_close()/root.destroy(). Whichever thread eventually is the one
-        # to finally drop that reference is not necessarily the main one,
-        # which is how a stale Variable ends up finalized off the main
-        # thread and aborts the interpreter ("Tcl_AsyncDelete: async
-        # handler deleted by the wrong thread").
-        self._button1_all_funcid = root.bind_all("<Button-1>", self._maybe_drop_focus)
+        root.bind_all("<Button-1>", self._maybe_drop_focus)  # bound once, here --
+            # NOT inside _build_ui(): root itself survives every rebuild
+            # (only its *children* are destroyed), and this tag ("all") is
+            # interpreter-wide -- it already fires for every widget in every
+            # tree, including a rebuilt one and any future tab this grows.
+            # Re-issuing it inside _build_ui()/_rebuild_ui() would be a
+            # pointless duplicate binding on that same tag for a root that
+            # never goes away (see #18).
+            #
+            # An earlier version (G#27/ac-27, PR #47) kept this call's own
+            # funcid and released it explicitly in on_close() via
+            # unbind_all()+deletecommand(), reasoning that bind_all()'s
+            # needcleanup=0 registration otherwise outlives root.destroy().
+            # That reasoning still stands, but the explicit deletecommand()
+            # call -- run back-to-back with _forget_traces()'s trace_remove()
+            # sweep, right after cancelling a batch of after() jobs and right
+            # before root.destroy() -- is the prime suspect (see on_close()'s
+            # own comment) for a macOS-only interpreter abort
+            # (`Tcl_FindHashEntry on deleted table`) reproduced twice in CI.
+            # Reverted here rather than guessed at further; the leak this
+            # was fixing is real and is back on backlog.md.
 
         self.mouse = Controller()
         self.hotkey = None
@@ -2110,11 +2111,13 @@ class AfkAutoclicker:
             # widget -- but a Variable is not a widget, so destroy() above
             # never touches the *outgoing* generation's traces (see
             # _forget_traces()'s own docstring). Called here, before they
-            # are replaced, rather than only in on_close(): on_close() can
-            # only ever reach the *current* generation's Variables through
-            # self, so without this, every earlier generation's traces
-            # (and everything they keep reachable) would never be released
-            # at all, no matter how many times the app is closed.
+            # are replaced, so every earlier generation's traces (and
+            # everything they keep reachable) are released across however
+            # many rebuilds happen. NOTE (G#27/ac-27 round 2, PR #47):
+            # on_close() no longer also calls this -- see its own comment --
+            # so the *last* generation's traces, still live when the app
+            # finally closes, are not released by anything. That residual
+            # window is back on backlog.md, open.
             self._forget_traces()
             self._build_ui(self.s)
         finally:
@@ -3115,16 +3118,17 @@ class AfkAutoclicker:
             # a stuck Xlib.display.Display() connection must not hang close.
             self._poll_thread.join(timeout=2.0)
         self._release_right()          # never leave a mouse button stuck down
-        # See the comment at the bind_all() call site: unbind_all() alone
-        # only clears the Tcl-level binding, not the registered command
-        # itself -- deletecommand() is what actually releases the reference
-        # this holds back to self.
-        try:
-            self.root.unbind_all("<Button-1>")
-            self.root.deletecommand(self._button1_all_funcid)
-        except tk.TclError:
-            pass
-        self._forget_traces()
+        # G#27/ac-27 round 2 (PR #47): this used to also release bind_all()'s
+        # funcid (unbind_all()+deletecommand()) and sweep every Variable's
+        # traces (self._forget_traces()) here, right after cancelling the
+        # jobs above and right before root.destroy() below. That combination
+        # reproduced a macOS-only interpreter abort twice in CI
+        # (`Tcl_FindHashEntry on deleted table`, exit 134) that could not be
+        # reproduced on Linux (55+ runs) or explained mechanically without
+        # macOS access, so both calls were reverted rather than guessed at
+        # further -- see docs/implementation.md's "Round 2" section and
+        # backlog.md. The reference leaks they were closing are real and are
+        # back on backlog.md, open.
         # self.stop() above (and any update still in flight from a worker)
         # queues through self._ui() rather than touching a widget directly,
         # and _drain_ui()'s own recurring after() job -- the only thing that

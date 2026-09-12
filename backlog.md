@@ -32,16 +32,25 @@ Bugs and residue:
       path in the app itself can reach this** — it needs an external caller holding a
       stale reference, which is why it has never surfaced in normal use or in the suite.
       Not a story #24 regression; it predates the story.
-      **Partially resolved by G#27/ac-27** (`AfkAutoclicker._forget_traces()`, called
-      from both `_rebuild_ui()` and `on_close()`): every trace on a Variable this UI
-      still owns is swept at both points, regardless of which widget registered it,
-      so `Segmented`/`TabBar`'s own un-removed traces stop leaking past a rebuild or a
-      close. The mid-life window this item originally described — something external
-      writing to the variable *between* a rebuild and the next close/rebuild, while a
-      superseded `Segmented`'s dangling trace is still live — is **not** addressed;
-      that needs the trace removed at rebuild time on the *old* widget specifically,
-      which `_forget_traces()` deliberately does not attempt (see its own docstring
-      and docs/history/ac-27-implementation.md). Left open, narrowed to that window.
+      **Partially resolved by G#27/ac-27** (`AfkAutoclicker._forget_traces()`): every
+      trace on a Variable this UI still owns is swept on each rebuild, regardless of
+      which widget registered it, so `Segmented`/`TabBar`'s own un-removed traces stop
+      accumulating across repeated rebuilds. The mid-life window this item originally
+      described — something external writing to the variable *between* a rebuild and
+      the next close/rebuild, while a superseded `Segmented`'s dangling trace is still
+      live — is **not** addressed; that needs the trace removed at rebuild time on the
+      *old* widget specifically, which `_forget_traces()` deliberately does not
+      attempt (see its own docstring and docs/history/ac-27-implementation.md).
+      **Round 2 (PR #47) narrowed this further**: `_forget_traces()` was originally
+      also called from `on_close()`, so the *final* generation's traces (whatever is
+      live when the app actually closes) were swept too — that `on_close()` call was
+      reverted after it was implicated (alongside the `bind_all` deletecommand below)
+      in a macOS-only interpreter abort reproduced twice in CI
+      (`Tcl_FindHashEntry on deleted table`, exit 134); see
+      docs/implementation.md's "Round 2" section. So as of `ac-27`, only the
+      rebuild-to-rebuild accumulation is fixed; the final generation's traces (a
+      one-time leak, on every close, not a per-rebuild accumulation) are open again,
+      same as before this ticket. Left open, narrowed to both windows.
 - [ ] G#5 / GH#7 — Applying a hotkey crashes the process on macOS without Accessibility permission.
 - [ ] G#8 / GH#10 — `registered_hotkey` claims a listener that is not running.
 - [ ] G#7 / GH#9 — `from_json` checks shape but not vocabulary.
@@ -65,19 +74,32 @@ Bugs and residue:
       `Variable.__del__` running off the main thread, because the underlying
       interpreter (and everything reachable from it — every Variable, every widget)
       was still referenced, past `on_close()`, by something the test/app never
-      released. Found and fixed three concrete, previously-unknown instances of
-      exactly this: `root.bind_all()`'s own command (`needcleanup=0`, `destroy()`
-      never releases it — new: `_button1_all_funcid` + explicit `deletecommand()` in
-      `on_close()`), every un-removed variable trace surviving a rebuild (new:
-      `_forget_traces()`, see the `Segmented` item above), and an item left sitting in
-      `self._ui_queue` after `on_close()`'s own `self.stop()` call queues one with
-      nothing left to drain it (new: an explicit drain at the end of `on_close()`).
-      `_poll_games()`'s scan thread was also holding `self` for the full duration of
-      its `detect_running()` call (which can itself stall — seen directly, ~1 scan in
-      a couple hundred, stuck opening its Xlib connection); it now holds only the
-      plain `profiles` list across that call, and is tracked/joined (bounded, 2s) by
-      `on_close()`.
-      **Not fully resolved.** After all four fixes, a full-suite run still reports
+      released. Found four concrete, previously-unknown instances of exactly this:
+      `root.bind_all()`'s own command (`needcleanup=0`, `destroy()` never releases
+      it), every un-removed variable trace surviving a rebuild (see the `Segmented`
+      item above), an item left sitting in `self._ui_queue` after `on_close()`'s own
+      `self.stop()` call queues one with nothing left to drain it, and
+      `_poll_games()`'s scan thread holding `self` for the full duration of its
+      `detect_running()` call (which can itself stall — seen directly, ~1 scan in a
+      couple hundred, stuck opening its Xlib connection).
+      **Round 2 (PR #47): fixing the first three on `on_close()` itself introduced a
+      new, worse failure — a macOS-only interpreter abort** (`Tcl_FindHashEntry on
+      deleted table`, exit 134) reproduced twice in macOS CI, in a test `main` passes
+      cleanly, that could not be reproduced on Linux (60+ runs across three parties)
+      or root-caused without macOS access (see docs/implementation.md's "Round 2").
+      Of the three, only the `_ui_queue` drain (pure Python, no Tcl call) was kept in
+      `on_close()`. Reverted, and open again: `bind_all()`'s own command is not
+      released by `on_close()` (the `_button1_all_funcid` capture was reverted too,
+      since nothing else used it); `_forget_traces()` is no longer called from
+      `on_close()` either, so the *final* generation's variable traces (live at the
+      moment the app actually closes) are not swept by anything, though the
+      `_rebuild_ui()` call to the same function — which fixes traces accumulating
+      *across* rebuilds — was kept, since the review that found the abort explicitly
+      did not implicate it (the crashing test does zero rebuilds; the multi-rebuild
+      test that exercises this call site three times passed clean on the same macOS
+      CI run). `_poll_games()`'s fix (and its `on_close()` join) is pure Python and
+      unaffected by round 2 — still fixed.
+      **Not fully resolved even before round 2.** After the original four fixes, a full-suite run still reports
       the *same* off-main-thread `Variable.__del__` at roughly the same frequency
       (~55 of ~284 tests) as before — traced to a real, reproducible interaction
       where a *preceding* test that goes through `UITestCase.restart()` leaves some
