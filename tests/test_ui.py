@@ -659,8 +659,30 @@ class NumBoxFocus(UITestCase):
         # actually takes focus, within the timeout, the assertEqual still
         # reports a genuine regression.
         self.pump_until(lambda: numbox.entry.winfo_viewable(), timeout=1.0)
-        numbox.entry.focus_set()
-        self.pump_until(lambda: self.root.focus_get() == numbox.entry, timeout=1.0)
+        # Pumping the loop while waiting above gives this Xvfb's other Tk-
+        # owning client (this suite's own stress-test harness runs a second
+        # Tk process against the same shared, window-manager-less display)
+        # a window in which the real X input-focus ownership setUp's own
+        # focus_force() granted (see its comment) can be silently dropped --
+        # self.root.focus_get() simply reads None afterwards, with no event
+        # this process can observe. focus_set() cannot reacquire that: it
+        # only moves focus *within* an app that already owns it. Calling
+        # focus_force() on the *entry itself* both reacquires real ownership
+        # and targets the right widget in one step -- forcing it onto root
+        # first and then focus_set()-ing the entry is not equivalent: if
+        # root still happens to hold real focus (ownership was never lost,
+        # only the entry-level record), forcing root again is a no-op at
+        # the X level, no fresh FocusIn ever fires, and the entry never
+        # gets forwarded to. A single force can still lose a race to the
+        # other client re-stealing focus in the same narrow window, so this
+        # retries rather than asserting on one attempt -- each attempt is
+        # cheap and the loop exits the instant one lands.
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            numbox.entry.focus_force()
+            self.pump_until(lambda: self.root.focus_get() == numbox.entry, timeout=0.5)
+            if self.root.focus_get() == numbox.entry:
+                break
         self.assertEqual(self.root.focus_get(), numbox.entry,
                          "setup failed to focus the entry")
 
