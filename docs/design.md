@@ -52,7 +52,8 @@ COLLAPSED_BADGE_D = 28        # badge diameter at s=1 (18px at worst-case
 self._rail_collapsed = False   # session-only, re-derived at top of _build_ui()
 ```
 
-**New bound method** (placed after the `bind_all` call, around line 1560-1607):
+**New bound method** (placed after `__init__`'s first `self._build_ui(s)`
+call returns, not before it — see the PR #41 round 3 correction below):
 
 ```python
 self.root.bind("<Configure>", self._on_root_resize)
@@ -77,6 +78,24 @@ def _on_root_resize(self, event):
     collapsed = event.width < int(RAIL_COLLAPSE_THRESHOLD * self.s)
     if collapsed != self._rail_collapsed:
         self._rail_collapsed = collapsed
+        self._request_rebuild()
+```
+
+**Correction (PR #41 round 3):** the guard above is real and load-bearing,
+but it is not sufficient by itself. It filters *spurious* `<Configure>`
+events bubbling up from descendant widgets during construction; it does
+nothing to stop a *genuine*, root-targeted `<Configure>` — the kind only a
+real window manager generates, after mapping, and which Xvfb (no WM) never
+produces. Binding `<Configure>` before `__init__`'s first `_build_ui(s)`
+call finishes left exactly that door open: a genuine root event lands mid-
+construction, passes the guard (it *is* `self.root`), and calls
+`_request_rebuild()` before `self.click_ms` and other Clicking-tab
+attributes exist — an `AttributeError` inside the reentrant rebuild that
+`card()`'s own `update_idletasks()` triggers (confirmed on macOS CI, never
+reproducible under Xvfb). The design that actually closes this: bind
+`<Configure>` only *after* the first `_build_ui(s)` call has returned (see
+`docs/spec.md`'s matching correction), so no root-targeted event —
+spurious or genuine — can reach the handler until construction is done.
         self._request_rebuild()
 ```
 
@@ -412,7 +431,7 @@ All constants scale uniformly by `self.s`. There are no special cases or breakpo
 
 1. **Add three new constants** after line 176 (with existing sidebar/content constants).
 2. **Add `self._rail_collapsed = False`** in `__init__` around line 1587.
-3. **Add `self.root.bind("<Configure>", self._on_root_resize)`** in `__init__` after line 1607.
+3. **Add `self.root.bind("<Configure>", self._on_root_resize)`** in `__init__`, after the first `self._build_ui(s)` call returns — not earlier (PR #41 round 3 correction: binding it before that call leaves a genuine, WM-generated root `<Configure>` free to land mid-construction and crash, a hazard the `event.widget is not self.root` guard alone does not cover).
 4. **Add `_on_root_resize()` method** around line 1620 (after `_request_rebuild()`).
 5. **Modify `_build_ui()`:**
    - Top: add `if self.root.winfo_ismapped(): self._rail_collapsed = ...` check.

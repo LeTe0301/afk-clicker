@@ -286,11 +286,15 @@ actually changes, which a UI-scale change alone does not guarantee — see
 the window is *currently smaller* than the new floor).
 
 **Writer 2 — the debounced `<Configure>` handler**, bound once in `__init__`,
-after `self._rebuild_wanted = False` (`afk_clicker.py:1607`) — i.e. after
-every attribute `_request_rebuild()` reads exists, following the exact
-precedent already set for `root.bind_all("<Button-1>", self._maybe_drop_focus)`
-(`:1560`, "bound once, here — NOT inside `_build_ui()`: root itself survives
-every rebuild"):
+**after the first `self._build_ui(s)` call returns** (PR #41 round 3
+correction — see below for why it moved there, not merely after
+`self._rebuild_wanted = False` as originally specified) — i.e. only once
+every attribute `_request_rebuild()`/`_on_root_resize()` reads exists *and*
+the app's first full build has actually finished, following the same
+general precedent already set for `root.bind_all("<Button-1>",
+self._maybe_drop_focus)` (`:1560`, "bound once, here — NOT inside
+`_build_ui()`: root itself survives every rebuild") of binding root-lifetime
+handlers once in `__init__`, not on every rebuild:
 
 ```python
 self.root.bind("<Configure>", self._on_root_resize)
@@ -316,9 +320,7 @@ def _on_root_resize(self, event):
     descendant's own <Configure> too, not just root's. Without this guard,
     construction alone drives ~100+ calls here for child Frames/Canvases,
     each carrying its own (much smaller) width, well before `self.s` and
-    the rest of `__init__`'s state exist -- a real crash
-    (`AttributeError: 'AfkAutoclicker' object has no attribute 'click_ms'`),
-    not a theoretical one.
+    the rest of `__init__`'s state exist.
     """
     if event.widget is not self.root:
         return
@@ -327,6 +329,31 @@ def _on_root_resize(self, event):
         self._rail_collapsed = collapsed
         self._request_rebuild()
 ```
+
+**Correction (PR #41 round 3):** the `event.widget is not self.root` guard
+above is real and load-bearing for what it targets — spurious `<Configure>`
+noise bubbling up from descendant widgets, per its own docstring — but an
+earlier version of this spec incorrectly treated it as the *complete* fix
+for the `AttributeError: 'AfkAutoclicker' object has no attribute
+'click_ms'` crash. It is not: the guard answers "which widget sent this
+event," not "has construction finished yet," and those are different
+questions. A **genuine**, root-targeted `<Configure>` — the kind only a
+real window manager generates, after the toplevel is mapped, and which
+Xvfb (no WM) structurally never produces — *passes* this guard (it
+legitimately is `self.root`) just as easily as a real post-launch resize
+does. If `<Configure>` is bound before `__init__`'s first `_build_ui(s)`
+call has returned, such an event can land mid-construction, call
+`_request_rebuild()`, and get reentrantly serviced by `card()`'s own
+`inner.update_idletasks()` (see `_rebuild_ui()`'s own docstring for that
+mechanism) before `self.click_ms` and the rest of the Clicking tab have
+been built — producing exactly the crash above. This is unreproducible
+under Xvfb (no WM ever generates the triggering event) and was only caught
+by macOS CI. The actual, sufficient fix is **Writer 2's bind timing**,
+corrected above: bind `<Configure>` only after the first `_build_ui(s)`
+call returns, so no root-targeted `<Configure>` — spurious or genuine —
+can reach the handler until construction has actually finished. The guard
+stays; it was never wrong for the hazard it targets, only incomplete
+against this second, timing-shaped one.
 
 Reusing `_request_rebuild()` verbatim is what makes this safe against every
 hazard `_rebuild_ui()`'s own docstring already documents and defends against:

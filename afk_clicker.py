@@ -176,9 +176,11 @@ TAB_PAD_BOTTOM = 6    # space between text baseline and the underline
 TAB_UNDERLINE_H = 2   # active-tab underline thickness
 
 SIDEBAR_RAIL_W = 64   # collapsed rail width (story #24 feature 3) -- room for
-    # a centered COLLAPSED_BADGE_D badge plus symmetric margin either side
-    # (64 - 28 = 36, 18px each side), narrower than any real game name on
-    # purpose.
+    # a centered COLLAPSED_BADGE_D badge plus symmetric margin either side.
+    # GameItem/SettingsItem actually paint their collapsed canvas at
+    # SIDEBAR_RAIL_W - 16 = 48px wide, not the full 64, so the real margin
+    # is (48 - 28) / 2 = 10px each side, narrower than any real game name
+    # on purpose.
 RAIL_COLLAPSE_THRESHOLD = SIDEBAR_W + 1 + CONTENT_W
     # Collapse exactly at today's old expanded-only minimum width -- the
     # number that used to be the *entire* floor before this feature. Below
@@ -1689,12 +1691,6 @@ class AfkAutoclicker:
         self._rebuild_wanted = False   # a rebuild was requested while
                                         # _rebuilding was True; _rebuild_ui()
                                         # schedules exactly one follow-up
-        self.root.bind("<Configure>", self._on_root_resize)   # bound once,
-            # here -- NOT inside _build_ui(): root itself survives every
-            # rebuild, same precedent as the bind_all("<Button-1>", ...) call
-            # above. Placed after every attribute _request_rebuild() reads
-            # already exists (story #24 feature 3).
-
         self.profiles = list(PROFILES)
         for saved in self.store.data.get("games", {}).values():
             meta = saved.get("_profile")
@@ -1707,6 +1703,36 @@ class AfkAutoclicker:
             self.current = "global"
 
         self._build_ui(s)
+
+        self.root.bind("<Configure>", self._on_root_resize)   # bound only
+            # AFTER the first _build_ui() call above has fully returned, not
+            # before it (story #24 feature 3, PR #41 round 3): a real window
+            # manager (macOS's WindowServer, Windows' own) can legitimately
+            # reposition/resize the still-unmapped toplevel between Tk()/
+            # geometry() and the window actually appearing on screen, firing
+            # a genuine, root-targeted <Configure> mid-construction -- one
+            # that PASSES _on_root_resize()'s `event.widget is self.root`
+            # guard, because it isn't the spurious-descendant-widget case
+            # that guard exists to filter (see _on_root_resize()'s own
+            # docstring). If that event crosses RAIL_COLLAPSE_THRESHOLD
+            # before this bind exists, it calls _request_rebuild(), which
+            # schedules after_idle(self._rebuild_ui) -- and the very next
+            # card()'s _redraw() (still inside this SAME first _build_ui()
+            # call, see card()) reentrantly services that idle job via
+            # update_idletasks(), running _rebuild_ui() -> _persist() before
+            # attributes _build_ui() itself hasn't assigned yet exist (e.g.
+            # self.click_ms, assigned inside the Clicking tab further down
+            # this very call) -- AttributeError. Xvfb never reproduces this
+            # (no window manager, so no post-map root <Configure> is ever
+            # generated during construction), which is why this shipped
+            # green on Linux and crashed on macOS CI. Binding here instead
+            # of before _build_ui(s) above means no genuine root <Configure>
+            # can reach _on_root_resize() until construction has already
+            # finished -- the same guarantee _rebuild_ui()'s own
+            # self._rebuilding flag gives a rebuild in progress, just for
+            # the one call that flag was never wrapped around (see
+            # _rebuild_ui()'s docstring: it only wraps its own body, not
+            # this first, direct call from here).
 
         # Registers an OS-level global hotkey listener -- runs once, after
         # the first _build_ui() call, never inside _build_ui()/_rebuild_ui()

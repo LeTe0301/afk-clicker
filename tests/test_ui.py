@@ -940,18 +940,27 @@ class RailCollapse(UITestCase):
         self.assertFalse(self.ui._rail_collapsed)
 
         before_w = self.root.winfo_width()
-        before_h = self.root.winfo_height()
         self.ui._apply_ui_scale("130")
         self.root.update()
         # Fail closed: assert the geometry this test relies on to isolate
         # the rederivation actually held, rather than let a collapse flip
         # pass for the wrong reason (the window itself drifting past the
         # new threshold instead of _build_ui()'s rederivation doing its job).
+        # Width only, not height (PR #41 round 3): RAIL_COLLAPSE_THRESHOLD
+        # and _build_ui()'s rederivation are width-only properties -- height
+        # plays no role in the collapse decision anywhere in this feature.
+        # A legitimate, expected _apply_minsize(grow_only=True) height-only
+        # adjustment between UI-scale steps is orthogonal to what this test
+        # proves and must not fail it; real per-platform window-manager/DPI
+        # rounding on that axis was observed to overshoot the previous flat
+        # +100px height headroom by wildly different, unpredictable amounts
+        # on Windows and macOS (no principled bigger constant exists), while
+        # width -- the one axis this test actually needs held still -- is
+        # exactly what fixed_w/fixed_h above were chosen to keep put.
         self.assertEqual(
-            (self.root.winfo_width(), self.root.winfo_height()),
-            (before_w, before_h),
-            "root's geometry moved during the scale change -- this test "
-            "no longer isolates a scale-only rederivation")
+            self.root.winfo_width(), before_w,
+            "root's width moved during the scale change -- this test no "
+            "longer isolates a scale-only rederivation")
         self.assertTrue(self.ui._rail_collapsed)
         self.assertEqual(self.ui.side.winfo_width(),
                          int(app.SIDEBAR_RAIL_W * self.ui.s))
