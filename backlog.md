@@ -178,23 +178,19 @@ Bugs and residue:
       custom height is what makes it bite.
 
 Features:
-- [ ] **Should the window's minimum height shrink?** `minh = 690 * s`
-      (`_apply_minsize`) was tuned by #14 for the old *single combined page* and
-      never revisited after PR #40 split that page into tabs. Measured on `main`
-      without feature 4: even the tallest pane (Clicking + Eating) carries **~148px
-      of slack at the minimum window size** — pane 528, content span 380 — and the
-      single-card panes (Hotkey, Appearance, Updates) carry far more. Feature 4
-      centres that space, halving the largest single band from ~630px to ~315px on a
-      tall window, but 315px is still 44% of the pane: centring treats the symptom.
-      **At the actual window floor it is worse than the tall-window figure suggests** —
-      the story's end-to-end pass measured the Hotkey pane at 409px of 527px, 78%
-      empty. The tall-window 44% is the flattering case, not the typical one.
-      A smaller floor, or one that scales with the tallest tab's actual content,
-      would attack the cause. Raised independently by both the ux-designer and the
-      developer during feature 4 and confirmed by two reviewers, so it is real and
-      not a matter of taste. Out of scope for the story; needs a product decision
-      from the owner before anyone specs it.
-- [ ] G#22 / GH#33 — Warn when the Minecraft interval minus jitter drops below 650 ms.
+Resolved 2026-09-12 (G#28 / GH#48, PR #49, `8ac6e35`): the window height floor was
+`690 * s`, sized for the single combined page that predated tabs. Now
+`WINDOW_MIN_H = 620`, derived from the *tallest* pane's real content span — the
+binding constraint, since nothing here scrolls and a lower floor puts Eating's
+lower rows out of reach. Took five rounds; `docs/history/ac-28-*` records why.
+Two follow-ups from its review are below.
+
+- [ ] **`_rebuild_ui()` does not cancel `_pane_fill_after_id`** the way it cancels
+      `_rebuild_after_id` immediately above. Verified empirically harmless today —
+      a pending pane fill landing across a rebuild does no damage — but it is an
+      undocumented invariant rather than a guaranteed one, and the coalescing
+      machinery it belongs to is new (PR #49 round 5). Worth either cancelling it
+      for symmetry or writing down why it does not need cancelling.
 - [ ] G#13 / GH#15 — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
 - [ ] G#12 / GH#14 — Calibration suite for the review agent. Rebase its branch first.
 
