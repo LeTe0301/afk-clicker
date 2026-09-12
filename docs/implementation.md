@@ -245,3 +245,105 @@ genuine behavioral difference to protect, not a manufactured one.
 Full regression after restoring the guard: `VerticalFill` 7/7 pass, full
 suite `Ran 276 tests ... OK (skipped=5)`, exit 0. `afk_clicker.py` is
 unmodified in the final diff — only `tests/test_ui.py` changed.
+
+## Round 3: fixing the assertion that assumed geometry() is a guarantee
+
+PR #42 was blocked by a red Windows CI job (base `23e6658` green on all
+three platforms, so the failure belongs to this diff):
+
+```
+FAIL: tests.test_ui.VerticalFill.test_live_resize_drag_updates_margin_without_a_rebuild
+AssertionError: 222 not greater than 249
+```
+
+**Why the old assertion was unsound.** The test captured
+`before = top.winfo_height()` at the pane's default launch height, drove
+`root.geometry()` through four heights (700/850/750/900, scaled by `s`),
+then asserted `top.winfo_height() > before`. That assumes every one of
+those `geometry()` calls was honoured at its literal requested size.
+`root.geometry()` is a *request* to the window manager, not a contract —
+on the Windows CI runners the WM clamped the final requested size to
+something shorter than the height `before` had been measured at, so the
+pane's real leftover space legitimately shrank and the top spacer
+legitimately got smaller. The test was asserting a direction the platform
+never promised, not a bug in `_fill_pane()`. This exact hazard is called
+out by name in this feature's own `docs/spec.md` open questions, and this
+same test file already has precedent for it: another test in this suite
+(`test_a_manually_enlarged_window_is_never_shrunk_by_a_scale_change`)
+self-skips on Windows for the identical clamped-runner reason.
+
+**The fix.** Rewrote the final assertion to be true-by-construction against
+the pane's actually-granted geometry after the drag, following the exact
+pattern already used by this test's own two siblings in the same
+`VerticalFill` class —
+`test_top_and_bottom_spacers_sum_to_the_real_leftover_space` and
+`test_floor_case_still_splits_symmetrically_with_no_clipping`: measure
+`natural` as the real bottom-minus-top span of the pane's mapped non-spacer
+children (winfo_y()/winfo_height()-based, matching how `_fill_pane()`
+itself measures it, not a reqheight sum), take
+`extra = max(0, pane.winfo_height() - natural)`, and assert
+`top.winfo_height() + bottom.winfo_height() == max(2, extra)`. The
+`max(2, extra)` floor (not a bare `extra`) matches `_fill_pane()`'s own
+`max(1, ...)` floor on each spacer individually — verified against
+`afk_clicker.py:1470-1482`: for `extra >= 2`,
+`int(extra * FILL_TOP_SHARE) + (extra - int(extra * FILL_TOP_SHARE))`
+always sums back to `extra` exactly (`FILL_TOP_SHARE = 0.5`); only when
+`extra` is `0` or `1` does the per-spacer `max(1, ...)` floor push the sum
+up to `2`. This holds on any platform, any screen, and any WM clamping
+behavior, because it never assumes a `geometry()` request was granted at a
+particular size — only that whatever size *was* granted is measured
+directly.
+
+**What was deliberately kept intact**, per the fix instructions:
+- The `self.assertEqual(len(calls), 0)` invariant — that this feature never
+  triggers `_rebuild_ui()` — is unchanged. It's platform-independent (the
+  rebuild trigger is `RAIL_COLLAPSE_THRESHOLD`, a width comparison,
+  untouched by a height-only resize loop) and is the more important
+  invariant this test carries.
+- The four-iteration `root.geometry()` loop is unchanged: the test still
+  drives several genuine `<Configure>` events on a mapped pane, i.e. it's
+  still a live-resize-drag test, not reduced to a single `_tall_window()`
+  call. The rewrite only changes what's asserted about the *final* state,
+  not how that state is reached.
+
+**Verified in this session** (`DISPLAY=:99`, venv python at
+`.../scratchpad/venv/bin/python`, working tree at
+`/home/dev/projects/.worktrees/afk-clicker/ac-24`):
+- The single test passes:
+  `unittest tests.test_ui.VerticalFill.test_live_resize_drag_updates_margin_without_a_rebuild`
+  → `Ran 1 test ... OK`.
+- Full suite regression: `python -m unittest discover -v` from the project
+  root → `Ran 276 tests in 70.292s / OK (skipped=5)`, matching the known
+  baseline exactly.
+- **The clamped-window case itself**, the one that only a constrained CI
+  runner exposes and that Linux never naturally hits: a throwaway probe
+  script (run from the scratchpad, never added to the tree) reused this
+  test's own setup to run the same four-step growth loop, capture `before`
+  and the post-loop grown height, and then issue one more `geometry()`
+  request for a height *smaller* than `before` — on Xvfb, unlike a real
+  WM, that request is honoured outright, which stands in directly for "the
+  WM clamped it." Measured output:
+  ```
+  before: 206  after growth: 316
+  after shrink request: 206  vs before: 206
+  pane height: 528  natural: 115  extra: 413
+  expected sum: 413  actual sum: 413
+  old-style assertGreater(after_shrink, before) would assert: False
+  ```
+  This reproduces the exact failure shape from the Windows CI log: the
+  final granted height is not greater than `before`, so the *old*
+  assertion would have raised `AssertionError` here too, while the new
+  true-by-construction assertion holds (`413 == 413`) regardless of which
+  request in the loop actually landed.
+- **What only CI can confirm**: that the real Windows WM on the GitHub
+  Actions runner reaches this same clamped state on its own during the
+  actual four-step drag (rather than the probe's synthetic "request a
+  smaller size directly" stand-in), and that the rewritten assertion is
+  green there. Xvfb has no window manager to clamp anything by itself
+  (`_tall_window()`'s and this test's requests are always honoured
+  verbatim on `:99`/`:98`), so the clamping behavior itself is not
+  reproducible locally — only the assertion's correctness *given* a
+  clamped result is.
+- `afk_clicker.py` is unmodified — only `tests/test_ui.py` changed, per
+  the fix instructions (product code was never in scope for this round;
+  the failure was a test-authoring bug, not a feature bug).

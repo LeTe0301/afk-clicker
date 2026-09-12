@@ -1140,6 +1140,21 @@ class VerticalFill(UITestCase):
         # _rebuild_ui()'s coalescing machinery: several real resizes (each
         # firing a genuine <Configure> on the mapped Hotkey pane) update the
         # spacer heights, but never trigger a rebuild.
+        #
+        # The margin assertion is checked true-by-construction against the
+        # pane's own actually-granted geometry after the drag, the same way
+        # test_top_and_bottom_spacers_sum_to_the_real_leftover_space and
+        # test_floor_case_still_splits_symmetrically_with_no_clipping above
+        # measure it -- not directionally against a "before" baseline.
+        # geometry() is a request, not a guarantee: on Windows CI's
+        # constrained runners the WM clamped the final requested height
+        # below the height "before" was captured at, so the spacer
+        # legitimately shrank and an assertGreater(after, before) failed for
+        # a reason that had nothing to do with this feature. The resize
+        # loop itself still fires several genuine <Configure> events on a
+        # mapped pane -- this is still a live-resize-drag test -- it is
+        # only the final assertion that no longer assumes any one of those
+        # requests landed at its literal requested size.
         s = self.ui.s
         default_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * s)
         calls = []
@@ -1148,12 +1163,17 @@ class VerticalFill(UITestCase):
             calls.append(1)
             original()
         self.ui._rebuild_ui = spy
-        _, top, _ = self.ui._pane_fills["hotkey"]
-        before = top.winfo_height()
+        pane, top, bottom = self.ui._pane_fills["hotkey"]
         for h in (700, 850, 750, 900):
             self.root.geometry(f"{default_w}x{int(h * s)}")
             self.root.update()
-        self.assertGreater(top.winfo_height(), before)
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        extra = max(0, pane.winfo_height() - natural)
+        self.assertEqual(top.winfo_height() + bottom.winfo_height(),
+                         max(2, extra))
         self.assertEqual(len(calls), 0)
 
 
