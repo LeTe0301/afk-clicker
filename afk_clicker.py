@@ -18,7 +18,6 @@ Prebuilt binaries for Windows, Linux and macOS: see the Releases page.
 
 import hashlib
 import json
-import math
 import os
 import queue
 import shutil
@@ -138,9 +137,10 @@ def resolve_appearance(value, cached_os_theme=None):
     return cached_os_theme if cached_os_theme is not None else detect_os_theme()
 
 
-PILL_R = 999      # self-clamps to height/2 via round_rect's own min() -- a
-                   # true capsule regardless of the widget's exact height.
-CARD_R = 12        # cards and sidebar rows (mock's --rc / --rb at 12px)
+CARD_PAD = 12      # cards and sidebar rows' own content inset (mock's
+                   # --rc / --rb was 12px when this doubled as a corner
+                   # radius; story #24 feature 5 dropped rounding, but the
+                   # inset itself is still real padding, not radius).
 
 # Rotten flesh is 1.6 s; leave headroom so a lagged tick still finishes the eat.
 DEFAULT_CLICK_MS = 650      # 12 ticks (600 ms) is Java's full sword-sweep charge; +1 tick covers click/tick quantisation jitter
@@ -160,9 +160,9 @@ else:
 SIDEBAR_W = 208
 CONTENT_W = 452
 CONTENT_PAD = 16   # _build_content's own outer padx/pady around body
-CARD_INNER_W = CONTENT_W - 2 * CONTENT_PAD - 2 * CARD_R    # a full-width
+CARD_INNER_W = CONTENT_W - 2 * CONTENT_PAD - 2 * CARD_PAD    # a full-width
     # card's real inner width: body sits CONTENT_PAD in from CONTENT_W on
-    # each side before the card's own CARD_R padding starts, so a control
+    # each side before the card's own CARD_PAD padding starts, so a control
     # sized off CONTENT_W alone (skipping the body inset) overruns the card.
 ROW_LABEL_W = 140    # widest existing Row label ("Mouse button"/"Random
     # jitter", ~88px measured @ s=1) plus headroom for font-metric
@@ -1152,45 +1152,6 @@ def foreground_title():
     return (titles[0] if sys.platform == "win32" else titles[-1]) if titles else None
 
 
-def _arc_points(cx, cy, r, a0, a1, steps):
-    """steps+1 points walking the quarter circle from angle a0 to a1 (degrees,
-    0 = +x, 90 = +y -- the canvas' own down-is-positive axis)."""
-    pts = []
-    for i in range(steps + 1):
-        angle = math.radians(a0 + (a1 - a0) * i / steps)
-        pts.extend((cx + r * math.cos(angle), cy + r * math.sin(angle)))
-    return pts
-
-
-def _round_rect_points(x1, y1, x2, y2, r, steps=10):
-    """Real corner geometry for a rounded rect, one vertex per arc step --
-    not the 12 control points of a smoothed spline, which only approaches
-    the radius it is given and never reaches it. Order starts where the
-    top-left corner meets the top edge and runs clockwise, so a caller that
-    only cares about that first vertex (e.g. Segmented._pill_pts, which
-    feeds this straight into canvas `coords`) sees the same point it always
-    has."""
-    if r <= 0:
-        return [x1, y1, x2, y1, x2, y2, x1, y2]
-    pts = [x1 + r, y1]
-    pts += _arc_points(x2 - r, y1 + r, r, -90, 0, steps)    # top-right
-    pts += _arc_points(x2 - r, y2 - r, r, 0, 90, steps)     # bottom-right
-    pts += _arc_points(x1 + r, y2 - r, r, 90, 180, steps)   # bottom-left
-    pts += _arc_points(x1 + r, y1 + r, r, 180, 270, steps)  # top-left
-    return pts
-
-
-def round_rect(cv, x1, y1, x2, y2, r, **kw):
-    """Tk has no rounded rectangle; this walks the real arc at each corner
-    and draws a plain (non-smoothed) polygon through those points, so the
-    drawn radius is the radius asked for -- a smoothed polygon whose control
-    points merely sit at the corners only ever approximates it, and at
-    r = h/2 never reaches a true semicircle at all."""
-    r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
-    pts = _round_rect_points(x1, y1, x2, y2, r)
-    return cv.create_polygon(pts, smooth=False, **kw)
-
-
 class Button(tk.Canvas):
     """Canvas button, because tk.Button cannot do rounded corners or hover."""
 
@@ -1202,7 +1163,7 @@ class Button(tk.Canvas):
         self._enabled = True
         self.s = s
         w, h = int(width * s), int(height * s)
-        self.shape = round_rect(self, 1, 1, w - 1, h - 1, PILL_R * s, fill=CARD, outline=LINE)
+        self.shape = self.create_rectangle(1, 1, w - 1, h - 1, fill=CARD, outline=LINE)
         self.label = self.create_text(w / 2, h / 2, text=text, fill=INK,
                                       font=("Segoe UI", int(9.5 * s), "bold"))
         self.bind("<Enter>", lambda e: self._paint(hover=True))
@@ -1249,10 +1210,10 @@ class Segmented(tk.Canvas):
         self.var = variable
         self.s = s
         self.w, self.h = int(width * s), int(height * s)
-        round_rect(self, 0, 0, self.w, self.h, PILL_R * s, fill=BG, outline=LINE)
+        self.create_rectangle(0, 0, self.w, self.h, fill=BG, outline=LINE)
         seg = self.w / len(options)
-        self.pill = round_rect(self, 2, 2, seg - 2, self.h - 2, PILL_R * s,
-                               fill=CARD_HI, outline="")
+        self.pill = self.create_rectangle(2, 2, seg - 2, self.h - 2,
+                                          fill=CARD_HI, outline="")
         self.texts = [
             self.create_text(seg * i + seg / 2, self.h / 2, text=lbl, fill=MUTED,
                              font=("Segoe UI", int(9 * s)))
@@ -1273,13 +1234,9 @@ class Segmented(tk.Canvas):
         except ValueError:
             idx = 0
         seg = self.w / len(self.options)
-        self.coords(self.pill, *self._pill_pts(seg * idx + 2, 2, seg * (idx + 1) - 2, self.h - 2))
+        self.coords(self.pill, seg * idx + 2, 2, seg * (idx + 1) - 2, self.h - 2)
         for i, item in enumerate(self.texts):
             self.itemconfig(item, fill=INK if i == idx else MUTED)
-
-    def _pill_pts(self, x1, y1, x2, y2):
-        r = min(PILL_R * self.s, (x2 - x1) / 2, (y2 - y1) / 2)
-        return _round_rect_points(x1, y1, x2, y2, r)
 
 
 class TabBar(tk.Canvas):
@@ -1350,7 +1307,7 @@ class StatusPill(tk.Canvas):
                          width=int(width * s), height=int(height * s))
         self.s = s
         w, h = int(width * s), int(height * s)
-        self.shape = round_rect(self, 1, 1, w - 1, h - 1, PILL_R * s, fill=CARD, outline=LINE)
+        self.shape = self.create_rectangle(1, 1, w - 1, h - 1, fill=CARD, outline=LINE)
         self.dot = self.create_oval(20 * s, h / 2 - 4.5 * s, 29 * s, h / 2 + 4.5 * s,
                                     fill=BAD, outline="")
         self.text = self.create_text(42 * s, h / 2, anchor="w", text="OFF", fill=INK,
@@ -1374,21 +1331,33 @@ def fmt_num(value):
     return str(int(number)) if number.is_integer() else str(number)
 
 
-def section(parent, text, s, top=14):
-    label = tk.Label(parent, text=text.upper(), bg=BG, fg=MUTED, anchor="w",
-                     font=("Segoe UI", int(8 * s), "bold"))
-    label.pack(fill="x", pady=(int(top * s), int(6 * s)))
-    return label
+def section(parent, text, s, top=14, action_factory=None):
+    """A pane's own sub-heading -- sentence case (story #24 feature 5 dropped
+    the old upper() + 8pt small-caps treatment once uppercasing stopped
+    doing the compensating). `action_factory`, not a pre-built widget: a Tk
+    widget's parent is fixed at construction, so a caller can't hand this a
+    widget built against some other parent and have it retroactively
+    reparent into `row` -- a factory (callable(row) -> widget) lets the
+    caller build directly against the real parent. Returns `row` (a Frame)
+    rather than the bare label, so existing callers' .pack()/.pack_forget()
+    keep working unchanged."""
+    row = tk.Frame(parent, bg=BG)
+    row.pack(fill="x", pady=(int(top * s), int(6 * s)))
+    label = tk.Label(row, text=text, bg=BG, fg=MUTED, anchor="w",
+                     font=("Segoe UI", int(10 * s), "bold"))
+    label.pack(side="left")
+    if action_factory is not None:
+        action_factory(row).pack(side="right")
+    return row
 
 
 def card(parent, s):
-    """Borderless, radius-12 card: a rounded canvas shell hosting a plain
-    Frame via create_window -- the standard Tk technique for real widgets
-    inside a round_rect, since Frame itself cannot be rounded."""
-    pad = int(CARD_R * s)          # inset MUST be >= the radius on every
-                                    # side, or inner's own square corners
-                                    # poke past the shape's rounded corners
-                                    # and the rounding never shows through.
+    """Borderless flat card: a canvas shell hosting a plain Frame via
+    create_window -- the standard Tk technique for placing a real widget
+    tree inside a canvas-drawn shape."""
+    pad = int(CARD_PAD * s)        # inset between the shell's own edge and
+                                    # inner's content -- CARD_INNER_W's
+                                    # formula depends on this exact value.
     shell = tk.Canvas(parent, bg=parent.cget("bg"), highlightthickness=0)
     shell.pack(fill="x")
     inner = tk.Frame(shell, bg=CARD)
@@ -1415,11 +1384,9 @@ def card(parent, s):
         shell.itemconfig(win_id, width=w - 2 * pad)
         if shape_id is not None:
             shell.delete(shape_id)
-        shape_id = round_rect(shell, 0, 0, w, h, CARD_R * s, fill=CARD, outline="")
-        shell.tag_lower(shape_id)      # behind inner, so inner's flat area
-                                        # sits on top and only the corners --
-                                        # which inner's padding never reaches
-                                        # -- show the rounded silhouette.
+        shape_id = shell.create_rectangle(0, 0, w, h, fill=CARD, outline="")
+        shell.tag_lower(shape_id)      # behind inner, so inner's own content
+                                        # paints on top of the shell's fill.
 
     shell.bind("<Configure>", _redraw)
     inner.bind("<Configure>", _redraw)
@@ -1506,7 +1473,11 @@ class GameItem(tk.Canvas):
         self.selected = False
         self.running = False
         w, h = int(width * s), int(height * s)
-        self.shape = round_rect(self, 1, 1, w - 1, h - 1, CARD_R * s, fill=BG, outline="")
+        self.shape = self.create_rectangle(1, 1, w - 1, h - 1, fill=BG, outline="")
+        bar_w = int(3 * s)     # ux-designer's call (docs/design.md #2); floor
+                                # is TAB_UNDERLINE_H's own 2px @ s=0.675.
+        self.accent_bar = self.create_rectangle(0, 0, bar_w, h, fill=ACCENT,
+                                                outline="", state="hidden")
         if collapsed:
             d = COLLAPSED_BADGE_D * s
             cx, cy = w / 2, h / 2
@@ -1537,6 +1508,7 @@ class GameItem(tk.Canvas):
         self.itemconfig(self.shape, fill=fill)
         self.itemconfig(self.text, fill=INK if (self.selected or self.running) else MUTED)
         self.itemconfig(self.dot, fill=OK if self.running else LINE)
+        self.itemconfig(self.accent_bar, state="normal" if self.selected else "hidden")
 
 
 class SettingsItem(tk.Canvas):
@@ -1560,7 +1532,10 @@ class SettingsItem(tk.Canvas):
         self.selected = False
         self.has_update = has_update
         w, h = int(width * s), int(height * s)
-        self.shape = round_rect(self, 1, 1, w - 1, h - 1, CARD_R * s, fill=BG, outline="")
+        self.shape = self.create_rectangle(1, 1, w - 1, h - 1, fill=BG, outline="")
+        bar_w = int(3 * s)     # matches GameItem's own accent bar treatment
+        self.accent_bar = self.create_rectangle(0, 0, bar_w, h, fill=ACCENT,
+                                                outline="", state="hidden")
         if collapsed:
             d = COLLAPSED_BADGE_D * s
             cx, cy = w / 2, h / 2
@@ -1602,6 +1577,7 @@ class SettingsItem(tk.Canvas):
     def _paint(self, hover=False):
         fill = CARD_HI if self.selected else (CARD if hover else BG)
         self.itemconfig(self.shape, fill=fill)
+        self.itemconfig(self.accent_bar, state="normal" if self.selected else "hidden")
         if self.collapsed:
             # No text swap while collapsed -- the letter stays "S" always,
             # and the update signal is the corner dot's visibility instead
