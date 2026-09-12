@@ -308,7 +308,20 @@ def _on_root_resize(self, event):
     -- unlike a bare winfo_width() query, there is no unmapped-placeholder
     risk on an event Tk itself generated), so this needs none of _build_ui()'s
     own winfo_ismapped() guard.
+
+    The `event.widget is not self.root` guard below is load-bearing, not
+    defensive: every widget's default bindtags include its *toplevel's*
+    pathname as the third tag (after its own and its class's), so
+    `root.bind(...)` -- unlike `root.bind_all(...)` -- fires for every
+    descendant's own <Configure> too, not just root's. Without this guard,
+    construction alone drives ~100+ calls here for child Frames/Canvases,
+    each carrying its own (much smaller) width, well before `self.s` and
+    the rest of `__init__`'s state exist -- a real crash
+    (`AttributeError: 'AfkAutoclicker' object has no attribute 'click_ms'`),
+    not a theoretical one.
     """
+    if event.widget is not self.root:
+        return
     collapsed = event.width < int(RAIL_COLLAPSE_THRESHOLD * self.s)
     if collapsed != self._rail_collapsed:
         self._rail_collapsed = collapsed

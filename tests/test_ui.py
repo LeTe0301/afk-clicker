@@ -908,6 +908,81 @@ class RailCollapse(UITestCase):
         self.assertEqual(len(buttons), 1)
         self.assertEqual(buttons[0].itemcget(buttons[0].label, "text"), "+")
 
+    def test_rail_rederives_on_a_ui_scale_change_with_width_held_fixed(self):
+        # docs/spec.md's own "Edge cases": a UI-scale change moves the
+        # threshold's *pixel* value (RAIL_COLLAPSE_THRESHOLD * s) without
+        # root's raw width ever moving, so _rail_collapsed must be
+        # re-derived from current geometry in _build_ui() itself, not only
+        # from the <Configure> handler. Pick a real window width strictly
+        # between the 90% and 130% steps' thresholds, hold it there, and
+        # flip only the scale.
+        dpi_s = self.ui._dpi_s
+        threshold_90 = int(app.RAIL_COLLAPSE_THRESHOLD * dpi_s
+                            * app.UI_SCALE_FACTORS["90"])
+        threshold_130 = int(app.RAIL_COLLAPSE_THRESHOLD * dpi_s
+                             * app.UI_SCALE_FACTORS["130"])
+        fixed_w = (threshold_90 + threshold_130) // 2
+        # Tall enough that _apply_minsize(grow_only=True) never needs to
+        # touch the height at either scale step either -- if it did, the
+        # resulting geometry() call would still fire a <Configure> for root
+        # carrying the (unchanged) width, and _on_root_resize would
+        # independently repair _rail_collapsed using the already-updated
+        # self.s. That would make this test pass for the wrong reason: it
+        # would confirm the app ends up correct, not that _build_ui()'s own
+        # rederivation is what did it. Holding both axes still isolates the
+        # rederivation this test exists to cover.
+        fixed_h = int(690 * dpi_s * app.UI_SCALE_FACTORS["130"]) + 100
+
+        self.ui._apply_ui_scale("90")
+        self.root.update()
+        self.root.geometry(f"{fixed_w}x{fixed_h}")
+        self.root.update()
+        self.assertFalse(self.ui._rail_collapsed)
+
+        before_w = self.root.winfo_width()
+        before_h = self.root.winfo_height()
+        self.ui._apply_ui_scale("130")
+        self.root.update()
+        # Fail closed: assert the geometry this test relies on to isolate
+        # the rederivation actually held, rather than let a collapse flip
+        # pass for the wrong reason (the window itself drifting past the
+        # new threshold instead of _build_ui()'s rederivation doing its job).
+        self.assertEqual(
+            (self.root.winfo_width(), self.root.winfo_height()),
+            (before_w, before_h),
+            "root's geometry moved during the scale change -- this test "
+            "no longer isolates a scale-only rederivation")
+        self.assertTrue(self.ui._rail_collapsed)
+        self.assertEqual(self.ui.side.winfo_width(),
+                         int(app.SIDEBAR_RAIL_W * self.ui.s))
+
+    def test_settings_item_collapsed_update_dot_reflects_has_update(self):
+        # design's SettingsItem checklist item 7: while collapsed, the
+        # badge letter never text-swaps to "Settings · Update" the way the
+        # expanded row does -- the small ACCENT corner dot is the whole
+        # signal instead (SettingsItem._paint()'s collapsed branch).
+        # Assert both states so the test can actually distinguish "showing"
+        # from "not showing", not just confirm the dot item exists.
+        s = self.ui.s
+        target_w = int((app.RAIL_COLLAPSE_THRESHOLD * s) - 50)
+        self.root.geometry(f"{target_w}x{int(700 * s)}")
+        self.root.update()
+        self.assertTrue(self.ui._rail_collapsed)
+
+        item = self.ui.settings_item
+        self.assertFalse(item.has_update)
+        self.assertEqual(item.itemcget(item.update_dot, "state"), "hidden")
+        self.assertEqual(item.itemcget(item.text, "text"), "S")
+
+        self.ui._offer_update("v9.9.9")
+        self.assertTrue(self.ui._rail_collapsed)
+        self.assertEqual(item.itemcget(item.update_dot, "state"), "normal")
+        self.assertEqual(item.itemcget(item.update_dot, "fill"), app.ACCENT)
+        self.assertEqual(
+            item.itemcget(item.text, "text"), "S",
+            "collapsed mode must never text-swap -- the corner dot is the "
+            "only signal")
+
 
 class RowValueColumn(UITestCase):
     """Row's fixed-width label column (docs/history/ac-24-f1-spec.md):

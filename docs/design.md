@@ -62,7 +62,18 @@ And the handler:
 
 ```python
 def _on_root_resize(self, event):
-    """Debounce the collapse check on threshold-crossing (spec §2)."""
+    """Debounce the collapse check on threshold-crossing (spec §2).
+
+    The `event.widget is not self.root` guard is load-bearing, not
+    defensive: every widget's default bindtags include its toplevel's own
+    pathname, so `root.bind(...)` -- unlike `root.bind_all(...)` -- also
+    fires for every descendant's own <Configure>, not just root's. Without
+    this guard, construction alone drives ~100+ spurious calls here for
+    child Frames/Canvases before the rest of `__init__`'s state exists,
+    crashing construction outright.
+    """
+    if event.widget is not self.root:
+        return
     collapsed = event.width < int(RAIL_COLLAPSE_THRESHOLD * self.s)
     if collapsed != self._rail_collapsed:
         self._rail_collapsed = collapsed
