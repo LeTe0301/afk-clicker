@@ -12,22 +12,21 @@ GitHub number. Shown below as **G#** / **GH#**.
 ## In progress
 
 - [ ] **Story: responsive layout and an icon-led minimal restyle** — G#24 / GH#36.
-      **Features 1, 2 and 3 of 5 are merged** — PR #37 (`db20af2`, row value-column
-      alignment), PR #40 (`5ab0196`, horizontal tab bar), PR #41 (`18c6f7c`, icon rail).
-      **Feature 4 (content fills the available vertical height, no dead band below
-      the last card) is now in progress** — spec stage. Depends on feature 2, which
-      is in. Feature 5 (flat minimal restyle) is last and depends on all of 1-4.
+      **Features 1-4 of 5 are merged** — PR #37 (`db20af2`, row value column),
+      PR #40 (`5ab0196`, tab bar), PR #41 (`18c6f7c`, icon rail), PR #42
+      (`cb5900e`, vertical fill).
+      **Next: feature 5, the last one** — the flat minimal restyle: drop
+      `CARD_R`/`PILL_R` rounding, a single sparingly-used accent, sentence-case
+      section headers with a right-aligned action slot. It touches `Button`,
+      `Segmented`, `TabBar`, `card()`, `section()`, `StatusPill`, `GameItem`,
+      `SettingsItem` and every `round_rect()` call site.
+      **It carries the one product decision the story deliberately deferred:
+      whether the accent moves from today's red/orange toward the reference's
+      green.** `ACCENT` is `#e08a55` dark / `#2b58cc` light (`afk_clicker.py`
+      THEMES). Needs the owner's answer before feature 5 is specced.
+      After feature 5 the story needs one end-to-end pass before it closes.
       Branch `feature/ac-24/responsive-layout-icon-restyle`, worktree `ac-24`.
       Reference screenshots: `handoff/nvidia-reference/`.
-      Still open: whether the accent moves from red toward the reference's green —
-      that decision belongs to feature 5, not earlier.
-
-      Feature 3 shipped the same crash twice before CI caught it, both times because
-      Xvfb has no window manager and so never generates the post-map root
-      `<Configure>` a real WM does. A green local suite was never evidence for that
-      path. See `docs/history/ac-24-f3-implementation.md` round 3 before adding any
-      resize- or rebuild-driven behaviour, and read the Housekeeping traps below
-      before feature 4 — it is another geometry feature.
 
 Story G#17 / GH#20 (themes that follow the system, and a Settings tab) closed
 2026-09-11: features 1, 2, 3a, 3b and 4 merged (PRs #28–#31, #34), story-level
@@ -148,12 +147,13 @@ Housekeeping:
 ## Session handoff — 2026-09-12
 
 **Where things stand:**
-- `main` is at `bc13350`, CI green on all three platforms, **269 tests**.
+- `main` is at `73f38f4` (code at `cb5900e`), CI green on all three platforms,
+  **276 tests**.
 - The local checkout is on `main` and clean. The `ac-24` worktree is on
   `feature/ac-24/responsive-layout-icon-restyle` at merged `main`, clean, with
   its `docs/*.md` ready to be overwritten by feature 4.
-- **Story G#24 / GH#36 is 3 of 5 features done; feature 4 is in progress (spec
-  stage) as of the end of this session.**
+- **Story G#24 / GH#36 is 4 of 5 features done. Nothing is in flight.** Feature 5
+  (flat restyle) is blocked on the owner's accent-colour decision.
 
 Merged this session, each after a critical PR review posted on the PR:
 
@@ -161,6 +161,7 @@ Merged this session, each after a critical PR review posted on the PR:
 |---|---|---|
 | #40 | Feature 2 — horizontal tab bar (`Hotkey \| Clicking`, `Appearance \| Updates`) | `5ab0196` |
 | #41 | Feature 3 — icon rail, window floor rederived | `18c6f7c` |
+| #42 | Feature 4 — each tab pane fills its own leftover vertical space | `cb5900e` |
 
 (Feature 1, the row value column, merged as PR #37 / `db20af2` at the end of the
 previous session.)
