@@ -175,6 +175,20 @@ TAB_GAP = 28          # horizontal gap between adjacent tab labels
 TAB_PAD_BOTTOM = 6    # space between text baseline and the underline
 TAB_UNDERLINE_H = 2   # active-tab underline thickness
 
+SIDEBAR_RAIL_W = 64   # collapsed rail width (story #24 feature 3) -- room for
+    # a centered COLLAPSED_BADGE_D badge plus symmetric margin either side
+    # (64 - 28 = 36, 18px each side), narrower than any real game name on
+    # purpose.
+RAIL_COLLAPSE_THRESHOLD = SIDEBAR_W + 1 + CONTENT_W
+    # Collapse exactly at today's old expanded-only minimum width -- the
+    # number that used to be the *entire* floor before this feature. Below
+    # it, the expanded rail plus a full CONTENT_W no longer both fit; above
+    # it, this feature changes nothing about today's behavior.
+COLLAPSED_BADGE_D = 28   # collapsed-badge diameter -- big enough to read one
+    # capital letter at the smallest UI-scale step (90%). Centered
+    # dynamically off the canvas's own w/h, so this needs no separate
+    # per-scale fit-check.
+
 
 def selftest():
     """
@@ -1406,21 +1420,42 @@ def card(parent, s):
 
 
 class GameItem(tk.Canvas):
-    """One row in the sidebar: a state dot, the name, and a hover/selected fill."""
+    """One row in the sidebar: a state dot, the name, and a hover/selected fill.
 
-    def __init__(self, parent, profile, on_click, s, width=SIDEBAR_W - 16, height=38):
+    Story #24 feature 3: `collapsed` decides what's drawn, not how it's
+    painted -- expanded draws the dot-and-name pair as always; collapsed
+    draws a centered badge (the same create_oval dot, just bigger and
+    centered) with the profile's initial letter in place of the name.
+    _paint() below needs zero branching for this: it only ever itemconfigs
+    self.shape/self.dot/self.text by their stored canvas-item ids, and the
+    same fill rules are correct whichever pair those ids point at."""
+
+    def __init__(self, parent, profile, on_click, s, collapsed=False,
+                 width=None, height=38):
+        if width is None:
+            width = SIDEBAR_RAIL_W - 16 if collapsed else SIDEBAR_W - 16
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, cursor="hand2",
                          width=int(width * s), height=int(height * s))
         self.profile = profile
         self.on_click = on_click
+        self.collapsed = collapsed
         self.selected = False
         self.running = False
         w, h = int(width * s), int(height * s)
         self.shape = round_rect(self, 1, 1, w - 1, h - 1, CARD_R * s, fill=BG, outline="")
-        self.dot = self.create_oval(12 * s, h / 2 - 3.5 * s, 19 * s, h / 2 + 3.5 * s,
-                                    fill=LINE, outline="")
-        self.text = self.create_text(30 * s, h / 2, anchor="w", text=profile["name"],
-                                     fill=MUTED, font=("Segoe UI", int(9.5 * s)))
+        if collapsed:
+            d = COLLAPSED_BADGE_D * s
+            cx, cy = w / 2, h / 2
+            self.dot = self.create_oval(cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2,
+                                        fill=LINE, outline="")
+            initial = profile["name"][:1].upper() if profile["name"] else "?"
+            self.text = self.create_text(cx, cy, anchor="center", text=initial,
+                                         fill=MUTED, font=("Segoe UI", int(10.5 * s), "bold"))
+        else:
+            self.dot = self.create_oval(12 * s, h / 2 - 3.5 * s, 19 * s, h / 2 + 3.5 * s,
+                                        fill=LINE, outline="")
+            self.text = self.create_text(30 * s, h / 2, anchor="w", text=profile["name"],
+                                         fill=MUTED, font=("Segoe UI", int(9.5 * s)))
         self.bind("<Enter>", lambda e: self._paint(hover=True))
         self.bind("<Leave>", lambda e: self._paint())
         self.bind("<Button-1>", lambda e: self.on_click(self.profile["id"]))
@@ -1450,16 +1485,44 @@ class SettingsItem(tk.Canvas):
     docs/history/ac-17-f3b-spec.md §1. Deliberately text, not a dot: 3a's own design already
     rejected a dot for this row."""
 
-    def __init__(self, parent, on_click, s, has_update=False, width=SIDEBAR_W - 16, height=38):
+    def __init__(self, parent, on_click, s, has_update=False, collapsed=False,
+                 width=None, height=38):
+        if width is None:
+            width = SIDEBAR_RAIL_W - 16 if collapsed else SIDEBAR_W - 16
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, cursor="hand2",
                          width=int(width * s), height=int(height * s))
         self.on_click = on_click
+        self.collapsed = collapsed
         self.selected = False
         self.has_update = has_update
         w, h = int(width * s), int(height * s)
         self.shape = round_rect(self, 1, 1, w - 1, h - 1, CARD_R * s, fill=BG, outline="")
-        self.text = self.create_text(16 * s, h / 2, anchor="w", text="Settings",
-                                     fill=MUTED, font=("Segoe UI", int(9.5 * s)))
+        if collapsed:
+            d = COLLAPSED_BADGE_D * s
+            cx, cy = w / 2, h / 2
+            # No running state applies to Settings -- self.dot here is the
+            # same badge-background primitive GameItem's collapsed dot is,
+            # always LINE, never itemconfig'd by _paint(); it exists purely
+            # so the badge reads as the same visual unit GameItem's does.
+            self.dot = self.create_oval(cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2,
+                                        fill=LINE, outline="")
+            self.text = self.create_text(cx, cy, anchor="center", text="S",
+                                         fill=MUTED, font=("Segoe UI", int(10.5 * s), "bold"))
+            # The small ACCENT corner dot is the collapsed-mode stand-in for
+            # the expanded "Settings · Update" text swap -- always created
+            # (state toggled by _paint(), not re-created), same "itemconfig
+            # by stored id" discipline every other item here already follows.
+            corner_d = 5 * s
+            corner_x, corner_y = cx + d / 2 - corner_d / 2 - 2 * s, cy - d / 2 + corner_d / 2 + 2 * s
+            self.update_dot = self.create_oval(
+                corner_x - corner_d / 2, corner_y - corner_d / 2,
+                corner_x + corner_d / 2, corner_y + corner_d / 2,
+                fill=ACCENT, outline="", state="normal" if has_update else "hidden")
+        else:
+            self.dot = None
+            self.update_dot = None
+            self.text = self.create_text(16 * s, h / 2, anchor="w", text="Settings",
+                                         fill=MUTED, font=("Segoe UI", int(9.5 * s)))
         self.bind("<Enter>", lambda e: self._paint(hover=True))
         self.bind("<Leave>", lambda e: self._paint())
         self.bind("<Button-1>", lambda e: self.on_click())
@@ -1475,12 +1538,22 @@ class SettingsItem(tk.Canvas):
     def _paint(self, hover=False):
         fill = CARD_HI if self.selected else (CARD if hover else BG)
         self.itemconfig(self.shape, fill=fill)
-        text = "Settings · Update" if self.has_update else "Settings"
-        # ACCENT whenever an update is pending, selected or not -- it's the
-        # whole point of the indicator; INK/MUTED only apply once there is
-        # nothing to flag.
-        colour = ACCENT if self.has_update else (INK if self.selected else MUTED)
-        self.itemconfig(self.text, text=text, fill=colour)
+        if self.collapsed:
+            # No text swap while collapsed -- the letter stays "S" always,
+            # and the update signal is the corner dot's visibility instead
+            # (see __init__): this is the collapsed-mode equivalent of the
+            # expanded branch's ACCENT text-swap below, not a second signal.
+            self.itemconfig(self.text, fill=INK if self.selected else MUTED)
+            if self.update_dot is not None:
+                self.itemconfig(self.update_dot,
+                                state="normal" if self.has_update else "hidden")
+        else:
+            text = "Settings · Update" if self.has_update else "Settings"
+            # ACCENT whenever an update is pending, selected or not -- it's
+            # the whole point of the indicator; INK/MUTED only apply once
+            # there is nothing to flag.
+            colour = ACCENT if self.has_update else (INK if self.selected else MUTED)
+            self.itemconfig(self.text, text=text, fill=colour)
 
 
 class Row(tk.Frame):
@@ -1588,6 +1661,16 @@ class AfkAutoclicker:
                                                 # a rebuild (see _rebuild_ui())
         self._loading = False          # suppress saves while filling the form
         self._settings_open = False    # which content-pane body is showing
+        self._rail_collapsed = False   # the rail always launches expanded --
+                                        # the app's default geometry is always
+                                        # >= RAIL_COLLAPSE_THRESHOLD by
+                                        # construction (see _apply_minsize()),
+                                        # so False is correct on first launch
+                                        # without querying anything. Re-derived
+                                        # at the top of every _build_ui() call;
+                                        # session-only, same precedent as
+                                        # self._settings_open below: never
+                                        # persisted to settings.json.
         self._content_tab = "hotkey"       # which game-page tab is showing:
                                             # "hotkey" / "clicking" -- a plain
                                             # attribute, same precedent as
@@ -1606,6 +1689,11 @@ class AfkAutoclicker:
         self._rebuild_wanted = False   # a rebuild was requested while
                                         # _rebuilding was True; _rebuild_ui()
                                         # schedules exactly one follow-up
+        self.root.bind("<Configure>", self._on_root_resize)   # bound once,
+            # here -- NOT inside _build_ui(): root itself survives every
+            # rebuild, same precedent as the bind_all("<Button-1>", ...) call
+            # above. Placed after every attribute _request_rebuild() reads
+            # already exists (story #24 feature 3).
 
         self.profiles = list(PROFILES)
         for saved in self.store.data.get("games", {}).values():
@@ -1641,11 +1729,21 @@ class AfkAutoclicker:
         when the window's current size is now below the new floor -- so a
         smaller step never shrinks a window the user made bigger, and a
         bigger step only grows whichever axis actually falls short (see
-        docs/history/ac-17-f4-spec.md §2)."""
-        minw, minh = int((SIDEBAR_W + 1 + CONTENT_W) * self.s), int(690 * self.s)
+        docs/history/ac-17-f4-spec.md §2).
+
+        Story #24 feature 3: minsize (the hard floor) and the default launch
+        geometry are no longer the same number. minw is derived from
+        SIDEBAR_RAIL_W -- the collapsed-rail floor -- so the window can
+        actually be dragged down far enough to reach RAIL_COLLAPSE_THRESHOLD
+        and collapse; the not-grow_only branch's own default_w keeps using
+        the old SIDEBAR_W-based formula so the app still *launches* at
+        today's familiar expanded size, not immediately at the new, smaller
+        floor."""
+        minw, minh = int((SIDEBAR_RAIL_W + 1 + CONTENT_W) * self.s), int(690 * self.s)
         self.root.minsize(minw, minh)
         if not grow_only:
-            self.root.geometry(f"{minw}x{minh}")
+            default_w = int((SIDEBAR_W + 1 + CONTENT_W) * self.s)
+            self.root.geometry(f"{default_w}x{minh}")
             return
         cur_w, cur_h = self.root.winfo_width(), self.root.winfo_height()
         new_w, new_h = max(cur_w, minw), max(cur_h, minh)
@@ -1665,6 +1763,33 @@ class AfkAutoclicker:
         elif self._rebuild_after_id is None:
             self._rebuild_after_id = self.root.after_idle(self._rebuild_ui)
 
+    def _on_root_resize(self, event):
+        """Debounce the rail's collapse check, not the collapse itself (story
+        #24 feature 3): a live resize drag fires <Configure> continuously,
+        but _request_rebuild() must only ever be called on an actual state
+        flip -- see docs/spec.md's "The debounce decision."
+
+        event.width is trustworthy unconditionally here (Tk only ever fires
+        a real <Configure> for a widget that has actually just been drawn/
+        resized -- unlike a bare winfo_width() query, there is no unmapped-
+        placeholder risk on an event Tk itself generated), so this needs
+        none of _build_ui()'s own winfo_ismapped() guard.
+
+        The `event.widget is not self.root` guard is load-bearing, not
+        defensive: every widget's default bindtags include its *toplevel's*
+        pathname as the third tag (after its own and its class's), so
+        root.bind(...) -- unlike root.bind_all(...) -- fires for every
+        descendant's own <Configure> too, not just root's. Confirmed with a
+        local trace during development: at construction alone, ~100+ calls
+        land here for child Frames/Canvases (each with its own small
+        width), only one of which actually targets root."""
+        if event.widget is not self.root:
+            return
+        collapsed = event.width < int(RAIL_COLLAPSE_THRESHOLD * self.s)
+        if collapsed != self._rail_collapsed:
+            self._rail_collapsed = collapsed
+            self._request_rebuild()
+
     # ---------- widget tree (rebuildable) ----------
 
     def _build_ui(self, s):
@@ -1676,6 +1801,21 @@ class AfkAutoclicker:
         nothing here may assume it is the first time. One-time root
         configuration and non-Tk state live in __init__ instead, never here.
         """
+        # Re-derive self._rail_collapsed from *current* geometry before
+        # building anything (story #24 feature 3): self.s can change between
+        # builds (a UI-scale pick), and RAIL_COLLAPSE_THRESHOLD * s changes
+        # with it -- a window whose raw pixel width never moved can still
+        # legitimately flip collapsed/expanded purely because the UI got
+        # bigger or smaller around it. winfo_ismapped() guards the very
+        # first call (from __init__, before root has ever been drawn):
+        # winfo_width() would return Tk's unmapped placeholder there, not
+        # the just-requested geometry -- leave self._rail_collapsed at
+        # whatever __init__ set (False), always correct on first launch
+        # since the default geometry is always >= the threshold.
+        if self.root.winfo_ismapped():
+            self._rail_collapsed = (
+                self.root.winfo_width() < int(RAIL_COLLAPSE_THRESHOLD * s))
+
         # root itself survives every rebuild (only its children are
         # destroyed), so unlike title/resizable/minsize/geometry/protocol/
         # bind_all -- which are theme-independent and stay one-time in
@@ -1699,18 +1839,27 @@ class AfkAutoclicker:
         shell.pack(fill="both", expand=True)
 
         # ── sidebar ──
-        side = self.side = tk.Frame(shell, bg=BG, width=int(SIDEBAR_W * s))
+        rail_w = SIDEBAR_RAIL_W if self._rail_collapsed else SIDEBAR_W
+        side = self.side = tk.Frame(shell, bg=BG, width=int(rail_w * s))
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
+        # count_label is always built -- only its pack() call is conditional
+        # (story #24 feature 3: "always build, only toggle visibility", the
+        # same convention Feature 2 established for its own tab panes) --
+        # there's no room for "GAMES N" at SIDEBAR_RAIL_W, and _rebuild_list()'s
+        # own count_label.config(text=...) call stays legal on an unpacked
+        # widget, so it needs no guard either.
         self.count_label = tk.Label(side, text="GAMES", bg=BG, fg=MUTED, anchor="w",
                                     font=("Segoe UI", int(8 * s), "bold"))
-        self.count_label.pack(fill="x", padx=int(14 * s), pady=(int(14 * s), int(6 * s)))
+        if not self._rail_collapsed:
+            self.count_label.pack(fill="x", padx=int(14 * s), pady=(int(14 * s), int(6 * s)))
         self.list_frame = tk.Frame(side, bg=BG)
         self.list_frame.pack(fill="both", expand=True, padx=int(8 * s))
         self.items = {}
         self._rebuild_list()
-        Button(side, "Add current game", self.add_current_game, s,
-               width=SIDEBAR_W - 28).pack(pady=(int(12 * s), int(4 * s)))
+        add_label = "+" if self._rail_collapsed else "Add current game"
+        Button(side, add_label, self.add_current_game, s,
+               width=rail_w - 28).pack(pady=(int(12 * s), int(4 * s)))
         # A thin divider separates the action button above from the Settings
         # entry below -- without it the two rows read as one stack of
         # similar pill buttons instead of "an action" vs. "a navigation
@@ -1729,7 +1878,8 @@ class AfkAutoclicker:
         # offer already pending from an earlier Settings visit) still shows
         # the indicator correctly -- see docs/history/ac-17-f3b-spec.md §1.
         self.settings_item = SettingsItem(side, self._show_settings, s,
-                                          has_update=(self._pending is not None))
+                                          has_update=(self._pending is not None),
+                                          collapsed=self._rail_collapsed)
         self.settings_item.pack(pady=(0, int(7 * s)))
         self.settings_item.set_state(selected=self._settings_open)
 
@@ -2209,7 +2359,8 @@ class AfkAutoclicker:
             widget.destroy()
         self.items = {}
         for profile in self.profiles:
-            item = GameItem(self.list_frame, profile, self._select, self.s)
+            item = GameItem(self.list_frame, profile, self._select, self.s,
+                            collapsed=self._rail_collapsed)
             item.pack(fill="x", pady=int(1 * self.s))
             self.items[profile["id"]] = item
         self.count_label.config(text=f"GAMES   {len(self.profiles)}")

@@ -782,18 +782,47 @@ class WindowResize(UITestCase):
     def test_both_axes_are_resizable(self):
         self.assertEqual(self.root.resizable(), (1, 1))
 
-    def test_minsize_matches_todays_default_size(self):
+    def test_minsize_reflects_the_collapsed_rail_floor(self):
+        # Story #24 feature 3: minsize (the hard floor) and the default
+        # launch size are no longer the same number -- the floor is now
+        # derived from the collapsed rail width, not the expanded one, so
+        # the window can actually be dragged down to admit a collapsed rail.
         s = self.ui.s
-        expected = (int((app.SIDEBAR_W + 1 + app.CONTENT_W) * s), int(690 * s))
+        expected = (int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s), int(690 * s))
         self.assertEqual(self.root.minsize(), expected)
 
-    def test_growing_the_window_expands_content_not_the_sidebar(self):
+    def test_rail_stays_at_expanded_width_on_a_wide_window(self):
         content_before = self.ui.content.winfo_width()
         side_before = self.ui.side.winfo_width()
         self.root.geometry("1000x900")
         self.root.update()
         self.assertGreater(self.ui.content.winfo_width(), content_before)
         self.assertEqual(self.ui.side.winfo_width(), side_before)
+        self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_W * self.ui.s))
+
+    def test_shrinking_past_the_threshold_collapses_the_rail(self):
+        # Between the new (collapsed-rail) floor and the collapse threshold.
+        s = self.ui.s
+        threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
+        floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
+        target_w = (threshold + floor) // 2
+        self.root.geometry(f"{target_w}x{int(700 * s)}")
+        self.root.update()
+        self.assertTrue(self.ui._rail_collapsed)
+        self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_RAIL_W * s))
+
+    def test_growing_back_past_the_threshold_re_expands_the_rail(self):
+        s = self.ui.s
+        threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
+        floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
+        target_w = (threshold + floor) // 2
+        self.root.geometry(f"{target_w}x{int(700 * s)}")
+        self.root.update()
+        self.assertTrue(self.ui._rail_collapsed)
+        self.root.geometry(f"{threshold + 200}x{int(700 * s)}")
+        self.root.update()
+        self.assertFalse(self.ui._rail_collapsed)
+        self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_W * s))
 
     def test_shrinking_below_minsize_is_clamped(self):
         self.root.geometry("50x50")
@@ -801,6 +830,83 @@ class WindowResize(UITestCase):
         minw, minh = self.root.minsize()
         self.assertGreaterEqual(self.root.winfo_width(), minw)
         self.assertGreaterEqual(self.root.winfo_height(), minh)
+
+
+class RailCollapse(UITestCase):
+    """The sidebar collapsing to an icon-only rail below a width threshold
+    (story #24 feature 3) -- purely visual, debounced on threshold-crossing
+    through the existing _request_rebuild()/_rebuild_ui() coalescing."""
+
+    def test_rail_starts_expanded_at_default_launch(self):
+        # The single most important regression this feature exists to
+        # prevent: the app must not launch pre-collapsed.
+        s = self.ui.s
+        self.assertIs(self.ui._rail_collapsed, False)
+        self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_W * s))
+        item = self.ui.items["global"]
+        profile = self.ui.by_id["global"]
+        self.assertEqual(item.itemcget(item.text, "text"), profile["name"])
+
+    def test_default_geometry_still_matches_the_old_expanded_minimum(self):
+        s = self.ui.s
+        self.assertEqual(self.root.winfo_width(),
+                         int((app.SIDEBAR_W + 1 + app.CONTENT_W) * s))
+        self.assertLess(self.root.minsize()[0], self.root.winfo_width())
+
+    def test_collapsed_items_still_navigate_by_click(self):
+        s = self.ui.s
+        target_w = int((app.RAIL_COLLAPSE_THRESHOLD * s) - 50)
+        self.root.geometry(f"{target_w}x{int(700 * s)}")
+        self.root.update()
+        self.assertTrue(self.ui._rail_collapsed)
+
+        item = self.ui.items["minecraft"]
+        item.event_generate("<Button-1>", x=5, y=5)
+        self.root.update()
+        self.assertEqual(self.ui.current, "minecraft")
+
+        self.ui.settings_item.event_generate("<Button-1>", x=5, y=5)
+        self.root.update()
+        self.assertTrue(self.ui._settings_open)
+
+    def test_repeated_threshold_crossings_coalesce_to_one_rebuild(self):
+        s = self.ui.s
+        threshold_px = int(app.RAIL_COLLAPSE_THRESHOLD * s)
+        below, above = threshold_px - 50, threshold_px + 50
+        calls = []
+        original = self.ui._rebuild_ui
+        def spy():
+            calls.append(1)
+            original()
+        self.ui._rebuild_ui = spy
+        for w in (below, above, below, above, below):
+            self.root.event_generate("<Configure>", width=w, height=int(700 * s))
+        self.root.update()
+        self.assertLessEqual(len(calls), 1)
+
+    def test_a_resize_that_never_crosses_the_threshold_triggers_no_rebuild(self):
+        s = self.ui.s
+        threshold_px = int(app.RAIL_COLLAPSE_THRESHOLD * s)
+        calls = []
+        original = self.ui._rebuild_ui
+        def spy():
+            calls.append(1)
+            original()
+        self.ui._rebuild_ui = spy
+        for w in (threshold_px + 10, threshold_px + 20, threshold_px + 30):
+            self.root.event_generate("<Configure>", width=w, height=int(700 * s))
+        self.root.update()
+        self.assertEqual(len(calls), 0)
+
+    def test_add_current_game_button_survives_collapse(self):
+        s = self.ui.s
+        target_w = int((app.RAIL_COLLAPSE_THRESHOLD * s) - 50)
+        self.root.geometry(f"{target_w}x{int(700 * s)}")
+        self.root.update()
+        self.assertTrue(self.ui._rail_collapsed)
+        buttons = [w for w in self.ui.side.winfo_children() if isinstance(w, app.Button)]
+        self.assertEqual(len(buttons), 1)
+        self.assertEqual(buttons[0].itemcget(buttons[0].label, "text"), "+")
 
 
 class RowValueColumn(UITestCase):
@@ -2029,7 +2135,12 @@ class UIScale(UITestCase):
             with self.subTest(value=value):
                 self.ui._apply_ui_scale(value)
                 self.root.update()
-                expected = (int((app.SIDEBAR_W + 1 + app.CONTENT_W) * self.ui.s),
+                # The floor is always SIDEBAR_RAIL_W-based (story #24
+                # feature 3) -- this test runs at default (expanded, never
+                # manually resized) window state throughout, proving the
+                # floor is a property of self.s alone, not of whatever the
+                # rail currently looks like.
+                expected = (int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * self.ui.s),
                            int(690 * self.ui.s))
                 self.assertEqual(self.root.minsize(), expected)
 
@@ -2047,6 +2158,12 @@ class UIScale(UITestCase):
         # exceed every step's minsize, including 130%'s, on any DPI this
         # suite runs under (docs/history/ac-17-f4-spec.md's own invariant-ratio argument,
         # §1: a bigger step's minsize is a strictly bigger floor).
+        #
+        # Uses the SIDEBAR_W-based (expanded) formula, not the real
+        # SIDEBAR_RAIL_W-based floor _apply_minsize() now computes (story
+        # #24 feature 3) -- that only makes min_w a safe (if now
+        # over-generous) upper bound to enlarge past, never the literal
+        # floor being asserted here.
         max_s = self.ui._dpi_s * app.UI_SCALE_FACTORS["130"]
         min_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * max_s)
         min_h = int(690 * max_s)
