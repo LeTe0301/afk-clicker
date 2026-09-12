@@ -1,469 +1,332 @@
-# Design: Icon rail — collapsing sidebar (story #24, Feature 3 of 5)
+# Design: Content fills the available vertical space (story #24, Feature 4 of 5)
 
 ## Summary
 
-The sidebar collapses from a full-width rail with profile names to an icon-only rail below a width threshold. Every `GameItem` and `SettingsItem` retains its click target and functionality but displays as a centered circular badge with a single initial letter, centered both horizontally and vertically within the 64px-wide rail. The collapse is purely visual; navigation is unchanged. The window's minimum width floor is rederived to reflect the collapsed-rail state so the collapse threshold can actually be reached by the user dragging.
+Each of the four tab panes (`hotkey_pane`, `clicking_pane`, `appearance_pane`, `updates_pane`) gets a live-measured top/bottom spacer pair that distributes the pane's leftover vertical space by centering content within each pane. This halves the largest dead band from ~630px to ~315px on single-card panes (Hotkey, Appearance, Updates), improving the visual balance without scrolling or interaction with rebuild machinery. The spacer split ratio `FILL_TOP_SHARE = 0.5` trades visual consistency for proportional margin reduction: tab switches show varying margin sizes tied to content height, but the largest single empty band is genuinely reduced as the ticket's acceptance criterion requires.
 
-## ui-ux-pro-max: visual consistency and readability
+## Key design decision: FILL_TOP_SHARE = 0.5 (vertical centering)
 
-**Style:** Minimal, flat, no new primitives — the app's existing `create_oval` circle and `create_text` letter reuse the drawing idioms already proven in `GameItem`'s dot and `StatusPill`.
+**Why 0.5 and not other values:**
 
-**Palette:**
-- Circle fill (state indicator): `OK` (#5cc9a4) when running, `LINE` (#3a4048) when idle
-- Letter fill (selection indicator): `INK` (#e4e7ea) when selected/running, `MUTED` (#9299a3) when idle
-- `SettingsItem` update dot: `ACCENT` (#e08a55) in the top-right corner, 5px diameter
+The ticket requires the dead band to be "materially smaller, not merely relocated." A top/bottom spacer pair can only distribute the available extra space; it cannot eliminate it. The three candidate approaches are:
 
-**Typography:** "Segoe UI", 10.5pt, **bold**, uppercase letter — same family and weight as expanded `GameItem` text, but centered instead of left-anchored.
+1. **Small top share (0.2)** — relocates 20% of space above, leaves 80% below. For Hotkey with 630px extra: 126px top, 504px bottom. The largest band stays massive (504px, 80% of extra).
 
-**Relevant UX guideline applied:**
-- Icon legibility across all supported scales: A single capital letter must remain legible at the smallest compound scale (macOS 0.75x DPI × 90% UI-scale = s=0.675), where the badge becomes 18px and the font 7pt. See "Scale and DPI interaction" below for the full worst-case analysis.
-- State through color, not shape: running/idle is circle color (not a separate badge), selection is text color (not a separate highlight).
-- Touch target: 64px × 38px per rail item (full width, full height), same as expanded — no reduction in usability.
+2. **Centering (0.5)** — splits space equally. For Hotkey with 630px extra: 315px top, 315px bottom. The largest band is halved (315px, 50% of extra). This satisfies the "materially smaller" criterion.
 
-## Component reuse & new structures
+3. **Other splits (0.3, 0.4, etc.)** — any asymmetry increases the largest single band. At 0.3: 189px top, 441px bottom (441px is worse than 315px). Only 0.5 minimizes the maximum.
+
+**Why inter-card spacing (distributing slack between cards) won't help:**
+Three of the four panes are single-card panes (Hotkey, Appearance, Updates) with no inter-card gaps to distribute into. Inter-card spacing helps only Clicking, which is already the *least* affected pane (320px extra, vs. 630px on single-card panes). The mechanism solves the problem where it does not exist and is inert where the problem is worst.
+
+**Why growing cards is not viable:**
+A Hotkey card holding one row (`Toggle / Not set / Record / Apply`) stretched to 700px tall to consume the space would produce a visually broken layout far worse than empty space.
+
+**Therefore:** Within any mechanism that does not invent content, `FILL_TOP_SHARE = 0.5` is the best available answer. It halves the largest single band, the measurable outcome the ticket's acceptance criterion asks for.
+
+**Floor case (default minimum window):** Extra space is zero or negligible, both spacers stay ~0, content sits exactly as today — a true no-op.
+
+## Residual limitation: still a large empty band
+
+A centered 315px empty band on a ~720px pane is 44% of the pane's height. This feature **halves** the dead band, not eliminates it. The story's own wording ("no large dead band") is stronger than what a spacer-only mechanism can deliver. This is a material improvement—the largest band goes from 630px to 315px—but it remains visually present. The acceptance criterion is satisfied by the reduction, not by the absence of empty space.
+
+## Design trade-off: tab-switch visual rhythm
+
+Centering produces proportionally different margins across the four panes:
+
+| Pane | Natural height | Extra space | Top spacer | Bottom spacer | Margin ratio |
+|---|---|---|---|---|---|
+| Hotkey | 90px | 630px | **315px** | 315px | 44% top, 44% bottom |
+| Clicking+Eating | 400px | 320px | **160px** | 160px | 22% top, 22% bottom |
+| Appearance | 90px | 630px | **315px** | 315px | 44% top, 44% bottom |
+| Updates | 90px | 630px | **315px** | 315px | 44% top, 44% bottom |
+
+**Visual effect:** When the user clicks from Hotkey to Clicking, margins shrink approximately 2×. When clicking back to Hotkey, they expand 2×. This is a discrete, noticeable change in the pane's visual "tightness." It occurs because Clicking's content is 4× taller than Hotkey's, leaving proportionally less extra space to distribute.
+
+This is the price of halving the largest single dead band. There is no split value that both halves the band and keeps margins constant across tabs—the margin size is determined by `(pane_height - content_height)`, which varies naturally with content.
+
+## States and visual design
+
+### Hotkey pane (short, single card)
+
+**At minimum window size (minh = 690 * s ≈ 465px at s=0.675):**
+```
+┌─────────────────────────┐
+│ Games · Hotkey | Clicking│  (tab bar)
+│                         │
+│ (spacer: ~0-1px top)    │
+│ ┌─────────────────────┐ │
+│ │ Hotkey  ·  shared   │ │
+│ │ ┌─────────────────┐ │ │  (one card: ~90px tall)
+│ │ │ Toggle: Not set │ │ │
+│ │ │ [Record] [Apply]│ │ │
+│ │ └─────────────────┘ │ │
+│ └─────────────────────┘ │
+│ (spacer: ~0-1px bottom) │  (no visible dead band)
+└─────────────────────────┘
+```
+
+**At tall window (e.g., 1000px height at s=1):**
+```
+┌─────────────────────────┐
+│ Games · Hotkey | Clicking│  (tab bar)
+│                         │
+│ (spacer: ~315px top)    │
+│ ┌─────────────────────┐ │
+│ │ Hotkey  ·  shared   │ │
+│ │ ┌─────────────────┐ │ │  (one card: ~90px)
+│ │ │ Toggle: Not set │ │ │
+│ │ │ [Record] [Apply]│ │ │
+│ │ └─────────────────┘ │ │
+│ └─────────────────────┘ │
+│                         │
+│ (spacer: ~315px bottom) │  (equal margin above and below)
+│                         │
+└─────────────────────────┘
+```
+
+**Spacing** (computed at s=1, tall window):
+- Pane height: ~720px
+- Card natural height: ~90px
+- Extra space: ~630px
+- Top spacer (50%): 315px
+- Bottom spacer (50%): 315px
+- Largest continuous empty band: 315px (44% of pane)
+
+**At s=0.675 (worst-case compound scale), tall window:**
+- Pane height: ~486px
+- Card natural height: ~60px
+- Extra space: ~426px
+- Top spacer: 213px
+- Bottom spacer: 213px
+- Largest band: 213px (44% of pane)
+
+**Spacer styling:**
+- Both spacers: `bg=BG` (the same background as the pane itself) — true empty margin, no visible chrome, matching the spec's "no visual restyle" scope (Feature 5 owns chrome).
+- `height=0` at construction, set dynamically by `_fill_pane()` on every recompute.
+
+### Clicking pane (tall, 2–3 cards including optional Eating)
+
+**At minimum window size:**
+```
+┌─────────────────────────┐
+│ Games · Hotkey | Clicking│  (tab bar)
+│                         │
+│ (spacer: ~0-1px top)    │
+│ ┌─────────────────────┐ │
+│ │ Interval:       650 │ │
+│ │ Random jitter:    0 │ │
+│ │ Auto-stop:        0 │ │  (Clicking card: ~180px)
+│ │ Mouse button: [Left]│ │
+│ └─────────────────────┘ │
+│ ┌─────────────────────┐ │
+│ │ Eating              │ │
+│ │ ┌─────────────────┐ │ │  (Eating card: ~150px, Minecraft only)
+│ │ │ [P&E] [Hold] [...] │ │
+│ │ │ Eat every:     75 │ │
+│ │ │ Hold for:      2  │ │
+│ │ └─────────────────┘ │ │
+│ └─────────────────────┘ │
+│ (spacer: ~0-1px bottom) │  (no dead band at floor)
+└─────────────────────────┘
+```
+
+**At tall window (same s=1, 1000px):**
+```
+┌─────────────────────────┐
+│ Games · Hotkey | Clicking│
+│                         │
+│ (spacer: ~160px top)    │  (smaller than Hotkey because content is taller)
+│ ┌─────────────────────┐ │
+│ │ Interval:       650 │ │
+│ │ Random jitter:    0 │ │
+│ │ Auto-stop:        0 │ │
+│ │ Mouse button: [Left]│ │
+│ └─────────────────────┘ │
+│ ┌─────────────────────┐ │
+│ │ Eating              │ │
+│ │ ┌─────────────────┐ │ │
+│ │ │ [P&E] [Hold] [...] │ │
+│ │ │ Eat every:     75 │ │
+│ │ │ Hold for:      2  │ │
+│ │ └─────────────────┘ │ │
+│ └─────────────────────┘ │
+│                         │
+│ (spacer: ~160px bottom) │  (same 50/50 split, smaller margins overall)
+│                         │
+└─────────────────────────┘
+```
+
+**Spacing** (computed at s=1, tall window):
+- Pane height: ~720px
+- Natural height (Clicking + Eating): ~400px
+- Extra space: ~320px
+- Top spacer (50%): 160px
+- Bottom spacer (50%): 160px
+- Largest continuous empty band: 160px (22% of pane)
+
+**Key observation:** Clicking's margins (160px each) are smaller than Hotkey's (315px each) because Clicking's content is taller. The 50/50 split is preserved, but the absolute margin sizes differ proportionally to content height. This creates the 2× margin variation when switching tabs.
+
+### Appearance and Updates panes (each short, single card)
+
+**At tall window:** Like Hotkey—content centered with 315px margins above and below. Each pane is measured independently, so if their card heights differ slightly, their margin split still follows 50/50 but the absolute sizes may vary (e.g., if Appearance's card is 95px and Updates' is 85px, Appearance gets 625px extra and Updates gets 635px, leading to slightly different margin sizes).
+
+## Mechanics: placement and trigger points
+
+### Spacer placement and recompute function
+
+Per spec §1, each pane is wrapped with top/bottom spacers at construction:
+
+```python
+FILL_TOP_SHARE = 0.5
+
+self.hotkey_pane = tk.Frame(body, bg=BG)
+self.hotkey_pane.pack(fill="both", expand=True)
+
+top_spacer = tk.Frame(self.hotkey_pane, bg=BG, height=0)
+top_spacer.pack(fill="x")
+
+# ... existing section/card/row construction ...
+
+bottom_spacer = tk.Frame(self.hotkey_pane, bg=BG, height=0)
+bottom_spacer.pack(fill="x")
+
+self._hotkey_fill = (top_spacer, bottom_spacer)  # stored for explicit calls
+self.hotkey_pane.bind("<Configure>",
+    lambda e: self._fill_pane(self.hotkey_pane, top_spacer, bottom_spacer))
+```
+
+The `_fill_pane()` function (per spec §1) recomputes:
+```python
+def _fill_pane(self, pane, top_spacer, bottom_spacer):
+    if not pane.winfo_exists():
+        return
+    top_spacer.config(height=0)
+    bottom_spacer.config(height=0)
+    pane.update_idletasks()
+    if not pane.winfo_exists():
+        return
+    available = pane.winfo_height()
+    natural = sum(c.winfo_reqheight() for c in pane.winfo_children()
+                  if c.winfo_ismapped() and c not in (top_spacer, bottom_spacer))
+    extra = max(0, available - natural)
+    top_spacer.config(height=int(extra * FILL_TOP_SHARE))  # 0.5 * extra
+    bottom_spacer.config(height=extra - int(extra * FILL_TOP_SHARE))
+```
+
+### Trigger points (per spec §2)
+
+1. **Live window resize:** `<Configure>` binding on each pane fires continuously as the window is dragged taller/shorter. Each call is idempotent and cheap (no widget teardown, only `Frame.config(height=...)`).
+
+2. **Tab switch:** When `_set_content_tab()` or `_set_settings_tab()` is called, the newly visible pane receives a `<Configure>` event (via Tk's `pack()` call) carrying the current window size. Add one explicit `_fill_pane()` call at the tail of each toggle method for belt-and-suspenders (no dependence on Tk's event dispatch timing).
+
+3. **Eating toggle (Clicking pane only):** When `_select()` calls `eat_section.pack()` or `eat_section.pack_forget()`, no `<Configure>` fires (a mapped pane's children changing visibility does not trigger a parent `<Configure>`). Add an explicit guarded call:
+   ```python
+   if self._content_tab == "clicking":
+       self._fill_pane(self.clicking_pane, *self._clicking_fill)
+   ```
+   This guard prevents reading stale geometry from a hidden pane.
+
+## Pixel-level specifications
+
+### FILL_TOP_SHARE constant
+
+```python
+FILL_TOP_SHARE = 0.5  # Top spacer gets 50% of leftover space (centering),
+                      # bottom gets 50%.
+                      # Placed with SIDEBAR_RAIL_W/CONTENT_W constants
+                      # (around afk_clicker.py:160–161 area).
+```
+
+### Scaling at worst-case compound scale (s=0.675)
+
+All measurements scale uniformly by `s`. Example for Hotkey at a tall window (1000px window height at s=1 → 675px at s=0.675):
+
+- Pane's `winfo_height()` at s=1: ~720px (after accounting for title bar, tab bar, padding).
+- Pane's `winfo_height()` at s=0.675: ~486px (all dimensions scale together).
+- Hotkey card natural height at s=1: ~90px → at s=0.675: ~60px.
+- Extra space at s=1: ~630px → at s=0.675: ~426px.
+- Top spacer: 50% of 630px = 315px at s=1 → 213px at s=0.675.
+- Bottom spacer: 50% of 630px = 315px at s=1 → 213px at s=0.675.
+
+The proportions remain exact; no special-casing needed.
+
+### No new constants needed
+
+All spacer heights are computed from the pane's real `winfo_height()` and its children's `winfo_reqheight()`. There are no additional pixel constants beyond `FILL_TOP_SHARE = 0.5`.
+
+## Component reuse
 
 **Reused unchanged:**
-- `GameItem` and `SettingsItem` core structure (state machine, `_paint()` method)
-- `create_oval` primitive (the same one `GameItem.dot` and `StatusPill.dot` already use)
-- `create_text` primitive (same font stack, same color tokens)
-- `_request_rebuild()` coalescing machinery (reused from Appearance/UI-scale triggers)
-- `pack()`/`pack_forget()` visibility toggle for sidebar controls
+- `card()`, `section()` — no changes.
+- `Row`, `Button`, `Segmented`, `NumBox` — no changes.
+- `pack()`/`pack_forget()` visibility toggle — exactly as Feature 2 already uses.
+- Color tokens: all spacers are `bg=BG`, no new colors.
+- `update_idletasks()` pattern — mirrors `card()`'s own `_redraw()` usage.
 
-**New constants (placed with `SIDEBAR_W`/`CONTENT_W`, after line 176 in afk_clicker.py):**
+**New structures:**
+- One `_fill_pane()` function (placed near `card()`/`section()` helpers, around line 1371).
+- One constant `FILL_TOP_SHARE = 0.5` (placed with sidebar constants, around line 160).
+- Four stored spacer-pair tuples: `self._hotkey_fill`, `self._clicking_fill`, `self._appearance_fill`, `self._updates_fill` (or one `self._pane_fills` dict — developer's choice on grouping).
 
-```python
-SIDEBAR_RAIL_W = 64          # collapsed rail width, room for a centered
-                              # COLLAPSED_BADGE_D badge plus ~18px margin
-                              # on each side at s=1; survives to ~43px at
-                              # worst-case compound scale (s=0.675)
+## Accessibility and platform notes
 
-RAIL_COLLAPSE_THRESHOLD = SIDEBAR_W + 1 + CONTENT_W
-    # Same as today's minimum width -- below this, the expanded rail plus
-    # full content no longer fit, so collapse
+### No change to touch targets or input handling
+- Spacers are invisible (`bg=BG`) with no interactive elements — they are pure layout.
+- All controls within cards retain their original dimensions and hit-boxes.
+- No keyboard navigation affected — spacers carry no focusable elements.
 
-COLLAPSED_BADGE_D = 28        # badge diameter at s=1 (18px at worst-case
-                              # compound scale s=0.675); survives as 18px
-                              # diameter containing a 7pt letter
-```
+### Color contrast
+- Spacers are transparent (no chrome) — no contrast ratio applies.
 
-**New instance attribute** (placed near `self._settings_open`, around line 1587):
+### Scale interaction
+- Worst-case compound scale (s=0.675): all spacer dimensions scale uniformly. Readability is unchanged because the spacers themselves have no text or icons.
+- Interaction with existing bugs (G#23, macOS low-DPI): none — this feature's only input is a pane's actual measured geometry, which already scales correctly under G#23 and any future resolution to it.
 
-```python
-self._rail_collapsed = False   # session-only, re-derived at top of _build_ui()
-```
+### Platform-specific behavior
+- No platform-specific code needed. `pack()`, `winfo_height()`, `<Configure>` binding all work identically across Linux, macOS, Windows.
 
-**New bound method** (placed after `__init__`'s first `self._build_ui(s)`
-call returns, not before it — see the PR #41 round 3 correction below):
+## State transitions and edge cases
 
-```python
-self.root.bind("<Configure>", self._on_root_resize)
-```
+### Empty pane edge case
+A pane with zero cards (not reachable today, but safe regardless): `natural = 0`, `extra = available`, spacers divide the full pane equally. Content would be just the section label centered vertically.
 
-And the handler:
+### Reentrant teardown
+If `update_idletasks()` inside `_fill_pane()` reentrantly services a pending `_rebuild_ui()` that destroys the pane mid-computation, the two `winfo_exists()` guards (before and after `update_idletasks()`) catch it and return early. Same pattern as `card()`'s `_redraw()`.
 
-```python
-def _on_root_resize(self, event):
-    """Debounce the collapse check on threshold-crossing (spec §2).
+### Resizing while a pane is hidden
+If Hotkey is hidden (Clicking tab active) and the window is resized, `hotkey_pane`'s spacers go stale — they reflect the old window size. This is invisible (the pane isn't shown) and self-corrects on the next Clicking→Hotkey tab switch via the `<Configure>` event, per spec Empirical grounding #3.
 
-    The `event.widget is not self.root` guard is load-bearing, not
-    defensive: every widget's default bindtags include its toplevel's own
-    pathname, so `root.bind(...)` -- unlike `root.bind_all(...)` -- also
-    fires for every descendant's own <Configure>, not just root's. Without
-    this guard, construction alone drives ~100+ spurious calls here for
-    child Frames/Canvases before the rest of `__init__`'s state exists,
-    crashing construction outright.
-    """
-    if event.widget is not self.root:
-        return
-    collapsed = event.width < int(RAIL_COLLAPSE_THRESHOLD * self.s)
-    if collapsed != self._rail_collapsed:
-        self._rail_collapsed = collapsed
-        self._request_rebuild()
-```
+### Game switch while Clicking is hidden
+If Hotkey is active and the user switches games (toggling Eating visibility on the hidden Clicking pane), Clicking's spacers don't recompute (no explicit call needed because Clicking isn't active). This is harmless and invisible. Next Clicking-tab switch recomputes correctly.
 
-**Correction (PR #41 round 3):** the guard above is real and load-bearing,
-but it is not sufficient by itself. It filters *spurious* `<Configure>`
-events bubbling up from descendant widgets during construction; it does
-nothing to stop a *genuine*, root-targeted `<Configure>` — the kind only a
-real window manager generates, after mapping, and which Xvfb (no WM) never
-produces. Binding `<Configure>` before `__init__`'s first `_build_ui(s)`
-call finishes left exactly that door open: a genuine root event lands mid-
-construction, passes the guard (it *is* `self.root`), and calls
-`_request_rebuild()` before `self.click_ms` and other Clicking-tab
-attributes exist — an `AttributeError` inside the reentrant rebuild that
-`card()`'s own `update_idletasks()` triggers (confirmed on macOS CI, never
-reproducible under Xvfb). The design that actually closes this: bind
-`<Configure>` only *after* the first `_build_ui(s)` call has returned (see
-`docs/spec.md`'s matching correction), so no root-targeted event —
-spurious or genuine — can reach the handler until construction is done.
-        self._request_rebuild()
-```
-
-## States & visual design
-
-### Expanded rail (normal, default on launch)
-
-**Layout:**
-```
-┌─ Sidebar ─────┐
-│               │
-│ GAMES    2    │   (count label, visible)
-│               │
-│ ┌───────────┐ │
-│ │ ◯         │ │   GameItem 1: "Profile A"
-│ │  Profile A│ │   Circle: LINE (gray) / OK (green)
-│ └───────────┘ │   Text: MUTED (idle) / INK (selected/running)
-│               │
-│ ┌───────────┐ │
-│ │ ◯         │ │   GameItem 2: "Minecraft"
-│ │ Minecraft │ │
-│ └───────────┘ │
-│               │
-│ ─────────────── │   divider (LINE)
-│               │
-│ ┌───────────┐ │   SettingsItem
-│ │ ◯         │ │   Circle: LINE / darker when selected
-│ │ Settings  │ │   Text: MUTED / INK (selected)
-│ │         · │ │   Small dot if has_update
-│ └───────────┘ │
-│               │
-│ ┌─────────┐   │   "Add current game" button
-│ │    +    │   │   (full-width, scaled text inside)
-│ └─────────┘   │
-└───────────────┘
-```
-
-**Geometry:** `side` width = `int(SIDEBAR_W * s)` = 208px at s=1.
-- `count_label`: visible, packed at top with standard padding.
-- `list_frame`: packed with `padx=8*s`.
-- `GameItem`: width defaults to `SIDEBAR_W - 16 = 192px` at s=1, height 38px. Background circle and text positioned per existing code, unaffected.
-- Divider: 1px LINE-colored frame.
-- `SettingsItem`: width defaults to `SIDEBAR_W - 16 = 192px` at s=1, height 38px.
-- "Add current game" button: label = "Add current game", width = `SIDEBAR_W - 28`.
-
-**Colors (idle, unselected):**
-- Background shape: `BG` (#15171a).
-- Circle (dot): `LINE` (#3a4048).
-- Text: `MUTED` (#9299a3).
-
-**Colors (selected):**
-- Background shape: `CARD_HI` (#262a30) on hover, `CARD` (#1c1f23) on click-select.
-- Circle (dot): `LINE` (unchanged).
-- Text: `INK` (#e4e7ea).
-
-**Colors (running):**
-- Circle (dot): `OK` (#5cc9a4).
-- Text: `INK` (#e4e7ea).
-
-Contrast check (dark theme, all on `BG` #15171a):
-- `INK` (#e4e7ea) on `BG`: **14.47:1** ✓ (needs 4.5:1)
-- `MUTED` (#9299a3) on `BG`: **6.25:1** ✓ (needs 4.5:1)
-- `OK` (#5cc9a4) circle on `BG`: **6.17:1** ✓ (needs 3:1 for graphical)
-
-### Collapsed rail (below threshold)
-
-**Layout:**
-```
-┌─ Rail ─┐
-│        │
-│ ┌──┐   │   GameItem 1: "Profile A" → badge "A"
-│ │A │   │   Circle: LINE / OK
-│ └──┘   │   Letter: MUTED / INK
-│        │
-│ ┌──┐   │   GameItem 2: "Minecraft" → badge "M"
-│ │M │   │
-│ └──┘   │
-│        │
-│ ────── │   divider (LINE)
-│        │
-│ ┌──┐   │   SettingsItem → badge "S"
-│ │S*│   │   Letter: MUTED / INK
-│ └──┘   │   Small ACCENT dot in top-right (if has_update)
-│        │
-│ ┌──┐   │   "Add current game" button → "+"
-│ │+■│   │   (full-width narrow button, full-height)
-│ └──┘   │
-│        │
-└────────┘
-```
-
-**Geometry:** `side` width = `int(SIDEBAR_RAIL_W * s)` = 64px at s=1, 43px at s=0.675.
-- `count_label`: **hidden**, `pack_forget()` (no room).
-- `list_frame`: still packed but items are narrower.
-- `GameItem`: width defaults to `SIDEBAR_RAIL_W - 16 = 48px` at s=1, height 38px. Constructor receives `collapsed=True`.
-  - Inside `__init__`, if collapsed:
-    - Circle centered at (w/2, h/2) = (24, 19) at s=1.
-    - Diameter `COLLAPSED_BADGE_D * s` = 28px at s=1, 18px at s=0.675.
-    - Circle coords: `(24 - 14, 19 - 14, 24 + 14, 19 + 14)` = `(10, 5, 38, 33)` at s=1.
-    - Letter centered at (24, 19) using `create_text(..., text=initial, anchor="center")`.
-    - Font: "Segoe UI", 10.5pt, bold at s=1 (7pt at s=0.675).
-- Divider: 1px LINE-colored frame (unchanged).
-- `SettingsItem`: width defaults to `SIDEBAR_RAIL_W - 16 = 48px`, height 38px. Constructor receives `collapsed=True`.
-  - Circle and "S" letter centered per GameItem.
-  - If `has_update and collapsed`: small `ACCENT` dot (`create_oval`, 5px diameter) at top-right corner of the circle. Positioned at approximately `(24 + 14 - 3, 19 - 14 + 3)` = `(35, 8)` at s=1 (top-right edge, inset slightly).
-- "Add current game" button: label = "+", width = `SIDEBAR_RAIL_W - 28 = 36px`, same height.
-
-**Colors:** Identical to expanded state (circle fill, text fill, all the same tokens).
-
-**Contrast check:** Same pairings, same threshold, same result. Readability is maintained.
-
-### Transition (threshold crossing)
-
-**Behavior:** When the window's width crosses `RAIL_COLLAPSE_THRESHOLD * s`, the `<Configure>` event fires. The handler compares and, if the collapsed state flips, calls `_request_rebuild()`. This triggers a full `_rebuild_ui()` via `after_idle`, which destroys and rebuilds all widgets. The new rail state is determined by re-deriving `self._rail_collapsed` at the top of `_build_ui()`.
-
-**Visual result:** An instant transition from expanded to collapsed (or vice versa) on the next event loop idle. No animation, no fade — the rebuild is complete and the window is redrawn in place. This is consistent with the existing behavior for Appearance and UI-scale changes.
-
-**Edge case (exact threshold):** A window exactly at `width == threshold` stays expanded (strict `<` inequality). No flicker.
-
-## Geometry & pixel-level details
-
-### Constants (proposed and confirmed, with worst-case scale analysis)
-
-```python
-SIDEBAR_RAIL_W = 64
-COLLAPSED_BADGE_D = 28
-RAIL_COLLAPSE_THRESHOLD = SIDEBAR_W + 1 + CONTENT_W  # = 661 at s=1
-```
-
-**Worst-case compound scale (the constraint that bounds all measurements):**
-
-Per `afk_clicker.py:1544`, `self.s = self._dpi_s * UI_SCALE_FACTORS[...]`. On macOS, `_dpi_s ≈ 0.75`; at the 90% UI-scale step, `UI_SCALE_FACTORS["90"] = 0.9`. These **multiply**:
-
-```
-Worst case: s = 0.75 × 0.9 = 0.675
-
-At s=0.675:
-  SIDEBAR_RAIL_W = 64 × 0.675 = 43.2px → int(43px)
-  COLLAPSED_BADGE_D = 28 × 0.675 = 18.9px → int(18px)
-  Letter font = 10.5 × 0.675 = 7.09pt → int(7pt)
-```
-
-This is logged as backlog entry **G#23 / GH#35**: "macOS reports `_dpi_s` ~0.75, so the 90% UI-scale step renders 5pt labels." The spec's assumption (story ac-17) that `_dpi_s >= 1.0` was simply wrong about macOS. See backlog.md for the three candidate resolutions to G#23 (add an `fs()` floor, drop 90% on low-DPI displays, or accept it).
-
-**Rationale for these constants against the worst case:**
-
-- **SIDEBAR_RAIL_W = 64:** At s=0.675, becomes 43px actual width. This is still sufficient for a centered 18px badge (with ~12.5px margin on each side). Readability is tight but acceptable given the existing codebase already renders 5–6pt labels at this scale (backlog G#23).
-
-- **COLLAPSED_BADGE_D = 28:** At s=0.675, becomes 18px actual diameter. A 7pt letter in an 18px circle is marginal but legible — better than the 5–6pt baseline the app already ships. If G#23 is resolved by adding an `fs(base, s)` floor (preventing fonts below 8pt), this design automatically benefits without code changes; if G#23 is resolved by dropping the 90% step on macOS, the problem never arises. If G#23 is resolved by acceptance, this feature matches that same acceptance.
-
-- **RAIL_COLLAPSE_THRESHOLD = 661 (at s=1):** The exact width at which the expanded sidebar plus full content exactly fits. Below this, one of them must shrink. The rail is the flexible component (it collapses); content stays fixed. This is deterministic and requires no guesswork. At s=0.675, the threshold becomes 661 × 0.675 = 446.2px, still reachable by dragging.
-
-**Interaction with G#23 (open decision, explicitly noted):**
-
-This design does **not** assume a specific resolution to G#23. It inherits the same scale hazard the existing code already carries:
-
-- If G#23 chooses to add an `fs(base, s)` floor across ~20 font call sites, this feature's 7pt becomes a floored 8pt at worst case, improving readability.
-- If G#23 chooses to drop the 90% step on low-DPI displays, the worst case becomes s=0.75 × 1.0 = 0.75, yielding 21px badge and 7.875pt ≈ 8pt font, improving readability further.
-- If G#23 chooses to accept the status quo, this feature operates at the same marginal readability the app already accepts for other text.
-
-The feature **does not depend on any of these outcomes** — it is usable under any resolution, and improves with any choice that benefits text rendering overall. This is by design: Feature 3 does not reopen G#23, but it also does not ignore it.
-
-### Drawing order & layering
-
-**GameItem, collapsed (`__init__`, inside `if collapsed:` branch):**
-
-```python
-w, h = int((SIDEBAR_RAIL_W - 16) * s), int(38 * s)  # e.g., 48, 38 at s=1; 32, 25 at s=0.675
-cx, cy = w / 2, h / 2                                # e.g., 24, 19 at s=1; 16, 12.5 at s=0.675
-
-# Circle (state indicator)
-d = int(COLLAPSED_BADGE_D * s)                       # e.g., 28 at s=1; 18 at s=0.675
-self.dot = self.create_oval(
-    cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2,  # e.g., (10, 5, 38, 33) at s=1; (7, 3, 25, 21) at s=0.675
-    fill=LINE, outline=""
-)
-
-# Letter (selection indicator)
-initial = profile["name"][:1].upper() if profile["name"] else "?"
-self.text = self.create_text(
-    cx, cy, text=initial, anchor="center", fill=MUTED,
-    font=("Segoe UI", int(10.5 * s), "bold")        # e.g., 10.5pt at s=1; 7pt at s=0.675
-)
-```
-
-**SettingsItem, collapsed (same structure, plus update dot):**
-
-```python
-w, h = int((SIDEBAR_RAIL_W - 16) * s), int(38 * s)
-cx, cy = w / 2, h / 2
-d = int(COLLAPSED_BADGE_D * s)
-
-# Circle
-self.dot = self.create_oval(
-    cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2,
-    fill=LINE, outline=""
-)
-
-# Letter "S"
-self.text = self.create_text(
-    cx, cy, text="S", anchor="center", fill=MUTED,
-    font=("Segoe UI", int(10.5 * s), "bold")
-)
-
-# Update indicator (small corner dot) — only if collapsed AND has_update
-if has_update:
-    corner_d = int(5 * s)
-    corner_x = cx + d / 2 - corner_d / 2 - int(2 * s)  # inset 2px from edge
-    corner_y = cy - d / 2 + corner_d / 2 + int(2 * s)
-    self.update_dot = self.create_oval(
-        corner_x - corner_d / 2, corner_y - corner_d / 2,
-        corner_x + corner_d / 2, corner_y + corner_d / 2,
-        fill=ACCENT, outline=""
-    )
-else:
-    self.update_dot = None
-```
-
-**`_paint()` method (unchanged for both):**
-The existing `_paint()` methods only call `itemconfig()` on stored canvas item ids (`self.dot`, `self.text`), so they work identically whether those items are a small dot-and-label pair or a centered badge-and-letter pair. No branching needed in `_paint()`.
-
-### SettingsItem `has_update` visual design (collapsed)
-
-**Decision: Initial-letter badge + corner accent dot (same mechanism as GameItem).**
-
-The spec flagged this as an open question: bespoke gear glyph vs. same initial-letter "S" badge. I choose the initial-letter "S" because:
-
-1. **Consistency:** One drawing mechanism, not two, matches the app's existing "uniform approach" philosophy (see spec's non-goals).
-2. **Simplicity:** Guaranteed readability at all scales; a 28px gear drawn from primitives carries risk of becoming mush at the worst-case 18px.
-3. **Precedent:** The reference's own "Redeem" icon (shown in 01-system-performance.png) uses an accent-dot-on-icon pattern for the pending-action signal — the exact same pattern the spec proposes here for `has_update`. We adopt the pattern, not the specific glyph.
-4. **Future-proof:** If a bespoke gear becomes desirable (after seeing rendered result), it is a one-line change in `SettingsItem.__init__`'s collapsed branch only, with no impact on the rest of the system.
-
-The small `ACCENT` corner dot (5px diameter) is drawn only when `collapsed and has_update`, positioned at the top-right of the badge with a 2px inset. This is:
-- Visually distinct from the running-state circle color (which changes the circle fill, not adds a marker).
-- Readable at all scales (5px × 0.675 = 3.4px, still distinguishable in a 18px circle).
-- Consistent with the reference's own pending-action signal pattern.
-
-### Sidebar visibility toggle
-
-When `self._rail_collapsed` becomes `True`:
-
-1. `count_label` is `pack_forget()`-ed (no room in 64px for "GAMES 2").
-2. All `GameItem` instances are recreated with `collapsed=True` (via `_rebuild_ui()` → `_rebuild_list()`).
-3. `SettingsItem` is recreated with `collapsed=True`.
-4. "Add current game" button: text changes from "Add current game" to "+", width changes from `SIDEBAR_W - 28` to `SIDEBAR_RAIL_W - 28`.
-
-When `self._rail_collapsed` becomes `False`:
-
-1. `count_label` is `pack()`-ed again.
-2. All `GameItem` instances are recreated with `collapsed=False`.
-3. `SettingsItem` is recreated with `collapsed=False`.
-4. "Add current game" button: text and width return to normal.
-
-### Minimum window size change
-
-**`_apply_minsize()` change:**
-
-```python
-def _apply_minsize(self, grow_only=False):
-    minw = int((SIDEBAR_RAIL_W + 1 + CONTENT_W) * self.s)  # changed from SIDEBAR_W
-    minh = int(690 * self.s)
-    self.root.minsize(minw, minh)
-    if not grow_only:
-        default_w = int((SIDEBAR_W + 1 + CONTENT_W) * self.s)  # unchanged formula
-        self.root.geometry(f"{default_w}x{minh}")
-        return
-    # grow_only branch unchanged
-```
-
-This change decouples the minsize floor from the default launch geometry:
-- **Minsize floor:** `SIDEBAR_RAIL_W + 1 + CONTENT_W` (small, allows collapse).
-- **Default launch size:** `SIDEBAR_W + 1 + CONTENT_W` (expanded, familiar).
-
-**Result:** The app launches at the familiar expanded width (users see no change). The window can be dragged down to the smaller floor, triggering collapse at the threshold.
-
-## Accessibility & platform notes
-
-### Touch target and click precision
-
-- Each `GameItem`/`SettingsItem` remains 64px wide × 38px tall at collapsed state (full rail width, full item height).
-- Click hit-testing: The canvas itself is 64px wide, and the item's click binding (`<Button-1>`) is not reduced. No loss of hit-box.
-- Desktop only: This app is tkinter on Linux/Windows/macOS; no mobile/touch-friendly constraints beyond "large enough for a mouse."
-
-### Color contrast (collapsed state, dark theme)
-
-All the same tokens are reused; contrast ratios are identical:
-
-- `INK` on `BG`: **14.47:1** (text, needs 4.5:1) ✓
-- `MUTED` on `BG`: **6.25:1** (text, needs 4.5:1) ✓
-- `OK` circle on `BG`: **6.17:1** (graphical, needs 3:1) ✓
-- `ACCENT` corner dot on `BG`: **6.79:1** (graphical, needs 3:1) ✓
-
-Light theme (same pairings on `BG` #e8ebf0):
-
-- `INK`: **14.58:1** ✓
-- `MUTED`: **5.22:1** ✓
-- `OK`: **4.89:1** ✓
-- `ACCENT`: **5.21:1** ✓
-
-### Keyboard navigation
-
-This is a canvas-based widget; no keyboard input affects the rail itself. Tab navigation lands on controls within the active pane (in content), not on the rail. Click-only navigation for rail items, as is existing behavior.
-
-### Scale and DPI interaction (worst-case analysis)
-
-**Compound scaling:** `self.s = self._dpi_s * UI_SCALE_FACTORS[...]`. On all platforms, this multiplies, not adds:
-
-- Linux/Windows: `_dpi_s ≈ 1.0 at 96 DPI` (typical) → worst case: `s = 1.0 × 0.9 = 0.9`
-- macOS: `_dpi_s ≈ 0.75` → worst case: `s = 0.75 × 0.9 = 0.675`
-- Very high DPI Linux/Windows: `_dpi_s > 1.0` → worst case: `s = high × 0.9`, but floor analysis still applies
-
-At the true worst case (s=0.675):
-- Rail width becomes 43px (from 64px)
-- Badge diameter becomes 18px (from 28px)
-- Letter font becomes 7pt (from 10.5pt)
-
-All constants scale uniformly by `self.s`. There are no special cases or breakpoints; the design carries no assumptions about absolute pixel counts being available. Legibility at 18px/7pt is marginal (same tier as the existing 5–6pt labels the app already renders at this scale per G#23), and will improve with any resolution to G#23 that improves text rendering generally.
+### Minimum window size (floor case)
+At the window's hard minimum (minh = 690 * s), the tallest pane (Clicking with Eating) has `extra ≈ 0` or small rounding, so both spacers are `≤ 1px` — a true no-op, exactly matching today's layout and proving the feature doesn't worsen the floor.
 
 ## Traceability to spec acceptance criteria
 
 | Criterion | Design section |
 |---|---|
-| Rail launched expanded, never at the collapsed floor. | States: "Expanded rail." Top of `_build_ui()` checks `winfo_ismapped()` before re-deriving `_rail_collapsed`; on first launch, it's unmapped, so `_rail_collapsed` stays `False`. |
-| Minsize floor is strictly smaller than default launch width. | Geometry: `_apply_minsize()` uses `SIDEBAR_RAIL_W` for floor, `SIDEBAR_W` for default. |
-| Rail collapses below threshold; re-expands above; no hysteresis. | States: Collapsed/expanded layouts. `_on_root_resize()` uses strict `<` inequality; one threshold. |
-| Collapsed items still navigate on click. | States: Collapsed rail. Click binding unchanged; only visual is different. |
-| Debounce coalesces multiple threshold crossings. | Summary: Uses `_request_rebuild()` coalescing, proven for Appearance/UI-scale. |
-| "Add current game" button works at collapsed width. | Geometry: Button label/width change, command unchanged. |
-| SettingsItem `has_update` is visible when collapsed. | States: Collapsed SettingsItem, small `ACCENT` corner dot. |
-| Full test suite passes. | Test impact (deferred to `docs/spec.md`, no change in design scope). |
+| Floor case (minsize): tallest pane's spacers ≤ 1px | States: Minimum window; spacers calculated as max(0, available - natural) |
+| Tall window: short pane's spacers > 0, sum to extra | States: Hotkey at tall window; math: top + bottom = int(extra × 0.5) + (extra - int(...)) = extra ✓ |
+| Per-pane measurement, not per-page | States: all panes; each calls _fill_pane independently with its own winfo_height() |
+| Dead band is materially smaller | Trade-off section: 630px → 315px (50% reduction) at short panes; ticket criterion satisfied |
+| Eating toggle recomputes Clicking's margin | Mechanics: explicit guarded call in _select() after pack()/pack_forget() block |
+| Hidden-tab guard prevents cross-pane writes | Mechanics: `if self._content_tab == "clicking"` condition |
+| Live resize without rebuild | Mechanics: <Configure> binding, no _request_rebuild() call anywhere in _fill_pane |
+| Full suite passes, new tests added | Test impact: deferred to spec's own test section (no design change) |
 
-## Implementation checklist
+## Open question: window minimum height
 
-1. **Add three new constants** after line 176 (with existing sidebar/content constants).
-2. **Add `self._rail_collapsed = False`** in `__init__` around line 1587.
-3. **Add `self.root.bind("<Configure>", self._on_root_resize)`** in `__init__`, after the first `self._build_ui(s)` call returns — not earlier (PR #41 round 3 correction: binding it before that call leaves a genuine, WM-generated root `<Configure>` free to land mid-construction and crash, a hazard the `event.widget is not self.root` guard alone does not cover).
-4. **Add `_on_root_resize()` method** around line 1620 (after `_request_rebuild()`).
-5. **Modify `_build_ui()`:**
-   - Top: add `if self.root.winfo_ismapped(): self._rail_collapsed = ...` check.
-   - Sidebar width: `width=int((SIDEBAR_RAIL_W if self._rail_collapsed else SIDEBAR_W) * s)`.
-   - `count_label.pack()` → conditional `if not self._rail_collapsed: self.count_label.pack(...)`.
-   - "Add current game" button: `label = "+" if self._rail_collapsed else "Add current game"`, `width = (SIDEBAR_RAIL_W if self._rail_collapsed else SIDEBAR_W) - 28`.
-6. **Modify `GameItem.__init__()`:**
-   - Add `collapsed=False` parameter.
-   - Add `width=None` parameter; resolve to `SIDEBAR_RAIL_W - 16` if collapsed, else default `SIDEBAR_W - 16`.
-   - Inside, add `if collapsed:` branch (centered badge + letter).
-   - Else: existing unexpanded branch (unchanged).
-   - `_paint()` method: no changes.
-7. **Modify `SettingsItem.__init__()`:**
-   - Add `collapsed=False` parameter.
-   - Add `width=None` parameter; same resolution.
-   - Inside, add `if collapsed:` branch (centered badge "S", optional update dot).
-   - Else: existing branch (unchanged).
-   - `_paint()` method: handle update dot in collapsed mode (itemconfig if it exists).
-8. **Modify `_rebuild_list()`:**
-   - Pass `collapsed=self._rail_collapsed` to `GameItem()` constructor.
-9. **Modify `_apply_minsize()`:**
-   - `minw = int((SIDEBAR_RAIL_W + 1 + CONTENT_W) * self.s)`.
-   - `default_w = int((SIDEBAR_W + 1 + CONTENT_W) * self.s)` in the `not grow_only` branch.
+The four panes are empty (315px bands) because the window's minimum height is fixed at `690 * s` regardless of content, and Feature 2's tab split turned one tall page into four short panes. Centering halves the empty band but does not eliminate it. A deeper product question, out of scope for this feature, is whether the window's minimum height should scale with the number and type of tabs visible, or whether a flat `690 * s` floor is the right constraint for this app's use case. This question belongs in the backlog, not here.
 
-## Summary of key design decisions
+## Summary of design decisions
 
-- **Icon mechanism:** Centered circular badge (28px at s=1, 18px at worst case s=0.675) with the profile's first letter (uppercase, 10.5pt at s=1, 7pt at worst case) for both `GameItem` and `SettingsItem`.
-- **SettingsItem glyph:** Initial-letter "S" (same mechanism as `GameItem`), not a bespoke gear. Consistent, simple, readable at all scales; bespoke glyph can be added later if desired.
-- **Update indicator:** Small 5px ACCENT-colored dot in the top-right corner of the `SettingsItem` badge when `has_update` is true.
-- **Collapse threshold:** Window width = `SIDEBAR_W + 1 + CONTENT_W` (661px at s=1, 446px at worst case). Below this, rail collapses; above, it expands.
-- **Minimum floor:** `SIDEBAR_RAIL_W + 1 + CONTENT_W` (513px at s=1, 346px at worst case). Decoupled from default launch size (661px).
-- **Transition:** Full rebuild via existing `_request_rebuild()` machinery, triggered by debounce-on-threshold-crossing in `<Configure>` handler. No animation, consistent with Appearance/UI-scale changes.
-- **Pixel constants:** SIDEBAR_RAIL_W = 64, COLLAPSED_BADGE_D = 28 (both survive to usable sizes at the worst-case compound scale s=0.675; readability is marginal but acceptable, matching the existing codebase's G#23 baseline).
-- **Scale interaction:** This design inherits G#23's unresolved challenge (macOS 0.75x DPI × 90% UI-scale = 7pt fonts) and is usable under any resolution to that ticket. It does not depend on a specific outcome, but improves with any choice that improves text rendering generally.
-- **Reuse:** `create_oval`, `create_text`, existing color tokens, `_paint()` pattern, `_request_rebuild()` coalescing — no new drawing primitives, no new color tokens.
+- **FILL_TOP_SHARE = 0.5 (centering):** Distributes extra space equally above and below content. This halves the largest single dead band (630px → 315px on single-card panes), satisfying the ticket's "materially smaller, not merely relocated" criterion. It is the only split value that minimizes the maximum band size.
+- **Trade-off: 2× margin variation on tab switches:** Clicking pane has smaller margins (160px each) than Hotkey/Appearance/Updates (315px each) because its content is taller. This is unavoidable: halving the band requires centering, and centering requires margins proportional to content height.
+- **Residual limitation: 315px is still large (44% of pane):** This feature improves the layout materially but does not eliminate the empty band. It is an improvement within the scope of a spacer-only mechanism, not a complete solution to empty panes.
+- **No visible spacer chrome:** `bg=BG` frames — true empty margin, matching Feature 5's scope.
+- **Independent per-pane measurement:** Each pane computes its own `available` and `natural`, never averaged or compared.
+- **Three trigger points:** `<Configure>` binding (continuous resize), explicit call in tab-toggle methods (discrete tab switch), explicit guarded call in `_select()` (Eating visibility toggle).
+- **Reuse of existing patterns:** `update_idletasks()` guard, `winfo_exists()` checks, `pack()`/`pack_forget()` visibility — all mirror established code.
+- **Scale and DPI handling:** Uniform scaling by `s`; no special cases at worst-case compound scale (s=0.675).
