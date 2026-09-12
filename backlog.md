@@ -64,6 +64,11 @@ Bugs and residue:
       §3 assumption that `_dpi_s >= 1.0` was simply wrong about macOS. Decide whether
       to add the `fs(base, s)` floor across the ~20 font call sites, drop 90 % on
       low-DPI displays, or accept it. Only verifiable via CI — no real Mac here (G#4).
+- [ ] **`QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`
+      is flaky on macOS.** Failed on `main` at `5c32f3c` (a docs-only commit, so
+      nothing in the diff could have caused it) and earlier during story #24
+      feature 3, passing on the retry both times. Non-fatal — exit 1, not an abort.
+      It is why `main` shows a red macOS leg at `5c32f3c`.
 - [ ] **The test suite intermittently aborts at interpreter shutdown** —
       `Tcl_AsyncDelete: async handler deleted by the wrong thread`, exit 134, and
       unittest's summary never prints, so a run that passed looks like a failure.
