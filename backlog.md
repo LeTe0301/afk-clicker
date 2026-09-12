@@ -81,6 +81,19 @@ Bugs and residue:
       custom height is what makes it bite.
 
 Features:
+- [ ] **Should the window's minimum height shrink?** `minh = 690 * s`
+      (`_apply_minsize`) was tuned by #14 for the old *single combined page* and
+      never revisited after PR #40 split that page into tabs. Measured on `main`
+      without feature 4: even the tallest pane (Clicking + Eating) carries **~148px
+      of slack at the minimum window size** — pane 528, content span 380 — and the
+      single-card panes (Hotkey, Appearance, Updates) carry far more. Feature 4
+      centres that space, halving the largest single band from ~630px to ~315px on a
+      tall window, but 315px is still 44% of the pane: centring treats the symptom.
+      A smaller floor, or one that scales with the tallest tab's actual content,
+      would attack the cause. Raised independently by both the ux-designer and the
+      developer during feature 4 and confirmed by two reviewers, so it is real and
+      not a matter of taste. Out of scope for the story; needs a product decision
+      from the owner before anyone specs it.
 - [ ] G#22 / GH#33 — Warn when the Minecraft interval minus jitter drops below 650 ms.
 - [ ] G#13 / GH#15 — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
 - [ ] G#12 / GH#14 — Calibration suite for the review agent. Rebase its branch first.
