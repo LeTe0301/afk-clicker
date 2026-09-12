@@ -32,6 +32,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import weakref
 from tkinter import font as tkfont
 
 from pynput import keyboard as kb
@@ -1685,6 +1686,19 @@ class AfkAutoclicker:
             # Re-issuing it inside _build_ui()/_rebuild_ui() would be a
             # pointless duplicate binding on that same tag for a root that
             # never goes away (see #18).
+            #
+            # An earlier version (G#27/ac-27, PR #47) kept this call's own
+            # funcid and released it explicitly in on_close() via
+            # unbind_all()+deletecommand(), reasoning that bind_all()'s
+            # needcleanup=0 registration otherwise outlives root.destroy().
+            # That reasoning still stands, but the explicit deletecommand()
+            # call -- run back-to-back with _forget_traces()'s trace_remove()
+            # sweep, right after cancelling a batch of after() jobs and right
+            # before root.destroy() -- is the prime suspect (see on_close()'s
+            # own comment) for a macOS-only interpreter abort
+            # (`Tcl_FindHashEntry on deleted table`) reproduced twice in CI.
+            # Reverted here rather than guessed at further; the leak this
+            # was fixing is real and is back on backlog.md.
 
         self.mouse = Controller()
         self.hotkey = None
@@ -1693,6 +1707,7 @@ class AfkAutoclicker:
         self.running = False
         self.worker = None
         self.capture_thread = None
+        self._poll_thread = None
         self.right_held = False
         self.settings = {}
         self._pending = None
@@ -2090,6 +2105,20 @@ class AfkAutoclicker:
             self._timers = {}
             for w in self.root.winfo_children():
                 w.destroy()
+            # content_tab_var/settings_tab_var/appearance_var/ui_scale_var/
+            # button_name/eat_mode/every NumBox's .var are all recreated
+            # fresh in _build_ui() below, same as every other rebuildable
+            # widget -- but a Variable is not a widget, so destroy() above
+            # never touches the *outgoing* generation's traces (see
+            # _forget_traces()'s own docstring). Called here, before they
+            # are replaced, so every earlier generation's traces (and
+            # everything they keep reachable) are released across however
+            # many rebuilds happen. NOTE (G#27/ac-27 round 2, PR #47):
+            # on_close() no longer also calls this -- see its own comment --
+            # so the *last* generation's traces, still live when the app
+            # finally closes, are not released by anything. That residual
+            # window is back on backlog.md, open.
+            self._forget_traces()
             self._build_ui(self.s)
         finally:
             self._rebuilding = False
@@ -2705,9 +2734,45 @@ class AfkAutoclicker:
             self.version_label.config(text=text, fg=colour)
 
     def _poll_games(self):
+        # Weak, not self, and dropped before the blocking call: _window_
+        # titles() opens a fresh Xlib connection on every call, and that
+        # connection setup can stall for an unbounded time (observed
+        # directly, roughly 1 scan in a couple hundred, stuck inside
+        # Xlib.display.Display() itself). profiles is a plain, self-
+        # contained list of dicts, so holding only that (not self) across
+        # the blocking detect_running() call means a scan stuck there does
+        # not keep this whole UI -- and every tkinter.Variable it owns --
+        # reachable for as long as that one thread has not returned, no
+        # matter how long the app (or, in the test suite, a since-closed
+        # window) is already gone. Left holding self there, whichever
+        # thread eventually dropped that reference (or merely ran a GC pass
+        # while still holding it) was not necessarily the main one -- which
+        # is how a stale Variable gets finalized off the main thread and
+        # aborts the interpreter ("Tcl_AsyncDelete: async handler deleted
+        # by the wrong thread").
+        weak = weakref.ref(self)
+
         def scan():
-            self._ui(self._mark_running, detect_running(self.profiles))
-        threading.Thread(target=scan, daemon=True).start()
+            me = weak()
+            if me is None:
+                return
+            profiles = me.profiles
+            del me
+            running = detect_running(profiles)
+            me = weak()
+            if me is not None:
+                me._ui(me._mark_running, running)
+        # Tracked (not fire-and-forget) so on_close() can join it: every
+        # rebuild calls _poll_games() again (_build_ui()'s own tail, so the
+        # running-games indicator survives a theme/scale change), and nothing
+        # else ever waits for that scan to land before a later on_close()
+        # runs. Most of the time it finishes in well under a millisecond, but
+        # for that brief window scan() above does hold a real reference back
+        # to this UI on its own thread -- on_close() racing that window is
+        # the common (not just the stuck-Display() rare) way a Variable ends
+        # up finalized off the main thread.
+        self._poll_thread = threading.Thread(target=scan, daemon=True)
+        self._poll_thread.start()
         self._timers["poll_games"] = self.root.after(5000, self._poll_games)
 
     def _mark_running(self, running_ids):
@@ -2987,6 +3052,38 @@ class AfkAutoclicker:
             self.running = False
             self._release_right()
 
+    def _forget_traces(self):
+        """Release every write-trace registered on a Variable this UI owns.
+
+        Segmented/TabBar register their repaint trace on the *variable*
+        they are given, not on themselves (afk_clicker.py's Segmented/
+        TabBar __init__), so destroying the widget never removes it --
+        it is a leftover backlog item (see backlog.md, "Segmented never
+        calls trace_remove") that turned out to matter for more than a
+        dangling callback: the registered command is a live reference the
+        Tcl interpreter's own command table holds back to whatever bound
+        method it wraps, however many rebuilds ago that widget was
+        replaced. destroy() only walks a widget's *own* bindings
+        (Misc.destroy()'s self._tclCommands), never a trace registered on
+        someone else's Variable, so nothing else ever clears this. Left in
+        place, that reference chain (interpreter -> trace command ->
+        bound method -> this whole UI -> every tkinter.Variable it owns)
+        keeps the interpreter itself alive past on_close()/root.destroy()
+        -- Python's own refcounting can never free a live C-level
+        reference, no matter how much of the rest of the graph is
+        otherwise unreachable. Walking every Variable this UI can reach
+        (directly, or one NumBox-style ".var" attribute down) and clearing
+        trace_info() here, rather than tracking each trace_add() call site
+        by hand, is what keeps this correct as new controls get added --
+        a call site missed by hand is exactly how the backlog item above
+        happened once already.
+        """
+        for value in vars(self).values():
+            var = value if isinstance(value, tk.Variable) else getattr(value, "var", None)
+            if isinstance(var, tk.Variable):
+                for modes, cbname in var.trace_info():
+                    var.trace_remove(modes, cbname)
+
     def on_close(self):
         self._persist()
         # Pending after() callbacks fire into a destroyed interpreter and Tcl
@@ -3016,7 +3113,37 @@ class AfkAutoclicker:
             self.hk_listener.stop()
         if self.worker and self.worker.is_alive():
             self.worker.join(timeout=2.0)   # let it run its own release first
+        if self._poll_thread and self._poll_thread.is_alive():
+            # See _poll_games()'s own comment: bounded, not indefinite, since
+            # a stuck Xlib.display.Display() connection must not hang close.
+            self._poll_thread.join(timeout=2.0)
         self._release_right()          # never leave a mouse button stuck down
+        # G#27/ac-27 round 2 (PR #47): this used to also release bind_all()'s
+        # funcid (unbind_all()+deletecommand()) and sweep every Variable's
+        # traces (self._forget_traces()) here, right after cancelling the
+        # jobs above and right before root.destroy() below. That combination
+        # reproduced a macOS-only interpreter abort twice in CI
+        # (`Tcl_FindHashEntry on deleted table`, exit 134) that could not be
+        # reproduced on Linux (55+ runs) or explained mechanically without
+        # macOS access, so both calls were reverted rather than guessed at
+        # further -- see docs/implementation.md's "Round 2" section and
+        # backlog.md. The reference leaks they were closing are real and are
+        # back on backlog.md, open.
+        # self.stop() above (and any update still in flight from a worker)
+        # queues through self._ui() rather than touching a widget directly,
+        # and _drain_ui()'s own recurring after() job -- the only thing that
+        # would otherwise empty this -- was already cancelled above. An
+        # item left sitting in self._ui_queue is a normal (self ->
+        # _ui_queue -> queued args tuple -> a bound method -> self) cycle,
+        # but it is still a live reference back to this whole UI until
+        # something breaks it -- discarded here, not run, since every
+        # widget it would touch is seconds (or, by the time this actually
+        # drains, already) gone.
+        while True:
+            try:
+                self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
         self.root.destroy()
 
 
