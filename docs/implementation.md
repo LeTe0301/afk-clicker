@@ -862,3 +862,220 @@ margin at the specific point where margin is the actual constraint.
   numbers rather than a local measurement, but it is still only one data
   point from one CI run on one runner image -- re-verify if a future
   Windows runner image ships different default font metrics.
+
+## Round 5 (ubuntu CI aborting 4/4 -- coalesce the refill cascade)
+
+Round 4's fix itself is not in question here: Windows CI passed with the
+real assertions restored, and macOS passed too. The problem this round
+targets is different -- this branch's four commits make the **ubuntu** CI
+leg abort 4/4 runs on the pre-existing `Tcl_AsyncDelete` leak tracked on
+GH#46 (a worker thread's own allocations triggering a GC that finalizes a
+leaked `tkinter.Variable` off the main thread), where `main` itself is
+green 0 aborts across its own 5 recent commits. This round does not
+attempt to fix GH#46 (a separate, harder piece of work with its own failed
+attempt behind it, PR #47) -- it reduces how hard this branch's own code
+pushes on GH#46's trigger, by cutting the number of redundant
+`_fill_pane()` passes a single Eating-card growth cascade causes.
+
+### What changed
+
+**`afk_clicker.py` only** -- no test file changes were needed; every
+existing assertion targets the *converged* state, which is unchanged.
+
+- Three new instance attributes in `__init__` (alongside the existing
+  `_rebuild_after_id`/`_rebuilding`/`_rebuild_wanted` triple, same
+  comment style): `_pane_fill_after_id`, `_pane_fill_key`,
+  `_pane_filling`, `_pane_fill_wanted`.
+- Two new methods, `_request_pane_fill(key)` and `_run_pane_fill()`,
+  placed just above `_on_eat_card_settled()`. `_request_pane_fill(key)`
+  is the coalescing tail every call site below now goes through instead
+  of calling `_fill_pane()` directly: if a pass is already running
+  (`_pane_filling`), it records `key` as `_pane_fill_wanted` and returns;
+  otherwise it records `key` and schedules `self.root.after_idle(self.
+  _run_pane_fill)` if one isn't already pending. `_run_pane_fill()` is
+  the deferred pass itself -- runs `_fill_pane()` once for whichever key
+  was requested, and in its `finally` block, if a further request landed
+  *during* that call (via `_pane_fill_wanted`), re-arms exactly one
+  follow-up through `_request_pane_fill()` again. This is the exact
+  `_rebuilding`/`_rebuild_wanted` shape `_request_rebuild()`/
+  `_rebuild_ui()` already use, applied to the same problem one level
+  down (a pane's own fill instead of the whole UI's rebuild), per the
+  task's own instruction to match that precedent.
+- Every direct `_fill_pane(...)` call site now calls
+  `self._request_pane_fill(key)` instead: `_on_eat_card_settled()` (still
+  guarded on `self._content_tab == "clicking"`, unchanged), the tails of
+  `_set_content_tab()`/`_set_settings_tab()`/`_select()`, and all four
+  panes' own `<Configure>`-bound lambdas (hotkey/clicking/appearance/
+  updates). The one place `_fill_pane()` is still called directly is
+  `_run_pane_fill()`'s own body -- the single place that actually does
+  the work now.
+- `on_close()`: added cancellation of a pending `_pane_fill_after_id`,
+  mirroring the existing `_rebuild_after_id` cancellation immediately
+  above it in the same method, for the identical reason its own comment
+  gives -- an uncancelled `after_idle` job fires into a destroyed
+  interpreter and Tcl reports "invalid command name". This is a real gap
+  the new mechanism introduces (the old code had no such job to leak);
+  fixed here rather than left for the reviewer to catch, per this
+  codebase's own established precedent for exactly this hazard.
+
+### Guaranteeing the refill still runs last, not early
+
+The task's two constraints map directly onto the two halves of the
+`_rebuilding`/`_rebuild_wanted` pattern:
+
+- **Never runs early**: `_request_pane_fill()` only ever *schedules* a
+  pass (via `after_idle`, the lowest-priority point in Tk's event loop --
+  "run once everything else pending has been serviced") or marks one as
+  wanted; it never calls `_fill_pane()` itself. The pass that does run is
+  always whatever the request queue's *last* write left in
+  `_pane_fill_key`/`_pane_fill_wanted` by the time `_run_pane_fill()`
+  actually executes.
+- **Re-armed if a settle lands mid-pass**: while `_run_pane_fill()`'s own
+  `_fill_pane()` call is running, its internal `pane.update_idletasks()`
+  can reentrantly drain further queued work -- including another
+  `<Configure>`-triggered `on_settle()` firing for a card still mid-
+  growth. `_pane_filling` being `True` for the duration of that call is
+  exactly what routes such a reentrant request into `_pane_fill_wanted`
+  instead of either running inline (the same crash-prone reentrancy
+  `_rebuild_ui()`'s own docstring warns about) or being silently dropped
+  (which would reintroduce round 2's stale-`natural` race). The `finally`
+  block then re-arms exactly one follow-up pass once the current one has
+  fully returned -- so a settle that lands after the measurement was
+  already taken always gets a fresh, later pass to correct it, never has
+  its request thrown away.
+
+Verified this holds, not just argued it: the full suite (including both
+reverse-order tests that specifically catch a stale-too-early `natural`)
+stays green, and the live-app screenshot check below shows the exact same
+converged, non-clipped state as round 4's own verification.
+
+### Call count: before and after (measured, this box)
+
+Instrumented `app._fill_pane` with a call counter (throwaway script, not
+committed) and drove both click orders exactly as the two reverse-order
+tests do, from `git stash`-clean `HEAD` (round 4's code) and then again
+against this round's fix, 3 consecutive runs each, `DISPLAY=:99`:
+
+| | order A (`_select` then `_set_content_tab`) | order B (`_set_content_tab` then `_select`, the regression-prone one) |
+|---|---|---|
+| Before (HEAD, round 4) | 8, 8, 8 | 8, 8, 8 |
+| After (this round) | 4, 4, 4 | 4, 4, 4 |
+
+**This is a real, deterministic 50% reduction, not the "roughly 1-2"
+target.** Traced the remaining 4 with a caller-and-state-annotated spy
+(also throwaway, not committed) to understand why, rather than accept the
+gap without explanation:
+
+```
+request _set_content_tab clicking idle        (schedules job A)
+request _set_content_tab clicking idle        (re-entrant var-trace call, no new job)
+request _select clicking idle                 (still job A pending)
+_fill_pane  <- job A runs
+request <lambda> clicking filling             (reentrant, nested inside job A's own update_idletasks())
+request _on_eat_card_settled clicking filling (reentrant, same)
+request _run_pane_fill clicking idle          (job A's finally re-arms job B)
+_fill_pane  <- job B runs
+request _on_eat_card_settled clicking idle    (NOT nested -- a wholly separate, later event)
+_fill_pane  <- job C runs
+request _on_eat_card_settled clicking idle    (NOT nested -- another separate, later event)
+_fill_pane  <- job D runs
+```
+
+Jobs A and B are the coalescing working exactly as designed -- two
+reentrant settle firings during job A's own drain collapse into one
+re-armed follow-up (job B), instead of two more separate passes. Jobs C
+and D are not a coalescing bug: they are on_settle() firings that arrive
+as *wholly new* events, strictly after job B's own `_run_pane_fill()` had
+already returned and reset `_pane_filling` to `False` -- there is nothing
+pending at that point for a later request to coalesce *into*, so each
+gets its own fresh `after_idle` job, correctly (dropping it, or running
+it inline, would be the actual bugs this design exists to avoid).
+
+Confirmed this is a genuine, pre-existing property of the Eating card's
+growth cascade, not an artifact of this round's mechanism: round 1's own
+implementation notes (before `on_settle` existed at all) already recorded
+needing "3-4 rounds" of explicit `_fill_pane()` + `root.update()` calls
+from *outside* the render pipeline entirely to reach the same fixed
+point, and round 2/4's own traces describe the *old*, fully-synchronous
+`_fill_pane()` call needing ~6-10 nested rounds internally to converge in
+one shot. Tried forcing more convergence into a single deferred pass two
+ways, both throwaway, neither committed: (a) looping `_fill_pane()` calls
+inside `_run_pane_fill()` itself while `_pane_fill_wanted` keeps getting
+set, which shaved one more call off (4 -> 3) by absorbing the reentrant-
+during-drain case a second time, and (b) additionally calling
+`self.root.update()` (not just `update_idletasks()`) between loop
+iterations to force real window-event processing, which made no further
+difference (still 3). Did not commit either: (a) is a real, if modest,
+further win but abandons the exact `_rebuilding`/`_rebuild_wanted` shape
+this task asked to match (that pattern re-arms via a fresh `after_idle`
+call on a re-arm, it does not loop synchronously) for a one-call gain,
+and (b) demonstrated the remaining gap is not an idle-priority-ordering
+artifact this code can fix at all -- job C/D's growth steps genuinely
+are not yet ready, at the OS/X11 level, at the moment job A/B's own
+drain runs, no matter how many event-loop turns are forced within that
+one call.
+
+### Honest assessment for the ubuntu aborts
+
+This does not close GH#46. The leak that lets a worker-thread GC land on
+`Variable.__del__` off the main thread is still there, confirmed still
+reproducible even on this Linux box during this round's own suite runs
+(`RuntimeError: main thread is not in main loop` in `Variable.__del__`,
+harmless here because this platform doesn't abort on it the way ubuntu
+CI's Tcl build does) -- unchanged by anything in this round. What this
+round changes is how often this branch's own code pushes on that trigger:
+roughly half the `_fill_pane()` passes, and by extension roughly half the
+allocation churn, for the one code path (the Eating card's settle
+cascade) round 4 added. Whether halving the trigger frequency is enough
+to take ubuntu CI from a deterministic 4/4 abort to something less than
+that -- or to zero -- cannot be answered locally; this box has no ubuntu
+CI runner to reproduce GH#46's abort against directly (as round 3/4 also
+noted for the Windows-specific trace), and the leak's own trigger
+threshold (how much churn is "enough") was never characterized, only
+observed. **If CI still aborts at the same rate, that would mean this
+reduction wasn't sufficient, not that it didn't work** -- the call-count
+measurement above is real and reproducible, independent of whatever CI
+reports back.
+
+### Verification
+
+- Full suite: `DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .`
+  -> `Ran 292 tests ... OK (skipped=5)`, run twice back-to-back (no new
+  tests added -- this round changes an internal scheduling mechanism, not
+  observable behavior, so no test's assertions needed to change).
+- `WindowMinimumHeight`, `VerticalFill`, `FillPaneOverflow` together (the
+  14 tests most directly exercising `_fill_pane()`/the pane-fill
+  mechanism, including both reverse-order tests): 5 consecutive runs, all
+  green.
+- Call-count measurement: see table above, 3 runs each side, both click
+  orders, deterministic (8/8/8 before, 4/4/4 after, every run).
+- Live app, both click orders, real screenshots (not the suite) --
+  `screenshot_round5.py`, scratchpad only, same technique as round 4's
+  `screenshot_round4.py`: builds the real app, drives both orders,
+  services the event loop for 2 real seconds, screenshots via `import
+  -window <id>` on a private Xvfb display (`:98`). Both orders:
+  `natural=383, pane_h=455, top=36, bottom=36`, both spacers mapped;
+  `compare -metric AE` reports `AE=0` between `round5_orderA.png` and
+  `round5_orderB.png` (pixel-identical to each other) and `AE=0` against
+  round 4's own `round4_orderA.png` -- this round changes *how many
+  times* the layout gets computed, not the layout itself.
+
+### Known limitations (round 5)
+
+- The remaining 4 calls (down from 8) are bounded by a genuine, external
+  timing property of the Eating card's own growth cascade (confirmed
+  against plain event-loop behavior, not an artifact of this mechanism),
+  not by a flaw in the coalescing logic -- see "Call count" above. Getting
+  closer to literally 1 would require either reintroducing a fully
+  synchronous nested-drain (the exact pattern that produces 8-14 calls in
+  the first place) or a deeper change to `card()`'s own growth mechanism,
+  which is out of this round's scope.
+- Whether a ~50% reduction in `_fill_pane()` churn is sufficient to stop
+  ubuntu CI's GH#46-driven aborts is not verified locally and cannot be --
+  only the next ubuntu CI run can confirm or refute it (see "Honest
+  assessment" above).
+- `_pane_fill_key`/`_pane_fill_wanted` track a single pending pane, not a
+  set -- correct for this app today (exactly one content-tab pane and one
+  settings-tab pane can ever be visible/growing at a time), but would
+  need generalizing if a future feature made two different panes'
+  growth cascades overlap in the same burst.

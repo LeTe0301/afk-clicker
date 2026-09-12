@@ -1851,6 +1851,18 @@ class AfkAutoclicker:
         self._rebuild_wanted = False   # a rebuild was requested while
                                         # _rebuilding was True; _rebuild_ui()
                                         # schedules exactly one follow-up
+        self._pane_fill_after_id = None  # the one after_idle(self._run_pane_fill)
+            # job currently pending, if any (G#28/GH#48 round 5) -- see
+            # _request_pane_fill()/_run_pane_fill().
+        self._pane_fill_key = None     # which pane the pending/running
+                                        # deferred pass targets
+        self._pane_filling = False     # True for the duration of
+                                        # _run_pane_fill()'s own _fill_pane()
+                                        # call -- see _request_pane_fill()
+        self._pane_fill_wanted = None  # a further pane-fill was requested
+                                        # while _pane_filling was True;
+                                        # _run_pane_fill() re-arms exactly
+                                        # one follow-up for it
         self.profiles = list(PROFILES)
         for saved in self.store.data.get("games", {}).values():
             meta = saved.get("_profile")
@@ -2271,8 +2283,9 @@ class AfkAutoclicker:
         # already-computed width (verified empirically, see docs/spec.md's
         # "Test impact" section).
         self._pane_fills = {}   # story #24 feature 4: {"hotkey": (pane, top,
-            # bottom), ...} -- looked up by _set_content_tab()/
-            # _set_settings_tab()/_select()'s own explicit _fill_pane() calls.
+            # bottom), ...} -- looked up by _run_pane_fill(), reached via
+            # _set_content_tab()/_set_settings_tab()/_select()'s own
+            # _request_pane_fill() requests (G#28/GH#48 round 5).
 
         self.hotkey_pane = tk.Frame(body, bg=BG)
         self.hotkey_pane.pack(fill="both", expand=True)
@@ -2306,7 +2319,7 @@ class AfkAutoclicker:
         hotkey_bottom.pack(fill="x")
         self._pane_fills["hotkey"] = (self.hotkey_pane, hotkey_top, hotkey_bottom)
         self.hotkey_pane.bind("<Configure>",
-            lambda e: _fill_pane(self.hotkey_pane, hotkey_top, hotkey_bottom))
+            lambda e: self._request_pane_fill("hotkey"))
 
         self.clicking_pane = tk.Frame(body, bg=BG)
         self.clicking_pane.pack(fill="both", expand=True)
@@ -2349,7 +2362,7 @@ class AfkAutoclicker:
         clicking_bottom.pack(fill="x")
         self._pane_fills["clicking"] = (self.clicking_pane, clicking_top, clicking_bottom)
         self.clicking_pane.bind("<Configure>",
-            lambda e: _fill_pane(self.clicking_pane, clicking_top, clicking_bottom))
+            lambda e: self._request_pane_fill("clicking"))
 
         # Any edit belongs to the selected game, so persist as it happens.
         for var in (self.click_ms.var, self.jitter_ms.var, self.autostop_min.var,
@@ -2445,7 +2458,7 @@ class AfkAutoclicker:
         appearance_bottom.pack(fill="x")
         self._pane_fills["appearance"] = (self.appearance_pane, appearance_top, appearance_bottom)
         self.appearance_pane.bind("<Configure>",
-            lambda e: _fill_pane(self.appearance_pane, appearance_top, appearance_bottom))
+            lambda e: self._request_pane_fill("appearance"))
 
         self.appearance_var.trace_add("write",
             lambda *_a: self._apply_appearance(self.appearance_var.get()))
@@ -2488,7 +2501,7 @@ class AfkAutoclicker:
         updates_bottom.pack(fill="x")
         self._pane_fills["updates"] = (self.updates_pane, updates_top, updates_bottom)
         self.updates_pane.bind("<Configure>",
-            lambda e: _fill_pane(self.updates_pane, updates_top, updates_bottom))
+            lambda e: self._request_pane_fill("updates"))
 
         self._set_settings_tab(self._settings_tab)   # hide the inactive pane last
 
@@ -2562,31 +2575,91 @@ class AfkAutoclicker:
         self._settings_open = True
         self._rebuild_ui()
 
+    def _request_pane_fill(self, key):
+        """Coalescing tail for every _fill_pane() call site (G#28/GH#48
+        round 5): a single Eating-card growth cascade fires
+        _on_eat_card_settled() once per <Configure> its shell receives --
+        traced at 14 calls for one pane build on Windows CI -- and every
+        one of those is a full measure-and-write pass over the pane. Worse
+        than the wasted work itself: each pass is real Tk/Python churn on
+        the allocation scale GH#46's own trace shows triggering a worker-
+        thread GC that finalizes a leaked Variable off the main thread and
+        aborts Tcl (ubuntu CI). Only the LAST call in a burst ever matters
+        -- every earlier one measures a `natural` a later call in the same
+        burst immediately supersedes -- so every call site below (the tab-
+        switch tails, _select()'s own tail, every pane's <Configure>-bound
+        lambda, and on_settle) requests a deferred pass here instead of
+        calling _fill_pane() directly, and repeated requests for the same
+        burst collapse into the one pass that actually runs.
+
+        Mirrors _request_rebuild()/_rebuild_ui()'s own _rebuilding/
+        _rebuild_wanted pair exactly, and for the same reason: a deferred
+        pass must still land LAST, not merely once. If _run_pane_fill() is
+        already executing (self._pane_filling) when another request lands
+        -- e.g. from a further growth step _fill_pane()'s own
+        update_idletasks() reentrantly drains while the deferred pass is
+        already mid-measurement -- this re-arms exactly one follow-up pass
+        instead of running inline (which would reproduce the very
+        reentrancy _rebuild_ui()'s docstring warns about) or being
+        silently dropped (which would reintroduce the stale-`natural` race
+        round 2 fixed)."""
+        if self._pane_filling:
+            self._pane_fill_wanted = key
+            return
+        self._pane_fill_key = key
+        if self._pane_fill_after_id is None:
+            self._pane_fill_after_id = self.root.after_idle(self._run_pane_fill)
+
+    def _run_pane_fill(self):
+        """The one deferred pass _request_pane_fill() above schedules.
+        Re-arms itself, via _request_pane_fill(), for exactly one follow-up
+        if a further request landed while this call's own _fill_pane() was
+        running -- see _request_pane_fill()'s docstring."""
+        self._pane_fill_after_id = None
+        key = self._pane_fill_key
+        self._pane_fill_key = None
+        self._pane_filling = True
+        try:
+            fill = self._pane_fills.get(key)
+            if fill is not None:
+                _fill_pane(*fill)
+        finally:
+            self._pane_filling = False
+            if self._pane_fill_wanted is not None:
+                wanted = self._pane_fill_wanted
+                self._pane_fill_wanted = None
+                self._request_pane_fill(wanted)
+
     def _on_eat_card_settled(self):
         """card()'s on_settle callback for eat_card (story #24 feature 4 /
-        G#28 GH#48): re-run _fill_pane() for the clicking pane every time
-        the Eating card's own shell actually finishes resizing, closing the
-        reentrancy gap _select()/_set_content_tab()'s own explicit
-        _fill_pane() calls leave open -- they can run before eat_card's
+        G#28 GH#48): request a deferred _fill_pane() pass for the clicking
+        pane every time the Eating card's own shell actually finishes
+        resizing, closing the reentrancy gap _select()/_set_content_tab()'s
+        own tails leave open -- they can run before eat_card's
         <Configure>-triggered _redraw() has settled to the card's real
         final height, so the `natural` they measure can be stale-too-small
         (see docs/implementation.md's round-2 section for the traced
-        mechanism). Whatever the stale call wrote gets overwritten here
-        with the correct split once the true height is known, instead of
-        depending on how many nested update_idletasks() passes happen to
-        land inside one synchronous call.
+        mechanism). Whatever an earlier request wrote gets overwritten by
+        the eventual deferred pass with the correct split once the true
+        height is known.
 
-        Two guards, both required: `_pane_fills` doesn't have "clicking"
-        yet the first time this fires (card()'s own unconditional initial
-        _redraw() call happens before _build_content() populates
-        `_pane_fills`, see its call site) -- `.get()` makes that a no-op
-        instead of a KeyError. And this must never touch the pane while
-        Clicking isn't the active tab: reading a hidden pane's
+        Routed through _request_pane_fill() rather than calling
+        _fill_pane() directly (round 5): this fires once per growth step --
+        traced at up to 13 times for one Eating-card growth cascade -- and
+        _request_pane_fill() collapses however many of those land in one
+        burst into a single actual pass. See its own docstring.
+
+        Guarded on `_content_tab == "clicking"`: this must never touch the
+        pane while Clicking isn't the active tab -- reading a hidden pane's
         winfo_height() is the exact unmapped-widget hazard this story has
-        hit before (_select()'s own tail carries the identical guard)."""
-        fill = self._pane_fills.get("clicking")
-        if fill is not None and self._content_tab == "clicking":
-            _fill_pane(*fill)
+        hit before (_select()'s own tail carries the identical guard).
+        `_pane_fills` doesn't have "clicking" yet the first time this
+        fires (card()'s own unconditional initial _redraw() call happens
+        before _build_content() populates `_pane_fills`) -- harmless here
+        since _run_pane_fill()'s own `.get()` already no-ops on a missing
+        key, so nothing further needs guarding against it above."""
+        if self._content_tab == "clicking":
+            self._request_pane_fill("clicking")
 
     def _set_content_tab(self, value):
         """Toggle which game-page pane is packed. Both panes are always
@@ -2617,11 +2690,15 @@ class AfkAutoclicker:
         self.clicking_pane.pack_forget()
         (self.hotkey_pane if value == "hotkey" else self.clicking_pane).pack(
             fill="both", expand=True)
-        # Story #24 feature 4: belt-and-suspenders explicit recompute for
-        # the newly-active pane -- the pack() call above already fires a
-        # correctly-sized <Configure> on it (Empirical grounding #3), so
-        # this does not depend on Tk's own event-dispatch timing.
-        _fill_pane(*self._pane_fills[value])
+        # Story #24 feature 4: belt-and-suspenders recompute for the newly-
+        # active pane -- the pack() call above already fires a correctly-
+        # sized <Configure> on it (Empirical grounding #3), so this does
+        # not depend on Tk's own event-dispatch timing. Routed through
+        # _request_pane_fill() (G#28/GH#48 round 5), not called directly:
+        # the <Configure> this pack() fires already requests the same key,
+        # so this and that collapse into one deferred pass instead of two
+        # separate immediate ones.
+        self._request_pane_fill(value)
 
     def _set_settings_tab(self, value):
         """Same toggle as _set_content_tab(), for the Settings page's
@@ -2640,9 +2717,11 @@ class AfkAutoclicker:
         self.updates_pane.pack_forget()
         (self.appearance_pane if value == "appearance" else self.updates_pane).pack(
             fill="both", expand=True)
-        # Story #24 feature 4: same belt-and-suspenders explicit recompute
-        # as _set_content_tab()'s own tail -- see its comment.
-        _fill_pane(*self._pane_fills[value])
+        # Story #24 feature 4: same belt-and-suspenders recompute as
+        # _set_content_tab()'s own tail -- see its comment, including for
+        # why this is routed through _request_pane_fill() (G#28/GH#48
+        # round 5).
+        self._request_pane_fill(value)
 
     # ---------- game list ----------
 
@@ -2707,9 +2786,11 @@ class AfkAutoclicker:
         # pane produces zero <Configure> events on the pane itself (Empirical
         # grounding #2). Guarded on the Clicking tab actually being visible:
         # reading a hidden pane's winfo_height() would be the exact
-        # unmapped-widget hazard this story has hit before.
+        # unmapped-widget hazard this story has hit before. Routed through
+        # _request_pane_fill() (G#28/GH#48 round 5) -- see _set_content_tab()'s
+        # own tail for why.
         if self._content_tab == "clicking":
-            _fill_pane(*self._pane_fills["clicking"])
+            self._request_pane_fill("clicking")
 
         if persist:
             self.store.data["selected"] = game_id
@@ -3241,6 +3322,16 @@ class AfkAutoclicker:
             except tk.TclError:
                 pass
             self._rebuild_after_id = None
+        # Same reasoning, for _request_pane_fill()'s own deferred job
+        # (G#28/GH#48 round 5): a pane-fill can still be pending here (an
+        # on_settle/<Configure> fired, _run_pane_fill() never got a chance
+        # to).
+        if self._pane_fill_after_id is not None:
+            try:
+                self.root.after_cancel(self._pane_fill_after_id)
+            except tk.TclError:
+                pass
+            self._pane_fill_after_id = None
         self.stop()
         if self.hk_listener is not None:
             self.hk_listener.stop()
