@@ -913,6 +913,13 @@ class RowValueColumn(UITestCase):
 
         # And the thing this test is actually named for, which it never
         # previously checked: the wrapped hint must not run into the control.
+        # jitter_ms's Clicking pane is hidden by default (story #24 feature
+        # 2); winfo_rootx() on an unmapped widget is Tk's placeholder (0 on
+        # Windows), not a real screen position, so switch to the pane that
+        # owns both widgets before measuring -- same reasoning as
+        # test_offset_is_unchanged_when_the_card_stretches above.
+        self.ui._set_content_tab("clicking")
+        self.root.update()
         self.assertLessEqual(
             hint.winfo_rootx() + hint.winfo_width(),
             self.ui.jitter_ms.winfo_rootx())
