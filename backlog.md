@@ -25,14 +25,23 @@ end-to-end pass clean on `main` at `0d6e784`. Report: `handoff/story-17-e2e.md`.
 ## Open
 
 Bugs and residue:
-- [ ] **`Segmented` never calls `trace_remove`**, so a destroyed widget's trace stays
+- [x] **`Segmented` never calls `trace_remove`**, so a destroyed widget's trace stays
       registered on its variable. Found during story #24's end-to-end pass: writing to
       `appearance_var`/`ui_scale_var` after closing Settings (without reopening) hits
       the dangling trace of the destroyed `Segmented`. Confirmed by grep that **no code
       path in the app itself can reach this** — it needs an external caller holding a
       stale reference, which is why it has never surfaced in normal use or in the suite.
-      Not a story #24 regression; it predates the story. Worth fixing before anything
-      starts driving those vars programmatically.
+      Not a story #24 regression; it predates the story.
+      **Partially resolved by G#27/ac-27** (`AfkAutoclicker._forget_traces()`, called
+      from both `_rebuild_ui()` and `on_close()`): every trace on a Variable this UI
+      still owns is swept at both points, regardless of which widget registered it,
+      so `Segmented`/`TabBar`'s own un-removed traces stop leaking past a rebuild or a
+      close. The mid-life window this item originally described — something external
+      writing to the variable *between* a rebuild and the next close/rebuild, while a
+      superseded `Segmented`'s dangling trace is still live — is **not** addressed;
+      that needs the trace removed at rebuild time on the *old* widget specifically,
+      which `_forget_traces()` deliberately does not attempt (see its own docstring
+      and docs/history/ac-27-implementation.md). Left open, narrowed to that window.
 - [ ] G#5 / GH#7 — Applying a hotkey crashes the process on macOS without Accessibility permission.
 - [ ] G#8 / GH#10 — `registered_hotkey` claims a listener that is not running.
 - [ ] G#7 / GH#9 — `from_json` checks shape but not vocabulary.
@@ -50,11 +59,46 @@ Bugs and residue:
       `Tcl_AsyncDelete: async handler deleted by the wrong thread`, exit 134, and
       unittest's summary never prints, so a run that passed looks like a failure.
       Reproduced on clean `main` at roughly 1 run in 4 (and at a similar rate on the
-      feature/ac-17 branch), so it predates the UI-scale work. A Tk `Variable.__del__`
-      is running off the main thread after the main thread has left the loop — most
-      likely a test that starts a real worker thread not joining it before teardown.
-      This is a strong candidate for the flaky CI runs already noted under
-      Housekeeping, which matter more than usual because the token can't re-run jobs.
+      feature/ac-17 branch), so it predates the UI-scale work.
+      **G#27/ac-27 investigated this at length** (see
+      docs/history/ac-27-implementation.md) and confirmed the mechanism: a Tk
+      `Variable.__del__` running off the main thread, because the underlying
+      interpreter (and everything reachable from it — every Variable, every widget)
+      was still referenced, past `on_close()`, by something the test/app never
+      released. Found and fixed three concrete, previously-unknown instances of
+      exactly this: `root.bind_all()`'s own command (`needcleanup=0`, `destroy()`
+      never releases it — new: `_button1_all_funcid` + explicit `deletecommand()` in
+      `on_close()`), every un-removed variable trace surviving a rebuild (new:
+      `_forget_traces()`, see the `Segmented` item above), and an item left sitting in
+      `self._ui_queue` after `on_close()`'s own `self.stop()` call queues one with
+      nothing left to drain it (new: an explicit drain at the end of `on_close()`).
+      `_poll_games()`'s scan thread was also holding `self` for the full duration of
+      its `detect_running()` call (which can itself stall — seen directly, ~1 scan in
+      a couple hundred, stuck opening its Xlib connection); it now holds only the
+      plain `profiles` list across that call, and is tracked/joined (bounded, 2s) by
+      `on_close()`.
+      **Not fully resolved.** After all four fixes, a full-suite run still reports
+      the *same* off-main-thread `Variable.__del__` at roughly the same frequency
+      (~55 of ~284 tests) as before — traced to a real, reproducible interaction
+      where a *preceding* test that goes through `UITestCase.restart()` leaves some
+      later test's `GameItem`/`SettingsItem`/`Button` widgets uncollected after a
+      clean `on_close()` (confirmed via `_tclCommands is None` and `children == {}`
+      on the widgets themselves — the Tcl-level cleanup this ticket's fixes target is
+      not the gap here). `gc.collect()` reports 0 objects collected even retried over
+      a 2s window, and `gc.get_referrers()` shows no external anchor, which is
+      consistent with (but not proven to be) a reference held by `_tkinter.tkapp`
+      itself — confirmed via `gc.is_tracked()` to not participate in cyclic GC at all,
+      so any real reference it holds is invisible to graph-based diagnosis. Whether
+      the *fatal* abort (as opposed to this always-benign, always-caught RuntimeError
+      variant) is downstream of this same mechanism is unconfirmed: 20 back-to-back
+      full-suite runs of unmodified `main` in the sandboxed environment this
+      investigation ran in produced zero exit-134 aborts, only this benign variant —
+      so the fatal escalation could not be reproduced on demand here at all, on
+      either side of the fix. Minimal repro for whoever picks this up next:
+      `python -m unittest tests.test_ui.PerGameSettings.test_survives_a_restart
+      tests.test_ui.<any test that constructs+on_close()s a second UI in the same
+      process>` and check `gc.get_referrers()` on a `weakref.ref()` taken before that
+      second UI's `on_close()`.
 - [ ] **The trace-registration-order hazard is overclaimed in merged code and in the
       story's spec** — `_apply_appearance`'s own comment (~`afk_clicker.py:1939-1958`)
       and `docs/spec.md` §2 both attribute Theme's safety to registering `trace_add`

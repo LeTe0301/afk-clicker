@@ -1,4 +1,5 @@
 """The window: per-game settings, persistence, detection and the click loop."""
+import gc
 import json
 import os
 import subprocess
@@ -9,6 +10,7 @@ import time
 import traceback
 import types
 import unittest
+import weakref
 
 from .context import app, kb, needs_display, hotkey
 
@@ -260,6 +262,62 @@ class AddedGames(UITestCase):
         self.assertEqual(self.ui.game_state.cget("text"), "no window found")
 
 
+class PollGamesScanDoesNotHoldSelfWhileBlocked(unittest.TestCase):
+    def test_scan_only_holds_profiles_not_self_during_detect_running(self):
+        # _poll_games()'s scan() thread used to close over self directly.
+        # detect_running() -> _window_titles() opens a fresh Xlib connection
+        # every call, and that connection setup can genuinely stall (seen in
+        # this suite: one scan out of every couple hundred, stuck inside
+        # Xlib.display.Display() itself -- see docs/implementation.md). A
+        # scan still in flight kept the whole AfkAutoclicker -- and every
+        # tkinter.Variable it owns -- reachable for as long as that thread
+        # had not returned, however long that turned out to be. Whichever
+        # thread eventually dropped that reference (or merely ran a GC pass
+        # while still holding it) was not necessarily the main one, which
+        # is how a stale Variable gets finalized off the main thread and
+        # aborts the interpreter ("Tcl_AsyncDelete: async handler deleted
+        # by the wrong thread").
+        #
+        # This checks the fix directly, at the point scan()'s own frame is
+        # paused inside the (mocked, blocking) detect_running() call, by
+        # inspecting that frame's locals -- rather than going through
+        # AfkAutoclicker.on_close() and a whole-object gc.collect(), which
+        # docs/implementation.md's "Known limitations" section explains is
+        # its own, separate source of non-determinism in this suite (traced
+        # to a real, reproducible interaction with unrelated preceding
+        # tests, not to this fix) and not something a reliable regression
+        # test can be built on right now.
+        entered = threading.Event()
+        release = threading.Event()
+        seen_locals = {}
+
+        def fake_detect_running(profiles):
+            frame = sys._getframe(1)   # scan()'s own frame, still on the stack
+            seen_locals.update(frame.f_locals)
+            entered.set()
+            release.wait(5)
+            return set()
+
+        original = app.detect_running
+        app.detect_running = fake_detect_running
+        config = os.path.join(tempfile.mkdtemp(), "settings.json")
+        root = tk.Tk()
+        try:
+            ui = app.AfkAutoclicker(root, store=app.Store(config))
+            root.update()
+            self.assertTrue(entered.wait(5), "scan thread never reached detect_running")
+            self.assertNotIn(
+                "me", seen_locals,
+                "scan() must not hold a strong ref to the UI while "
+                "detect_running() blocks")
+            self.assertIn("profiles", seen_locals)
+        finally:
+            release.set()
+            app.detect_running = original
+            try:
+                root.destroy()
+            except tk.TclError:
+                pass
 
 
 class CorruptConfig(UITestCase):
