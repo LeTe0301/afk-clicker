@@ -20,10 +20,15 @@ GitHub number. Shown below as **G#** / **GH#**.
       section headers with a right-aligned action slot. It touches `Button`,
       `Segmented`, `TabBar`, `card()`, `section()`, `StatusPill`, `GameItem`,
       `SettingsItem` and every `round_rect()` call site.
-      **It carries the one product decision the story deliberately deferred:
-      whether the accent moves from today's red/orange toward the reference's
-      green.** `ACCENT` is `#e08a55` dark / `#2b58cc` light (`afk_clicker.py`
-      THEMES). Needs the owner's answer before feature 5 is specced.
+      **The accent question is already settled** — the owner decided on
+      2026-09-11 that the accent stays as it is (`#e08a55` dark / `#2b58cc`
+      light), recorded in `docs/history/ac-24-story.md`'s "Decisions" section
+      and re-confirmed 2026-09-12. Feature 5 adopts the reference's *sparing
+      accent discipline* (active rail item, active tab underline, selection)
+      without its hue: the green is NVIDIA's brand, not a property of the
+      minimal style. Note the accent is not red — the red in the reference
+      screenshots is `BAD = "#f06262"`, the OFF-state pill, a different token
+      and out of scope. Do not reopen this in feature 5's spec.
       After feature 5 the story needs one end-to-end pass before it closes.
       Branch `feature/ac-24/responsive-layout-icon-restyle`, worktree `ac-24`.
       Reference screenshots: `handoff/nvidia-reference/`.
@@ -153,7 +158,8 @@ Housekeeping:
   `feature/ac-24/responsive-layout-icon-restyle` at merged `main`, clean, with
   its `docs/*.md` ready to be overwritten by feature 4.
 - **Story G#24 / GH#36 is 4 of 5 features done. Nothing is in flight.** Feature 5
-  (flat restyle) is blocked on the owner's accent-colour decision.
+  (flat restyle) is next and is not blocked — its accent question was settled by
+  the owner on 2026-09-11; see the story entry above.
 
 Merged this session, each after a critical PR review posted on the PR:
 
