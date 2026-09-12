@@ -11,27 +11,12 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
-- [ ] **Story: responsive layout and an icon-led minimal restyle** — G#24 / GH#36.
-      **Features 1-4 of 5 are merged** — PR #37 (`db20af2`, row value column),
-      PR #40 (`5ab0196`, tab bar), PR #41 (`18c6f7c`, icon rail), PR #42
-      (`cb5900e`, vertical fill).
-      **Next: feature 5, the last one** — the flat minimal restyle: drop
-      `CARD_R`/`PILL_R` rounding, a single sparingly-used accent, sentence-case
-      section headers with a right-aligned action slot. It touches `Button`,
-      `Segmented`, `TabBar`, `card()`, `section()`, `StatusPill`, `GameItem`,
-      `SettingsItem` and every `round_rect()` call site.
-      **The accent question is already settled** — the owner decided on
-      2026-09-11 that the accent stays as it is (`#e08a55` dark / `#2b58cc`
-      light), recorded in `docs/history/ac-24-story.md`'s "Decisions" section
-      and re-confirmed 2026-09-12. Feature 5 adopts the reference's *sparing
-      accent discipline* (active rail item, active tab underline, selection)
-      without its hue: the green is NVIDIA's brand, not a property of the
-      minimal style. Note the accent is not red — the red in the reference
-      screenshots is `BAD = "#f06262"`, the OFF-state pill, a different token
-      and out of scope. Do not reopen this in feature 5's spec.
-      After feature 5 the story needs one end-to-end pass before it closes.
-      Branch `feature/ac-24/responsive-layout-icon-restyle`, worktree `ac-24`.
-      Reference screenshots: `handoff/nvidia-reference/`.
+Story G#24 / GH#36 (responsive layout and an icon-led minimal restyle) closed
+2026-09-12: all five features merged — PR #37 (`db20af2`, row value column),
+#40 (`5ab0196`, tab bar), #41 (`18c6f7c`, icon rail), #42 (`cb5900e`, vertical
+fill), #43 (`06f5900`, flat restyle). Story-level end-to-end pass clean on `main`
+at `0a6ce58`, 284 tests, CI green on all three platforms. Report:
+`handoff/story-24-e2e.md`; screenshots in `handoff/story24-shots/`.
 
 Story G#17 / GH#20 (themes that follow the system, and a Settings tab) closed
 2026-09-11: features 1, 2, 3a, 3b and 4 merged (PRs #28–#31, #34), story-level
@@ -40,6 +25,14 @@ end-to-end pass clean on `main` at `0d6e784`. Report: `handoff/story-17-e2e.md`.
 ## Open
 
 Bugs and residue:
+- [ ] **`Segmented` never calls `trace_remove`**, so a destroyed widget's trace stays
+      registered on its variable. Found during story #24's end-to-end pass: writing to
+      `appearance_var`/`ui_scale_var` after closing Settings (without reopening) hits
+      the dangling trace of the destroyed `Segmented`. Confirmed by grep that **no code
+      path in the app itself can reach this** — it needs an external caller holding a
+      stale reference, which is why it has never surfaced in normal use or in the suite.
+      Not a story #24 regression; it predates the story. Worth fixing before anything
+      starts driving those vars programmatically.
 - [ ] G#5 / GH#7 — Applying a hotkey crashes the process on macOS without Accessibility permission.
 - [ ] G#8 / GH#10 — `registered_hotkey` claims a listener that is not running.
 - [ ] G#7 / GH#9 — `from_json` checks shape but not vocabulary.
@@ -93,6 +86,9 @@ Features:
       single-card panes (Hotkey, Appearance, Updates) carry far more. Feature 4
       centres that space, halving the largest single band from ~630px to ~315px on a
       tall window, but 315px is still 44% of the pane: centring treats the symptom.
+      **At the actual window floor it is worse than the tall-window figure suggests** —
+      the story's end-to-end pass measured the Hotkey pane at 409px of 527px, 78%
+      empty. The tall-window 44% is the flattering case, not the typical one.
       A smaller floor, or one that scales with the tallest tab's actual content,
       would attack the cause. Raised independently by both the ux-designer and the
       developer during feature 4 and confirmed by two reviewers, so it is real and
@@ -149,96 +145,82 @@ Housekeeping:
       the last stage to touch a worktree before the next cycle overwrites those files.
       Arguably belongs in the global pipeline description in `~/.claude/CLAUDE.md`
       too — left alone, as that's the owner's file.
-## Session handoff — 2026-09-12
+## Session handoff — 2026-09-12 (end of session)
 
 **Where things stand:**
-- `main` is at `73f38f4` (code at `cb5900e`), CI green on all three platforms,
-  **276 tests**.
-- The local checkout is on `main` and clean. The `ac-24` worktree is on
-  `feature/ac-24/responsive-layout-icon-restyle` at merged `main`, clean, with
-  its `docs/*.md` ready to be overwritten by feature 4.
-- **Story G#24 / GH#36 is 4 of 5 features done. Nothing is in flight.** Feature 5
-  (flat restyle) is next and is not blocked — its accent question was settled by
-  the owner on 2026-09-11; see the story entry above.
+- `main` is at `0a6ce58` (code at `06f5900`), CI green on all three platforms,
+  **284 tests**. Local checkout clean; the `ac-24` worktree is on its branch at
+  the merged state, clean.
+- **Story G#24 / GH#36 is closed — all five features merged.** Nothing is in
+  flight. There is no story queued behind it.
 
-Merged this session, each after a critical PR review posted on the PR:
+Merged this session, each after a critical ten-round PR review posted on the PR
+and green CI on all three platforms:
 
-| PR | What | Merge |
+| PR | Feature | Merge |
 |---|---|---|
-| #40 | Feature 2 — horizontal tab bar (`Hotkey \| Clicking`, `Appearance \| Updates`) | `5ab0196` |
-| #41 | Feature 3 — icon rail, window floor rederived | `18c6f7c` |
-| #42 | Feature 4 — each tab pane fills its own leftover vertical space | `cb5900e` |
+| #40 | 2 — horizontal tab bar (`Hotkey \| Clicking`, `Appearance \| Updates`) | `5ab0196` |
+| #41 | 3 — icon rail; window minimum width rederived | `18c6f7c` |
+| #42 | 4 — each tab pane fills its own leftover vertical space | `cb5900e` |
+| #43 | 5 — flat restyle, sparing accent, sentence-case headers | `06f5900` |
 
 (Feature 1, the row value column, merged as PR #37 / `db20af2` at the end of the
 previous session.)
 
-**Next:** feature 4 — content fills the available vertical height, no dead band
-below the last card. It depends on feature 2, which is in. Feature 5 (the flat
-minimal restyle, and the red-vs-green accent decision) is last and depends on
-all of 1–4. The feature breakdown is `docs/history/ac-24-story.md`; the accent
-question must not be decided before feature 5.
+Story-level end-to-end pass: clean. `handoff/story-24-e2e.md`, screenshots in
+`handoff/story24-shots/`.
 
-**Read before starting feature 4** — it is another geometry feature, and both
-traps below are geometry traps:
-- `docs/history/ac-24-f3-implementation.md` round 3 (the WM/`<Configure>` crash).
-- The two CI-only entries under Housekeeping above.
-
-**Working docs:** each cycle's spec/design/implementation/test-review is archived
-into `docs/history/ac-24-f{1,2,3}-*.md` as the last step of that cycle. The
-`ac-24` worktree's own `docs/*.md` are scratch for the *current* cycle only.
+**Next:** nothing is queued. The open items are in the sections above — the
+largest are the `minh` window-floor question (a product decision, and the one
+most visible to a user), G#13's Macros tab, and G#12's calibration suite. Both
+of those last two need a rebase before they build.
 
 **Workflow:**
-1. The pipeline runs product-manager → ux-designer → developer → reviewer.
+1. product-manager → ux-designer → developer → reviewer, each stage reading the
+   previous stage's `docs/*.md`.
 2. An approved cycle is pushed and PR'd without asking.
-3. The review agent gives each PR a critical review in the ten-round format of
+3. The review agent gives each PR a critical ten-round review per
    `docs/REVIEW-PROTOCOL.md`, re-deriving claims rather than trusting the cycle's
    own docs, and posts it on the PR.
 4. Merge on a `MERGE` verdict **and** green CI on all three platforms. A red leg
    routes back to the developer as a new round — never merge through it.
 5. If a fix lands after a verdict, ask the same reviewer to verify the delta and
-   re-issue, rather than paying for a fresh ten-round pass.
+   re-issue rather than paying for a fresh ten-round pass.
+6. Archive the cycle's `docs/*.md` into `docs/history/` **after** CI is green,
+   not at reviewer approval — approval is not the last gate.
 
 **Running tests here:** the README's `xvfb-run` needs `xauth`, which this
 container lacks. Start `Xvfb :99` directly and use a venv with `pynput`:
-`DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .` — 269 tests on
+`DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .` — 284 tests on
 `main`. The venv lives in the session scratchpad and does not survive a container
-reset; rebuild with `python3 -m venv` + `pip install pynput`. Keep a second
-display (`:98`) for load loops — see Housekeeping.
+reset. Keep a second display (`:98`) for load loops — see Housekeeping.
 
-**Lessons that cost a round each:**
+**The one lesson this story is worth remembering for:** *a green local run is not
+evidence for behaviour this box cannot produce.* CI's Windows and macOS legs
+caught **eleven** things the cycle reviews missed, and they share that one shape.
+Xvfb has no window manager, so it never clamps a window, never sends a post-map
+root `<Configure>`, and never arbitrates focus between processes. Anything
+resize-, mapping- or focus-driven is only really tested on CI.
+
+Concretely, before asserting a pixel value, ask what else could legitimately
+produce a different number elsewhere — the font, the screen, the DPI, the WM.
+Prefer assertions true by construction: compare two things measured the same way,
+or derive the expectation from what was actually measured, rather than comparing
+one measurement against a constant or against a starting value you assumed the
+platform would honour.
+
+**Other lessons that cost a round each:**
 - Tk prints callback exceptions instead of raising them. `UITestCase` records them.
-- Local runs are Linux-only. CI's Windows and macOS legs have now caught **eight**
-  things the cycle reviews missed. The recurring shape: *a green local run is not
-  evidence for behaviour this box cannot produce.*
-  1. A window geometry assumed granted — the WM clamps to the screen (~1024x768
-     on the runners), so a requested size is not the size you get.
-  2. The same test's premise unsatisfiable on a short screen, needing an honest
-     skip rather than a looser assertion.
-  3. A Label's `winfo_reqwidth()` compared against its own `wraplength` — different
-     quantities, so the font decides. 144 vs 145 passed on DejaVu Sans; 141 vs 140
-     failed on Segoe UI.
-  4. A geometry assertion on a widget inside a hidden pane — stale-but-plausible on
-     X11, 0 and 1 on Windows.
-  5. A fixed pixel headroom on a window height — real WM/DPI rounding overshot it
-     by 24px on macOS and 148px on Windows. No constant fixes that; assert only the
-     axis the property under test actually depends on.
-  6. A `<Configure>` handler bound before construction finished — only a real WM
-     generates the event that triggers it.
-  Before asserting a pixel value, ask what else could legitimately produce a
-  different number elsewhere — the font, the screen, the DPI, the WM. Prefer an
-  assertion true by construction: compare two things measured the same way rather
-  than one measurement against a constant.
-- Design docs' contrast numbers were wrong three times. Recompute with the WCAG
-  formula. The compound scale is `_dpi_s * UI_SCALE_FACTORS[...]` — the two
-  **multiply**, so the worst case is low-DPI *and* the 90% step together
-  (`s = 0.675`), not either alone. A design that reasons about them separately is
-  wrong; this is the same error as open ticket G#23.
+- Design-doc contrast arithmetic has been wrong **four** times. Recompute with the
+  real WCAG formula, and sanity-check the calculator against white/black = 21:1.
+  The compound scale is `_dpi_s * UI_SCALE_FACTORS[...]` — the two **multiply**, so
+  the worst case is low-DPI *and* the 90% step together (`s = 0.675`), not either
+  alone. `int()` truncates, so `int(10 * 0.675)` is 6, not 7.
 - A comment asserting a hazard is worth empirically testing before trusting it.
-  Two of this story's comments claimed safety properties that were simply false:
-  the trace-ordering `TclError` (unobservable — the rebuild always defers via
-  `after_idle`), and `<Configure>`'s bind site claiming "placed after every
-  attribute `_request_rebuild()` reads already exists" when `_persist()` reads
-  `click_ms`, created later in `_build_ui()`.
+  Three in this codebase claimed safety properties that were simply false.
 - Verify a stress-test harness before trusting its numbers. A load loop killed by
   PID rather than process group leaves an orphan hammering the display, which
-  produced a fake 25% failure rate that was briefly reported as a real regression.
+  produced a fake 25% failure rate briefly reported as a real regression.
+- A test written to prevent a latent-parameter bug can contain one. Two tests this
+  story shipped passed in both the working and sabotaged states. **Sabotage every
+  new test in both directions** before believing it.
