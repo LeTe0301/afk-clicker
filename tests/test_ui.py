@@ -855,7 +855,8 @@ class WindowResize(UITestCase):
         # derived from the collapsed rail width, not the expanded one, so
         # the window can actually be dragged down to admit a collapsed rail.
         s = self.ui.s
-        expected = (int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s), int(690 * s))
+        expected = (int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s),
+                    int(app.WINDOW_MIN_H * s))
         self.assertEqual(self.root.minsize(), expected)
 
     def test_rail_stays_at_expanded_width_on_a_wide_window(self):
@@ -897,6 +898,106 @@ class WindowResize(UITestCase):
         minw, minh = self.root.minsize()
         self.assertGreaterEqual(self.root.winfo_width(), minw)
         self.assertGreaterEqual(self.root.winfo_height(), minh)
+
+
+class WindowMinimumHeight(UITestCase):
+    """G#28/GH#48: the height floor was tuned by #14 for the old single
+    combined page and never revisited when PR #40 split it into tabs,
+    leaving the tallest pane (Clicking+Eating, Minecraft) sitting in
+    ~148-163px of dead space it could never reach anyway (no scrolling
+    anywhere in this app) while the shortest pane (Hotkey) sat ~78% empty.
+    WINDOW_MIN_H replaces the bare 690 literal with a smaller, named
+    constant re-derived from the tallest pane's own real content span --
+    these tests prove it both shrank and still fits that pane, construction-
+    true, rather than trusting a hardcoded pixel value."""
+
+    def test_minimum_height_shrunk_from_the_pre_tab_split_floor(self):
+        self.assertLess(app.WINDOW_MIN_H, 690)
+
+    def test_default_launch_height_equals_the_floor(self):
+        # Unlike minw/default_w (story #24 feature 3, which deliberately
+        # decoupled them for the collapsed rail), height has no equivalent
+        # second state -- the hard floor and the freshly-launched default
+        # are the same coupled number (docs/spec.md's "Why height doesn't
+        # get the width axis's floor/default split", G#28/GH#48).
+        expected = int(app.WINDOW_MIN_H * self.ui.s)
+        self.assertEqual(self.root.winfo_height(), expected)
+        self.assertEqual(self.root.minsize()[1], expected)
+
+    def test_tallest_pane_still_fits_at_the_floor(self):
+        # Default (unresized) window state -- i.e. at the floor -- with the
+        # tallest real pane showing (Clicking+Eating, Minecraft; Eating is
+        # Minecraft-only, afk_clicker.py's PROFILES[0]).
+        self.ui._select("minecraft")
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        pane, top, bottom = self.ui._pane_fills["clicking"]
+        # No "zero the spacers first" step: _fill_pane()'s own docstring
+        # (afk_clicker.py) establishes this span measurement is already
+        # translation-invariant in the spacers' current height (they're
+        # excluded from `kids` by identity) -- and, confirmed by probing
+        # this pane directly, Tk silently ignores config(height=0) on a
+        # plain Frame here anyway, so a reset step would be a no-op.
+        pane.update_idletasks()
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        self.assertLessEqual(natural, pane.winfo_height())
+
+    def test_tallest_pane_still_fits_at_the_floor_reverse_order(self):
+        # Round 2 of G#28/GH#48 (docs/test-review.md Defect 1): the sibling
+        # test above only ever exercises _select() before _set_content_tab()
+        # ("order A"). The reverse -- clicking the Clicking tab first while
+        # still on the default Global profile (no Eating card packed at
+        # all), THEN selecting Minecraft -- is the branch inside _select()
+        # (afk_clicker.py's eat_section/eat_card pack() calls) that used to
+        # leave the pane's own _fill_pane() call reading the Eating card's
+        # canvas before its <Configure>-triggered redraw had grown it to
+        # its real height, oversizing `extra` enough that Tk's packer
+        # unmapped the bottom spacer outright -- genuine, permanent content
+        # clipping, not mere asymmetry. Asserts both "not clipped" (natural
+        # fits) and "not left unmapped" (the packer never gave up on a
+        # spacer), the two symptoms the live-app review actually observed.
+        # Round 3 (PR #49, docs/implementation.md) instrumented this test to
+        # trace Windows CI's deterministic failure instead of re-guessing;
+        # round 4 acted on that trace (WINDOW_MIN_H raised from 560 to 620,
+        # plus _fill_pane()'s own clamp/recovery hardening) and restores the
+        # real assertions below.
+        self.ui._set_content_tab("clicking")
+        self.ui._select("minecraft")
+        self.root.update()
+        pane, top, bottom = self.ui._pane_fills["clicking"]
+        pane.update_idletasks()
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        self.assertLessEqual(natural, pane.winfo_height())
+        self.assertTrue(top.winfo_ismapped())
+        self.assertTrue(bottom.winfo_ismapped())
+
+    def test_tallest_pane_still_fits_at_worst_case_compound_scale(self):
+        # The documented worst case: low-DPI macOS (0.75) times the 90%
+        # UI-scale step (0.9), s ~ 0.675. Safe to force directly -- _dpi_s
+        # is a plain instance attribute set once in __init__ and never
+        # rewritten by any rebuild path.
+        self.ui._dpi_s = 0.75
+        self.ui._apply_ui_scale("90")
+        self.root.update()
+        self.ui._select("minecraft")
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        # Spacers/pane are recreated by the scale-triggered rebuild -- must
+        # re-fetch after update(), not reuse a reference from before it.
+        # No zero-spacers step here either -- see the sibling test above.
+        pane, top, bottom = self.ui._pane_fills["clicking"]
+        pane.update_idletasks()
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        self.assertLessEqual(natural, pane.winfo_height())
 
 
 class RailCollapse(UITestCase):
@@ -1106,19 +1207,59 @@ class VerticalFill(UITestCase):
         # holding Hotkey+Clicking+Eating all stacked together) would leave
         # ~0px extra for the tallest PANE today. Story #24 feature 2 split
         # that one page into independent tabs without revisiting minh, so
-        # even the tallest single pane (Clicking+Eating, Minecraft) has
+        # even the tallest single pane (Clicking+Eating, Minecraft) had
         # ~148px of genuine, pre-existing leftover at the floor -- verified
         # directly against this app's own widgets (Xvfb probe, not
-        # committed). Touching minh is explicitly out of scope here (Non-
-        # goals; docs/design.md's own "Open question: window minimum
-        # height"), so what this test actually proves is the invariant
-        # this feature IS responsible for at the floor: _fill_pane()
-        # absorbs whatever leftover genuinely exists -- never more, so
-        # never clipping -- split symmetrically, computed the same way
-        # _fill_pane() itself computes it (true by construction, not a
+        # committed). Touching minh was explicitly out of scope for this
+        # feature (Non-goals; docs/design.md's own "Open question: window
+        # minimum height") but was later addressed by G#28/GH#48, which
+        # shrank WINDOW_MIN_H so the tallest pane's leftover at the floor is
+        # now the deliberate ~40-60px margin from that ticket's own
+        # derivation, not ~148px. What this test actually proves is the
+        # invariant this feature IS responsible for at the floor:
+        # _fill_pane() absorbs whatever leftover genuinely exists -- never
+        # more, so never clipping -- split symmetrically, computed the same
+        # way _fill_pane() itself computes it (true by construction, not a
         # fixed pixel bound).
         self.ui._select("minecraft")
         self.ui._set_content_tab("clicking")
+        self.root.update()
+        pane, top, bottom = self.ui._pane_fills["clicking"]
+        # No settling loop needed (round 2 of G#28/GH#48 -- see
+        # docs/implementation.md's round-2 section): the reentrancy this
+        # test used to paper over with a bounded retry loop is now closed
+        # at the app level -- card()'s on_settle callback re-triggers
+        # _fill_pane() for the clicking pane every time the Eating card's
+        # own shell actually finishes resizing (_on_eat_card_settled()),
+        # so by the time _select()/_set_content_tab()'s own explicit
+        # _fill_pane() call returns, the pane's own update_idletasks() has
+        # already drained every intermediate settle step and the spacers
+        # already reflect the card's true final height -- one direct
+        # assertion, exactly like this test asserted before G#28/GH#48
+        # ever touched it.
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        extra = max(0, pane.winfo_height() - natural)
+        self.assertEqual(top.winfo_height() + bottom.winfo_height(), max(2, extra))
+        self.assertLessEqual(abs(top.winfo_height() - bottom.winfo_height()), 1)
+
+    def test_floor_case_still_splits_symmetrically_with_no_clipping_reverse_order(self):
+        # Same invariant as the sibling test above, reverse order: the
+        # Clicking tab clicked first while still on the default Global
+        # profile (no Eating card packed yet), THEN Minecraft selected --
+        # the branch inside _select() (afk_clicker.py's eat_section/
+        # eat_card pack() calls) that docs/test-review.md's Defect 1 found
+        # producing real, unmapped-spacer clipping before round 2 of
+        # G#28/GH#48. No settling loop here either, for the same reason.
+        # Round 3 (PR #49, docs/implementation.md) instrumented this test to
+        # trace Windows CI's deterministic failure (77 != 2 observed)
+        # instead of re-guessing; round 4 acted on that trace (WINDOW_MIN_H
+        # raised from 560 to 620, plus _fill_pane()'s own clamp/recovery
+        # hardening) and restores the real assertions below.
+        self.ui._set_content_tab("clicking")
+        self.ui._select("minecraft")
         self.root.update()
         pane, top, bottom = self.ui._pane_fills["clicking"]
         kids = [c for c in pane.winfo_children()
@@ -1128,6 +1269,8 @@ class VerticalFill(UITestCase):
         extra = max(0, pane.winfo_height() - natural)
         self.assertEqual(top.winfo_height() + bottom.winfo_height(), max(2, extra))
         self.assertLessEqual(abs(top.winfo_height() - bottom.winfo_height()), 1)
+        self.assertTrue(top.winfo_ismapped())
+        self.assertTrue(bottom.winfo_ismapped())
 
     def test_switching_tabs_recomputes_each_panes_own_margin(self):
         # Fill is computed per pane, not per page: Clicking's own content is
@@ -1242,6 +1385,61 @@ class VerticalFill(UITestCase):
         self.assertEqual(top.winfo_height() + bottom.winfo_height(),
                          max(2, extra))
         self.assertEqual(len(calls), 0)
+
+
+@needs_display
+class FillPaneOverflow(CapturesCallbackExceptions, unittest.TestCase):
+    """G#28/GH#48 round 4: the Windows CI trace (docs/implementation.md's
+    round-4 section) showed a spacer pack() gives up on mapping never gets
+    reconsidered afterward -- its winfo_height() stayed frozen at its last
+    mapped value across nine further _fill_pane() calls and ten passive
+    event-loop pumps, real content overflow long since resolved. Confirmed
+    directly against plain Tk (not this app, and not reproducible on this
+    box's own Linux/Xvfb packer, which -- unlike whatever Windows' own did
+    in the trace -- already reconsiders a dropped sibling on its own the
+    next time *any* other sibling's geometry changes) that pack()'s own
+    overflow decision, once made, is never guaranteed to be revisited
+    without an explicit fresh pack() call. This test targets that
+    explicit-recovery mechanism directly and in isolation, independent of
+    whatever incidental relayout a given platform's packer happens to also
+    do on its own."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self._capture_callback_exceptions(self.root)
+        self.root.geometry("300x500")
+        self.pane = tk.Frame(self.root, height=368, width=200, bg=app.BG)
+        self.pane.pack_propagate(False)
+        self.pane.pack()
+        self.top = tk.Frame(self.pane, bg=app.BG, height=0)
+        self.top.pack(fill="x")
+        self.content = tk.Frame(self.pane, height=200, width=100, bg=app.BG)
+        self.content.pack(fill="x")
+        self.bottom = tk.Frame(self.pane, bg=app.BG, height=0)
+        self.bottom.pack(fill="x")
+        self.root.update()
+
+    def tearDown(self):
+        self.root.destroy()
+        self._assert_no_callback_exceptions()
+
+    def test_a_spacer_pack_already_gave_up_on_is_recovered_once_room_exists(self):
+        # bottom starts unmapped for whatever reason (pack_forget() here
+        # stands in for pack's own overflow decision -- the trigger doesn't
+        # matter, only that it starts unmapped) while the pane has genuine
+        # leftover space (avail=368, content=200, extra=168) -- room enough
+        # for both spacers many times over. _fill_pane() must bring it back
+        # rather than leaving it stuck exactly where an earlier
+        # config()-only write (no pack()) left it (confirmed against the
+        # *unfixed* function: config() alone never remaps an already-
+        # unmapped slave -- only a fresh pack() call does).
+        self.bottom.pack_forget()
+        self.root.update()
+        self.assertFalse(self.bottom.winfo_ismapped())
+        app._fill_pane(self.pane, self.top, self.bottom)
+        self.root.update()
+        self.assertTrue(self.bottom.winfo_ismapped())
+        self.assertGreater(self.bottom.winfo_height(), 0)
 
 
 class RowValueColumn(UITestCase):
@@ -2561,7 +2759,7 @@ class UIScale(UITestCase):
                 # floor is a property of self.s alone, not of whatever the
                 # rail currently looks like.
                 expected = (int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * self.ui.s),
-                           int(690 * self.ui.s))
+                           int(app.WINDOW_MIN_H * self.ui.s))
                 self.assertEqual(self.root.minsize(), expected)
 
     def test_a_bigger_step_grows_the_window_to_the_new_minimum(self):
@@ -2586,7 +2784,7 @@ class UIScale(UITestCase):
         # floor being asserted here.
         max_s = self.ui._dpi_s * app.UI_SCALE_FACTORS["130"]
         min_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * max_s)
-        min_h = int(690 * max_s)
+        min_h = int(app.WINDOW_MIN_H * max_s)
         big_w = min_w + 200
         big_h = min_h + 200
         self.root.geometry(f"{big_w}x{big_h}")
@@ -3413,8 +3611,8 @@ class ReentrantAppearanceChangeDuringRebuild(UITestCase):
         original_card = app.card
         fired = []
 
-        def patched_card(parent, s):
-            result = original_card(parent, s)
+        def patched_card(parent, s, on_settle=None):
+            result = original_card(parent, s, on_settle=on_settle)
             if not fired:
                 fired.append(1)
                 # Simulates a trace/callback re-entering _apply_appearance()
