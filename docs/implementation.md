@@ -180,3 +180,68 @@ equal empty space above and below it instead of a large dead band below.
 Switching games on the Clicking tab to toggle a Minecraft profile (Eating
 shown) vs. any other (Eating hidden) visibly changes Clicking's own margin
 size, with no window resize involved.
+
+## Round 2: fixing the guard test that proved nothing
+
+The reviewer's should-fix (`docs/test-review.md` Finding 1): the previous
+`test_hidden_tabs_own_margin_does_not_desync_the_visible_one` asserted that
+Hotkey's own spacers were unchanged after a game switch. That's true, but
+vacuous — `_fill_pane(*self._pane_fills["clicking"])` (the guarded call at
+`afk_clicker.py:2566-2567`) can only ever write to the exact
+pane/top/bottom tuple it's given, so it structurally cannot touch
+`hotkey_pane`'s spacers whether the `self._content_tab == "clicking"` guard
+is there or not. Removing the guard entirely still passed the old test.
+
+**What the guard actually protects**, per its own comment: reading a hidden
+pane's `winfo_height()` is the "unmapped-widget hazard this story has hit
+before" — stale-but-plausible on X11, `0`/`1` on Windows, wrong either way
+— so a game switch while Clicking is hidden must not recompute *Clicking's
+own* margin from that bad geometry.
+
+**Why the new test asserts on the top spacer specifically, not both.**
+While designing this I found (via an Xvfb probe, not committed) that
+Clicking's *bottom* spacer changes on a profile switch regardless of the
+guard: `_select()` re-packs `eat_section`/`eat_card` with
+`before=clicking_bottom` (`afk_clicker.py:2551-2557`) to keep pack's
+re-add-at-the-end behavior from misordering the Eating card — and that
+re-pack alone, independent of `_fill_pane`, can shrink the already-packed
+bottom spacer through Tk's ordinary fixed-cavity space allocation (the pane
+is `pack_propagate(False)`, so when the newly-shown Eating widgets need
+more of the pane's fixed height, something packed after them gives space
+back). I verified this directly: with the guard fully intact, toggling
+Eating on while Clicking is hidden moved the bottom spacer from 273px to
+94px in one probe run, purely from the re-pack — asserting the bottom
+spacer stays frozen would have been a *new* false claim, this time failing
+even with the guard present. The top spacer is packed before any of that
+and is the guard's actual jurisdiction: with the guard doing its job it
+cannot move while the pane stays unmapped, on either platform's failure
+mode.
+
+**What the new test proves**: it seeds a genuine value for Clicking's top
+spacer while Clicking is actually visible (`_set_content_tab("clicking")`),
+hides it (`_set_content_tab("hotkey")`), switches to the `minecraft`
+profile (toggling Eating inside the now-hidden pane) with Hotkey active,
+and asserts the top spacer is byte-for-byte unchanged from its seeded
+value. It then switches back to Clicking and asserts the top spacer *has*
+changed — proving the guard doesn't leave the pane permanently stale, only
+deferred until it's genuinely visible again.
+
+**Sabotage verification, both directions** (`DISPLAY=:99`, venv python,
+`unittest tests.test_ui.VerticalFill.test_hidden_tabs_own_margin_does_not_desync_the_visible_one`):
+- Guard present (real `afk_clicker.py`): **pass**.
+- Guard removed (`if self._content_tab == "clicking":` deleted, the
+  `_fill_pane(*self._pane_fills["clicking"])` call left unconditional,
+  applied directly to `afk_clicker.py` from a backed-up copy and restored
+  from that backup immediately after, verified via `git status`/`git diff`
+  to be byte-identical to HEAD afterward): **fails**,
+  `AssertionError: 373 != 273` — the top spacer gets silently recomputed
+  from the hidden pane's stale geometry, exactly the hazard the guard
+  exists to prevent.
+
+I did not conclude the guard is unnecessary — sabotaging it produces a
+real, measurable divergence (273 vs. 373 on this platform), so there is a
+genuine behavioral difference to protect, not a manufactured one.
+
+Full regression after restoring the guard: `VerticalFill` 7/7 pass, full
+suite `Ran 276 tests ... OK (skipped=5)`, exit 0. `afk_clicker.py` is
+unmodified in the final diff — only `tests/test_ui.py` changed.

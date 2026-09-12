@@ -1093,16 +1093,47 @@ class VerticalFill(UITestCase):
         self.assertGreater(without_eating, with_eating)
 
     def test_hidden_tabs_own_margin_does_not_desync_the_visible_one(self):
-        # The self._content_tab == "clicking" guard in _select() must
-        # actually prevent a cross-pane write, not merely happen to not
-        # crash: with Hotkey active, a game switch that toggles Eating on
-        # the hidden Clicking pane must leave Hotkey's own spacers alone.
+        # The self._content_tab == "clicking" guard in _select()
+        # (afk_clicker.py:2566) exists to stop a game switch from
+        # recomputing Clicking's OWN margin off the pane's geometry while
+        # it's unmapped -- stale-but-plausible on X11, 0/1 on Windows, wrong
+        # either way -- not to protect Hotkey's spacers, which _fill_pane()
+        # structurally can never touch when called with the "clicking"
+        # tuple. Round 1 of this test asserted on Hotkey's spacers, which
+        # stayed put no matter what the guard did (a prior review caught
+        # this: it passed even with the guard deleted).
+        #
+        # This version seeds a genuine value for Clicking's own top spacer
+        # while Clicking is actually visible, hides it, then switches games
+        # (toggling Eating inside the now-hidden pane) with Hotkey active.
+        # The bottom spacer is deliberately not asserted on here: switching
+        # profiles also re-packs eat_section/eat_card `before=clicking_bottom`
+        # (afk_clicker.py:2551-2557), which can itself shrink the
+        # already-packed bottom spacer through pack's ordinary space
+        # allocation -- a real effect, but not the guarded one. The top
+        # spacer is packed before any of that and is only ever touched by
+        # _fill_pane() itself, so it's the one value that isolates the
+        # guard: with the guard doing its job, it cannot change while the
+        # pane stays unmapped, on any platform's unmapped-widget behavior.
         self._tall_window()
-        _, top, bottom = self.ui._pane_fills["hotkey"]
-        before = (top.winfo_height(), bottom.winfo_height())
-        self.ui._select("minecraft")
+        self.ui._set_content_tab("clicking")
         self.root.update()
-        self.assertEqual((top.winfo_height(), bottom.winfo_height()), before)
+        _, top, _bottom = self.ui._pane_fills["clicking"]
+        seeded_top = top.winfo_height()
+
+        self.ui._set_content_tab("hotkey")
+        self.root.update()
+        self.assertFalse(self.ui._pane_fills["clicking"][0].winfo_ismapped())
+
+        self.ui._select("minecraft")   # toggles Eating on inside the hidden pane
+        self.root.update()
+        self.assertEqual(top.winfo_height(), seeded_top)
+
+        # And the pane isn't left stale forever: once genuinely visible
+        # again, its margin reflects the now-showing Eating card.
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        self.assertNotEqual(top.winfo_height(), seeded_top)
 
     def test_live_resize_drag_updates_margin_without_a_rebuild(self):
         # Proves this feature never touches _request_rebuild()/
