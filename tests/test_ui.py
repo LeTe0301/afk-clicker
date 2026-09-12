@@ -18,85 +18,6 @@ if app is not None:
     import tkinter as tk
 
 
-# --- G#28/GH#48 round-3 diagnostic (PR #49), temporary --------------------
-# Windows CI fails the two reverse-order tests below deterministically while
-# Linux/Xvfb never has, in any order probed across three rounds. Rather than
-# guess again, this patches app._fill_pane() for the duration of one test to
-# print every call's inputs/outputs to stdout -- call count, which pane, who
-# called it (via the live stack, since card()'s on_settle is captured BY
-# VALUE into a closure during UITestCase.setUp(), before a test method or
-# this patch ever runs -- patching _on_eat_card_settled itself post-
-# construction would silently never fire), and eat_card's own shell height/
-# mapped state at that moment. Prints, does not assert: the goal is a full
-# event trace on whichever platform reproduces the bug, not a fix. See
-# docs/implementation.md's round-3 section.
-import contextlib as _diag_contextlib  # noqa: E402 (kept local to this block)
-
-
-@_diag_contextlib.contextmanager
-def _diag_trace_fill_pane(ui, label):
-    original = app._fill_pane
-    state = {"n": 0}
-
-    def traced(pane, top, bottom):
-        pane_name = next((k for k, v in ui._pane_fills.items()
-                           if v == (pane, top, bottom)), "?")
-        stack = [f.name for f in traceback.extract_stack()]
-        if "_on_eat_card_settled" in stack:
-            caller = "_on_eat_card_settled"
-        elif "_select" in stack:
-            caller = "_select"
-        elif "_set_content_tab" in stack:
-            caller = "_set_content_tab"
-        else:
-            caller = "?"
-        original(pane, top, bottom)
-        state["n"] += 1
-        eat_exists = ui.eat_card.winfo_exists()
-        eat_h = ui.eat_card.winfo_height() if eat_exists else -1
-        eat_mapped = ui.eat_card.winfo_ismapped() if eat_exists else False
-        print(f"DIAG[{label}] call#{state['n']} pane={pane_name} "
-              f"caller={caller} available={pane.winfo_height()} "
-              f"top_h={top.winfo_height()} bottom_h={bottom.winfo_height()} "
-              f"top_mapped={top.winfo_ismapped()} "
-              f"bottom_mapped={bottom.winfo_ismapped()} "
-              f"eat_card_h={eat_h} eat_card_mapped={eat_mapped}", flush=True)
-
-    app._fill_pane = traced
-    try:
-        yield
-    finally:
-        app._fill_pane = original
-
-
-def _diag_pump_and_report(root, ui, label, rounds=10):
-    """Passive settle probe: drains the event loop `rounds` more times AFTER
-    the sequence under test already returned, printing the clicking pane's
-    natural/extra/spacer state each round -- no _fill_pane() call is forced
-    here, so this only reveals whether Tk itself needed more idle passes
-    than the test harness's own single root.update() gave it, without the
-    probe itself becoming a second mitigation."""
-    pane, top, bottom = ui._pane_fills["clicking"]
-    for i in range(rounds):
-        root.update()
-        if not pane.winfo_exists():
-            print(f"DIAG[{label}] pump#{i}: pane destroyed", flush=True)
-            return
-        kids = [c for c in pane.winfo_children()
-                if c.winfo_ismapped() and c not in (top, bottom)]
-        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
-                   - min(c.winfo_y() for c in kids)) if kids else 0
-        avail = pane.winfo_height()
-        extra = max(0, avail - natural)
-        print(f"DIAG[{label}] pump#{i} natural={natural} avail={avail} "
-              f"extra={extra} top_h={top.winfo_height()} "
-              f"bottom_h={bottom.winfo_height()} "
-              f"top_mapped={top.winfo_ismapped()} "
-              f"bottom_mapped={bottom.winfo_ismapped()} "
-              f"eat_card_h={ui.eat_card.winfo_height()}", flush=True)
-# --- end round-3 diagnostic -------------------------------------------------
-
-
 class FakeMouse:
     """Records what the loop asked for instead of moving a real pointer."""
 
@@ -1029,35 +950,23 @@ class WindowMinimumHeight(UITestCase):
         # clipping, not mere asymmetry. Asserts both "not clipped" (natural
         # fits) and "not left unmapped" (the packer never gave up on a
         # spacer), the two symptoms the live-app review actually observed.
-        # Round 3 (PR #49, docs/implementation.md): Windows CI fails this
-        # test's own assertions deterministically. Instrumented rather than
-        # re-guessed -- see _diag_trace_fill_pane()/_diag_pump_and_report()
-        # above. Diagnostic only: failures are printed, not raised, so the
-        # full trace survives to the end of this method on every platform,
-        # including the one that reproduces the bug.
-        with _diag_trace_fill_pane(self.ui, "floor-fit-reverse"):
-            self.ui._set_content_tab("clicking")
-            self.ui._select("minecraft")
-            self.root.update()
+        # Round 3 (PR #49, docs/implementation.md) instrumented this test to
+        # trace Windows CI's deterministic failure instead of re-guessing;
+        # round 4 acted on that trace (WINDOW_MIN_H raised from 560 to 620,
+        # plus _fill_pane()'s own clamp/recovery hardening) and restores the
+        # real assertions below.
+        self.ui._set_content_tab("clicking")
+        self.ui._select("minecraft")
+        self.root.update()
         pane, top, bottom = self.ui._pane_fills["clicking"]
         pane.update_idletasks()
         kids = [c for c in pane.winfo_children()
                 if c.winfo_ismapped() and c not in (top, bottom)]
         natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
                    - min(c.winfo_y() for c in kids))
-        print(f"DIAG[floor-fit-reverse] post-update natural={natural} "
-              f"avail={pane.winfo_height()} top_h={top.winfo_height()} "
-              f"bottom_h={bottom.winfo_height()} "
-              f"top_mapped={top.winfo_ismapped()} "
-              f"bottom_mapped={bottom.winfo_ismapped()}", flush=True)
-        _diag_pump_and_report(self.root, self.ui, "floor-fit-reverse")
-        if natural > pane.winfo_height():
-            print("DIAG[floor-fit-reverse] RESULT: FAIL natural > pane height",
-                  flush=True)
-        if not top.winfo_ismapped():
-            print("DIAG[floor-fit-reverse] RESULT: FAIL top unmapped", flush=True)
-        if not bottom.winfo_ismapped():
-            print("DIAG[floor-fit-reverse] RESULT: FAIL bottom unmapped", flush=True)
+        self.assertLessEqual(natural, pane.winfo_height())
+        self.assertTrue(top.winfo_ismapped())
+        self.assertTrue(bottom.winfo_ismapped())
 
     def test_tallest_pane_still_fits_at_worst_case_compound_scale(self):
         # The documented worst case: low-DPI macOS (0.75) times the 90%
@@ -1335,41 +1244,24 @@ class VerticalFill(UITestCase):
         # eat_card pack() calls) that docs/test-review.md's Defect 1 found
         # producing real, unmapped-spacer clipping before round 2 of
         # G#28/GH#48. No settling loop here either, for the same reason.
-        # Round 3 (PR #49, docs/implementation.md): Windows CI fails this
-        # test's own assertions deterministically (77 != 2 observed). See
-        # _diag_trace_fill_pane()/_diag_pump_and_report() above. Diagnostic
-        # only: failures are printed, not raised, so the full trace survives
-        # to the end of this method on every platform.
-        with _diag_trace_fill_pane(self.ui, "symmetric-split-reverse"):
-            self.ui._set_content_tab("clicking")
-            self.ui._select("minecraft")
-            self.root.update()
+        # Round 3 (PR #49, docs/implementation.md) instrumented this test to
+        # trace Windows CI's deterministic failure (77 != 2 observed)
+        # instead of re-guessing; round 4 acted on that trace (WINDOW_MIN_H
+        # raised from 560 to 620, plus _fill_pane()'s own clamp/recovery
+        # hardening) and restores the real assertions below.
+        self.ui._set_content_tab("clicking")
+        self.ui._select("minecraft")
+        self.root.update()
         pane, top, bottom = self.ui._pane_fills["clicking"]
         kids = [c for c in pane.winfo_children()
                 if c.winfo_ismapped() and c not in (top, bottom)]
         natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
                    - min(c.winfo_y() for c in kids))
         extra = max(0, pane.winfo_height() - natural)
-        print(f"DIAG[symmetric-split-reverse] post-update natural={natural} "
-              f"avail={pane.winfo_height()} extra={extra} "
-              f"top_h={top.winfo_height()} bottom_h={bottom.winfo_height()} "
-              f"top_mapped={top.winfo_ismapped()} "
-              f"bottom_mapped={bottom.winfo_ismapped()}", flush=True)
-        _diag_pump_and_report(self.root, self.ui, "symmetric-split-reverse")
-        actual_sum = top.winfo_height() + bottom.winfo_height()
-        expected_sum = max(2, extra)
-        if actual_sum != expected_sum:
-            print(f"DIAG[symmetric-split-reverse] RESULT: FAIL sum "
-                  f"{actual_sum} != expected {expected_sum}", flush=True)
-        if abs(top.winfo_height() - bottom.winfo_height()) > 1:
-            print("DIAG[symmetric-split-reverse] RESULT: FAIL asymmetric split",
-                  flush=True)
-        if not top.winfo_ismapped():
-            print("DIAG[symmetric-split-reverse] RESULT: FAIL top unmapped",
-                  flush=True)
-        if not bottom.winfo_ismapped():
-            print("DIAG[symmetric-split-reverse] RESULT: FAIL bottom unmapped",
-                  flush=True)
+        self.assertEqual(top.winfo_height() + bottom.winfo_height(), max(2, extra))
+        self.assertLessEqual(abs(top.winfo_height() - bottom.winfo_height()), 1)
+        self.assertTrue(top.winfo_ismapped())
+        self.assertTrue(bottom.winfo_ismapped())
 
     def test_switching_tabs_recomputes_each_panes_own_margin(self):
         # Fill is computed per pane, not per page: Clicking's own content is
@@ -1484,6 +1376,61 @@ class VerticalFill(UITestCase):
         self.assertEqual(top.winfo_height() + bottom.winfo_height(),
                          max(2, extra))
         self.assertEqual(len(calls), 0)
+
+
+@needs_display
+class FillPaneOverflow(CapturesCallbackExceptions, unittest.TestCase):
+    """G#28/GH#48 round 4: the Windows CI trace (docs/implementation.md's
+    round-4 section) showed a spacer pack() gives up on mapping never gets
+    reconsidered afterward -- its winfo_height() stayed frozen at its last
+    mapped value across nine further _fill_pane() calls and ten passive
+    event-loop pumps, real content overflow long since resolved. Confirmed
+    directly against plain Tk (not this app, and not reproducible on this
+    box's own Linux/Xvfb packer, which -- unlike whatever Windows' own did
+    in the trace -- already reconsiders a dropped sibling on its own the
+    next time *any* other sibling's geometry changes) that pack()'s own
+    overflow decision, once made, is never guaranteed to be revisited
+    without an explicit fresh pack() call. This test targets that
+    explicit-recovery mechanism directly and in isolation, independent of
+    whatever incidental relayout a given platform's packer happens to also
+    do on its own."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self._capture_callback_exceptions(self.root)
+        self.root.geometry("300x500")
+        self.pane = tk.Frame(self.root, height=368, width=200, bg=app.BG)
+        self.pane.pack_propagate(False)
+        self.pane.pack()
+        self.top = tk.Frame(self.pane, bg=app.BG, height=0)
+        self.top.pack(fill="x")
+        self.content = tk.Frame(self.pane, height=200, width=100, bg=app.BG)
+        self.content.pack(fill="x")
+        self.bottom = tk.Frame(self.pane, bg=app.BG, height=0)
+        self.bottom.pack(fill="x")
+        self.root.update()
+
+    def tearDown(self):
+        self.root.destroy()
+        self._assert_no_callback_exceptions()
+
+    def test_a_spacer_pack_already_gave_up_on_is_recovered_once_room_exists(self):
+        # bottom starts unmapped for whatever reason (pack_forget() here
+        # stands in for pack's own overflow decision -- the trigger doesn't
+        # matter, only that it starts unmapped) while the pane has genuine
+        # leftover space (avail=368, content=200, extra=168) -- room enough
+        # for both spacers many times over. _fill_pane() must bring it back
+        # rather than leaving it stuck exactly where an earlier
+        # config()-only write (no pack()) left it (confirmed against the
+        # *unfixed* function: config() alone never remaps an already-
+        # unmapped slave -- only a fresh pack() call does).
+        self.bottom.pack_forget()
+        self.root.update()
+        self.assertFalse(self.bottom.winfo_ismapped())
+        app._fill_pane(self.pane, self.top, self.bottom)
+        self.root.update()
+        self.assertTrue(self.bottom.winfo_ismapped())
+        self.assertGreater(self.bottom.winfo_height(), 0)
 
 
 class RowValueColumn(UITestCase):

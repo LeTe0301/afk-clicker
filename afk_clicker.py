@@ -160,7 +160,7 @@ else:
 
 SIDEBAR_W = 208
 CONTENT_W = 452
-WINDOW_MIN_H = 560   # the window's hard height floor, and (see
+WINDOW_MIN_H = 620   # the window's hard height floor, and (see
     # _apply_minsize()) today's default launch height too -- they are
     # deliberately the same number, unlike minw/default_w after story
     # #24 feature 3 (docs/spec.md's "Why height doesn't get the width
@@ -168,13 +168,24 @@ WINDOW_MIN_H = 560   # the window's hard height floor, and (see
     # the old single combined page before PR #40 split it into tabs),
     # which left the tallest real pane (Clicking+Eating, Minecraft) in
     # ~148-163px of dead space it can never use and the shortest
-    # (Hotkey) ~78% empty at the floor. Re-derived from the tallest
-    # pane's own real, live-measured content span (title+note+tab bar
-    # overhead plus Clicking+Eating's own content, ~500-510px unscaled
-    # measured at both s≈1 and the documented worst-case compound scale
-    # s≈0.675) plus a ~40-60px margin for cross-platform font-metric
-    # variance this measurement can't check locally -- see docs/spec.md
-    # for the exact method, re-verify before retuning further.
+    # (Hotkey) ~78% empty at the floor.
+    #
+    # Round 1/2 of this ticket picked 560 from a Linux/Xvfb-only
+    # measurement (~500-510px candidate + a ~40-60px margin). Round 4's
+    # real Windows CI trace (docs/implementation.md) showed that margin
+    # was wrong on the platform that actually needed it: at 560, Windows'
+    # own taller Segoe UI metrics left the tallest pane only 1px of real
+    # leftover (natural=367 vs avail=368) -- Linux's own substituted font
+    # never got closer than ~10px, so this box's own measurement never
+    # caught it. 368 = 560 - 192, giving a live-measured Windows overhead
+    # (everything in the window but this one pane) of 192px, vs. this
+    # box's ~131px -- taller chrome, not just taller pane content, eats
+    # the difference. 620 = 192 (Windows overhead) + 367 (Windows
+    # natural) + 61 -- the same ~61px margin round 1 targeted, now sized
+    # against the platform that actually needs it instead of the one
+    # that happened to have slack to spare. Re-verify against a fresh
+    # Windows CI trace before retuning further; this box cannot measure
+    # Windows' own font metrics directly.
 CONTENT_PAD = 16   # _build_content's own outer padx/pady around body
 CARD_INNER_W = CONTENT_W - 2 * CONTENT_PAD - 2 * CARD_PAD    # a full-width
     # card's real inner width: body sits CONTENT_PAD in from CONTENT_W on
@@ -1463,7 +1474,26 @@ def _fill_pane(pane, top_spacer, bottom_spacer):
     `config(height=0)` on a plain Frame -- treated as "no explicit height"
     rather than "make it 0px" -- confirmed empirically, so a reset-to-0
     step would not even have worked; the floor below (max(1, ...)) is the
-    real fix, not merely a rounding nicety."""
+    real fix, not merely a rounding nicety.
+
+    G#28/GH#48 round 4 (Windows CI trace, docs/implementation.md): the
+    `max(1, ...)` floor on each spacer -- needed so neither is ever handed
+    a literal 0 -- can itself push their combined height 1-2px past the
+    pane's real leftover (`available - natural`) once that leftover is only
+    0 or 1px, which is exactly the margin Windows' own taller font metrics
+    left at WINDOW_MIN_H's floor (natural=367 vs avail=368). pack() then
+    has more to fit than the pane's fixed height actually has and
+    permanently unmaps whichever spacer is last in packing order (bottom).
+    The clamp below re-trims the floored pair back down so their sum can
+    never exceed the pane's real leftover, closing that overflow by
+    construction rather than by timing; _set_spacer_height() below is the
+    backstop for the residual case where the pane is genuinely fuller than
+    its own floor allows (both spacers already at the 1px floor, nothing
+    left to trim) -- a spacer pack() gives up on there does not, on its
+    own, ever get reconsidered later (confirmed against the real trace:
+    frozen across nine further calls and ten passive event-loop pumps), so
+    every call here re-maps one that isn't, instead of trusting it stayed
+    mapped from whenever it was last touched."""
     if not pane.winfo_exists():
         return
     pane.update_idletasks()
@@ -1481,8 +1511,44 @@ def _fill_pane(pane, top_spacer, bottom_spacer):
     # leave a spacer stuck at its last nonzero height when shrinking back
     # toward the floor. max(1, ...) is exactly the "<=1px" floor the
     # acceptance criteria already call for, not a new tolerance.
-    top_spacer.config(height=max(1, top_h))
-    bottom_spacer.config(height=max(1, bottom_h))
+    top_h = max(1, top_h)
+    bottom_h = max(1, bottom_h)
+    # Clamp (see docstring): trim whichever spacer is larger back down
+    # until the pair's sum no longer exceeds the real leftover, so pack()
+    # is never handed a share bigger than the pane actually has. Loops at
+    # most twice -- the floor above can only ever have added 1px to each
+    # side -- and stops once both are at the 1px floor with nothing left
+    # to give back.
+    overflow = (top_h + bottom_h) - extra
+    while overflow > 0 and (top_h > 1 or bottom_h > 1):
+        if bottom_h >= top_h and bottom_h > 1:
+            bottom_h -= 1
+        elif top_h > 1:
+            top_h -= 1
+        else:
+            bottom_h -= 1
+        overflow -= 1
+    _set_spacer_height(top_spacer, top_h)
+    _set_spacer_height(bottom_spacer, bottom_h)
+
+
+def _set_spacer_height(spacer, height):
+    """Write a _fill_pane() spacer's height and, if pack() had already
+    given up on mapping it, ask it to reconsider now that the request has
+    changed (G#28/GH#48 round 4). Tk's packer does not retry an unmapped
+    slave on its own once it decides there is no room for it -- confirmed
+    against the Windows CI trace, where an unmapped spacer's own
+    winfo_height() stayed frozen at its last mapped value across nine
+    further _fill_pane() calls and ten passive event-loop pumps -- only a
+    fresh pack() call, not a plain config(), makes it reconsidered. Calling
+    pack() again with the same fill="x" option every spacer is already
+    packed with at construction is safe every time, mapped or not: it does
+    not change the spacer's position in the pane's packing order (no
+    -before/-after given), and is a geometry-request no-op when nothing
+    actually changed."""
+    spacer.config(height=height)
+    if not spacer.winfo_ismapped():
+        spacer.pack(fill="x")
 
 
 class GameItem(tk.Canvas):

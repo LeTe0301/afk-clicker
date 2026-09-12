@@ -594,3 +594,271 @@ DISPLAY=:99 <venv>/bin/python -m unittest \
   the original `assertX` calls restored (whether or not the underlying
   timing/margin issue is also fixed), so these two tests go back to
   actually gating CI.
+
+## Round 4 (Windows CI trace came back) -- the real fix
+
+Round 3's prediction was wrong in the way that mattered: the Windows trace
+shows the `on_settle` cascade converging correctly (`top_h` tracks the
+card's growth down to `1`, exactly like the Linux trace), so this was never
+a "one `update_idletasks()` doesn't drain the whole queue on Windows"
+timing gap. It is shape 2 from round 3's own list -- margin, not timing --
+plus one mechanism defect round 3 hadn't isolated yet: once `pack()` gives
+up on mapping a spacer, nothing ever asks it to try again.
+
+### What the trace showed
+
+`/tmp/claude-1000/win-diag.log`, `DIAG[symmetric-split-reverse]` and
+`DIAG[floor-fit-reverse]` (both reverse-order tests, `windows-latest`,
+identical numbers in both):
+
+```
+call#1  caller=_set_content_tab      avail=368 top=1   bottom=1   top_mapped=0 bottom_mapped=0
+call#2  caller=_set_content_tab      avail=368 top=184 bottom=159 top_mapped=1 bottom_mapped=0
+call#3  caller=_set_content_tab      avail=368 top=92  bottom=76  top_mapped=1 bottom_mapped=1
+call#4  caller=_on_eat_card_settled  avail=368 top=84  bottom=76  top_mapped=1 bottom_mapped=1 eat_card=41
+call#5  caller=_on_eat_card_settled  avail=368 top=65  bottom=76  top_mapped=1 bottom_mapped=0 eat_card=60
+call#6-11 ...                        avail=368 top=32→1 bottom=76 bottom_mapped=0 eat_card=93→124
+call#14 caller=_select               avail=368 top=1   bottom=76  bottom_mapped=0
+post-update / 10 further pumps       natural=367 avail=368 extra=1  top=1 bottom=76 -- unchanged for all 10 pumps
+```
+
+`top_h` converges correctly all the way to `1` by call#11 -- the cascade
+itself works. The bottom spacer becomes unmapped at call#5, the exact
+moment `eat_card` first gets packed, and its `winfo_height()` then stays
+frozen at `76` (its last mapped value) through nine more `_fill_pane()`
+calls and ten passive `root.update()` pumps that never touch it again. At
+`WINDOW_MIN_H = 560`, Windows' own real font metrics (`natural=367` vs
+`avail=368`) leave only 1px of genuine leftover -- Linux's own substituted
+font never measured closer than ~10px, which is why this was invisible on
+every Linux run across three rounds.
+
+Traced the "frozen forever" mechanism directly against plain Tk (not this
+app -- a two-line pane/spacer/content harness, `/tmp/claude-1000/.../
+scratchpad/probe_edge.py` and `probe_recover.py`, not committed): once
+`pack()` decides a slave's allocated cavity is `<=0` and unmaps it,
+calling `.config(height=...)` on that slave again -- exactly what
+`_fill_pane()`'s old code did every subsequent call -- does **not** cause
+Tk to reconsider it; only a fresh `.pack()` call does. Separately, an
+empty `tk.Frame` has an unconditional minimum on-screen height of 1px
+**even when `height=0` is explicitly requested** -- confirmed the same
+way. With two spacers each needing that 1px floor and only 1px of real
+leftover, `natural(367) + top(1) + bottom(1) = 369 > 368`: one of them not
+fitting is not a bug either mechanism change below can undo by itself --
+it is what the margin (`WINDOW_MIN_H`) is responsible for keeping clear
+of. What the trace's `76`-forever behavior actually proves is a bug
+distinct from that: whichever spacer loses out never gets a chance to
+recover once real room exists again.
+
+### What changed
+
+**1. `_fill_pane()`'s own clamp (`afk_clicker.py`).** After the existing
+`max(1, ...)` floor on each spacer (unchanged -- still needed so neither
+is ever handed a literal `0`, which Tk silently ignores), added a
+re-trim step: if the floored pair's sum now exceeds `extra` (the real
+leftover, `available - natural`), shrink whichever spacer is currently
+larger back down, one px at a time, until the sum stops exceeding `extra`
+or both are already at the 1px floor with nothing left to give back. This
+is the primary, by-construction guard the review asked for: `_fill_pane()`
+itself now never *writes* a request bigger than the pane's own real
+leftover, rather than relying on the settle cascade's timing to make that
+true. Documented honestly in "Key decisions" below: given the current
+`FILL_TOP_SHARE = 0.5`, the only inputs where the floor ever inflates the
+sum at all are `extra ∈ {0, 1}` -- exactly the case where both spacers are
+already at the unavoidable 1px floor and there is nothing left to trim.
+The clamp is a correct, hard invariant and real protection against a
+future change to `FILL_TOP_SHARE` or the floor amount; it does not, and
+structurally cannot, make "both spacers fit" true when the pane's real
+leftover is under 2px -- nothing can, per the Tk floor above.
+
+**2. Spacer recovery, `_set_spacer_height()` (`afk_clicker.py`, new
+module-level helper, called from `_fill_pane()` in place of the old bare
+`.config()` calls).** Writes the spacer's height and, if it is currently
+unmapped, calls `.pack(fill="x")` on it again -- the same option every
+spacer is already packed with at construction, which does not change its
+position in the pane's packing order (no `-before`/`-after` given) and is
+a geometry-request no-op when nothing changed. This is what actually
+closes the trace's own defect: a spacer `pack()` gave up on is now
+explicitly asked to be reconsidered on every subsequent `_fill_pane()`
+call, rather than staying frozen at whatever height it last held.
+
+**3. `WINDOW_MIN_H`: `560` → `620` (`afk_clicker.py`).** Re-derived
+directly from the Windows trace's own numbers rather than retuning blind:
+`avail = WINDOW_MIN_H*s - overhead`, and at `560` (`s≈1` on that runner)
+Windows' `avail=368` implies a live Windows overhead (window chrome above
+and below the `clicking` pane) of `560 - 368 = 192px`, against this box's
+own `~131px` -- taller Segoe UI metrics eat noticeably more than just the
+pane's own content, which round 1's Linux-only measurement had no way to
+see. `620 = 192 (Windows overhead) + 367 (Windows natural) + 61` --
+the same ~61px margin round 1 originally targeted, now sized against the
+platform that actually needed it. See "The `WINDOW_MIN_H` decision" below
+for the full reasoning and the rejected alternatives.
+
+**4. Diagnostics removed (`tests/test_ui.py`).** The whole round-3
+diagnostic block (`_diag_trace_fill_pane`, `_diag_pump_and_report`, its
+banner comments) is deleted. Both instrumented tests
+(`WindowMinimumHeight.test_tallest_pane_still_fits_at_the_floor_reverse_order`
+and
+`VerticalFill.test_floor_case_still_splits_symmetrically_with_no_clipping_reverse_order`)
+had their `with _diag_trace_fill_pane(...):` wrapper, print statements,
+and `if not <condition>: print("... RESULT: FAIL ...")` checks replaced
+with the original `self.assertX(...)` calls (`assertLessEqual`/
+`assertTrue` for the floor-fit test, `assertEqual`/`assertLessEqual`/
+`assertTrue` for the symmetric-split test) -- both tests now gate CI
+again, on every platform.
+
+**5. New test class, `FillPaneOverflow` (`tests/test_ui.py`), one test.**
+Added via TDD: reproduced the exact Windows numbers
+(`avail=368`/`natural=367`) directly against plain Tk first (not
+committed, `probe_edge.py`/`probe_cget4.py`) to confirm the mechanism
+before writing a permanent test, then wrote
+`test_a_spacer_pack_already_gave_up_on_is_recovered_once_room_exists`
+against the *unfixed* function, watched it fail
+(`AssertionError: 0 is not true`), then implemented the fix and watched it
+pass. It targets the recovery mechanism (change 2) directly and in
+isolation, with a pane that has genuine leftover room (`avail=368`,
+`content=200`, `extra=168`) -- not the mathematically-cornered 1px case,
+which no test can honestly assert "both spacers stay mapped" against (see
+"Key decisions" below).
+
+### The `WINDOW_MIN_H` decision
+
+**Chose `620`.** Predicted margins from the two hard data points available
+(Windows CI's own live trace; this box's own round-1 Linux/compound-scale
+measurements), holding `WINDOW_MIN_H`'s overhead constant per platform
+(overhead is fixed chrome -- header, tab bar, padding -- independent of
+the pane's own leftover, so it does not change as `WINDOW_MIN_H` moves):
+
+| Platform / scale | overhead | natural | margin at 620 |
+|---|---|---|---|
+| Windows CI (live trace, `s≈1`) | 192px | 367px | **61px** |
+| This box, native scale (`s≈1.043`, round 1) | ~131px | ~367px | ~122px |
+| This box, compound worst case (`s≈0.675`, round 1) | ~133px | ~376px | ~111px |
+
+Windows is the tightest of the three by a wide margin even after this
+change, which is exactly backwards from round 1's own assumption (that
+Linux's own measurement was the thing to check against) -- the whole
+reason this needed a real CI trace rather than another local retune.
+`620` puts Windows' own margin back at ~61px, matching round 1's original
+*target* range (40-60px) almost exactly, just computed against the
+platform whose font metrics actually bite. This is a smaller win over the
+old `690` (70px saved) than round 1's `560` was (130px saved), but every
+platform now has a real, comfortable margin instead of one platform
+sitting 1px from the edge -- the task's own framing ("a slightly larger
+constant... is a perfectly good answer") is exactly this trade.
+
+**Rejected: keeping `560` and relying solely on the clamp/recovery
+mechanism changes.** Ruled out for a provable reason, not a judgment call:
+at `extra=1`, two spacers each needing Tk's own unconditional 1px-per-
+window floor cannot both be mapped simultaneously (`367 + 1 + 1 = 369 >
+368`) -- confirmed directly against plain Tk (`probe_cget4.py`), not
+inferred. No amount of clamping or re-pack recovery changes that
+arithmetic; only a bigger margin does. The mechanism changes are real and
+worth keeping regardless (see below), but they cannot substitute for
+margin at the specific point where margin is the actual constraint.
+
+### Key decisions / tradeoffs (round 4)
+
+- **The clamp is honestly close to a no-op for the current
+  `FILL_TOP_SHARE = 0.5`, and this doc says so rather than overclaiming
+  it.** Traced through the arithmetic: `top_h + bottom_h == extra` always
+  holds *before* the `max(1, ...)` floor (extra is split exactly, by
+  construction), so the floor can only ever inflate the sum when
+  `int(extra * 0.5) == 0`, i.e. `extra ∈ {0, 1}` -- and at exactly those
+  two values, both spacers are already sitting at the floor with nothing
+  left for the clamp's trim loop to give back (verified: the loop's own
+  `while overflow > 0 and (top_h > 1 or bottom_h > 1)` condition is false
+  on entry for both cases). The clamp is still implemented as asked,
+  because it is a correct, general invariant (`_fill_pane()` itself now
+  never writes a request larger than the pane's real leftover) that stops
+  being a no-op the moment `FILL_TOP_SHARE` or the floor amount ever
+  changes -- but this round's actual, load-bearing fix for the observed
+  defect is items 2 and 3 above, not the clamp.
+- **Recovery (`_set_spacer_height`) could not be validated against the
+  *exact* Windows scenario on this box, and this doc says that plainly
+  too.** Built a second synthetic test for "an unavoidable overflow
+  recovers once room returns" and found it passed against the *unfixed*
+  function too (`probe_recover.py`): this box's own Xvfb packer, unlike
+  whatever Windows' packer does, already reconsiders a dropped sibling on
+  its own the next time *any* other sibling's geometry changes, with no
+  explicit re-`.pack()` needed. That test was deleted rather than kept
+  with a misleading docstring -- a test that passes identically before
+  and after a fix proves nothing about the fix. The one kept
+  (`test_a_spacer_pack_already_gave_up_on_is_recovered_once_room_exists`)
+  uses `pack_forget()` as its unmap trigger specifically because that
+  *does* discriminate (fails on the unfixed function, passes on the
+  fixed one, confirmed both ways) -- it validates the explicit-recovery
+  mechanism in isolation, not the exact Windows non-recovery behavior,
+  which structurally cannot be reproduced against a packer that does not
+  reproduce the same bug.
+- **Did not change `_fill_pane()`'s `kids` measurement to account for
+  not-yet-mapped content (e.g. `eat_card` while it's still `mapped=0`).**
+  This was the other candidate root-cause direction for the "184+159=343
+  while the card is still 1px tall" intermediate write the task's brief
+  called out. Rejected: `343 < 368` is not itself an overflow (`extra`
+  always stays `<= available` by construction, independent of whether the
+  content behind it is fully settled) -- the actual overflow only ever
+  arises later, from the 1px-floor arithmetic above, not from this
+  intermediate write being "too large" in any absolute sense. Changing
+  what counts as a `kids` member to include still-growing, not-yet-mapped
+  widgets would be a materially bigger, riskier mechanism change (guessing
+  at a not-yet-real size) for a step that traced back to not actually
+  being the defect.
+
+### Verification
+
+**Linux-verified, this session:**
+- Full suite: `DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .` →
+  `Ran 292 tests ... OK (skipped=5)`, run twice back-to-back (292 =
+  291 baseline + 1 new `FillPaneOverflow` test).
+- `WindowMinimumHeight`, `VerticalFill`, `FillPaneOverflow` together: 5
+  consecutive runs, all green (14 tests each run).
+- TDD red/green, both new/restored assertions: reverted `afk_clicker.py`
+  only (`git stash -- afk_clicker.py`) and confirmed
+  `FillPaneOverflow.test_a_spacer_pack_already_gave_up_on_is_recovered_once_room_exists`
+  fails (`AssertionError: 0 is not true`) against the unfixed function,
+  then restored and confirmed it passes.
+- Live app, both click orders, real screenshots (not the suite):
+  `/tmp/claude-1000/.../scratchpad/screenshot_round4.py`, builds the real
+  app, drives both orders, services the event loop for 2 real seconds,
+  screenshots via `import -window <id>` on a private Xvfb display (`:98`).
+  Both orders: `natural=383, pane_h=455, top=36, bottom=36`, both spacers
+  mapped, `compare -metric AE` between `round4_orderA.png` and
+  `round4_orderB.png` reports `AE=0` (pixel-identical). Compared visually
+  against round 2's own `round2_orderA.png`: the only difference is the
+  larger, intentional margin below "Hold for" from the higher
+  `WINDOW_MIN_H` -- the clamp itself produces no visible change in the
+  split on this platform.
+
+**Needs Windows CI to confirm (only Leo can trigger it):**
+- That the trace's own exact failure (`bottom` frozen at `76`, unmapped)
+  is actually gone at `WINDOW_MIN_H = 620` -- this box cannot reproduce
+  Windows' own font metrics or its packer's specific non-recovery
+  behavior, so this is a prediction backed by the arithmetic above, not a
+  confirmed fix.
+- `WindowMinimumHeight.test_tallest_pane_still_fits_at_the_floor_reverse_order`
+  and
+  `VerticalFill.test_floor_case_still_splits_symmetrically_with_no_clipping_reverse_order`
+  (now asserting again, not printing) passing on `windows-latest`.
+- No new failure on `macos-latest` from the `WINDOW_MIN_H` change (round 1
+  already measured this platform's own worst-case compound scale locally
+  and it had the most margin of the three; not expected to regress, not
+  independently re-verified this round).
+
+### Known limitations (round 4)
+
+- The clamp is real and correctly implemented but, as documented above,
+  is inert for the shipped `FILL_TOP_SHARE = 0.5` outside the
+  already-unavoidable `extra ∈ {0, 1}` case. If a future change ever makes
+  `FILL_TOP_SHARE` asymmetric enough to matter, this is where its
+  protection would actually activate.
+- Recovery (`_set_spacer_height`) is verified to work as designed
+  (explicit `.pack()` remaps an unmapped spacer) but the exact Windows
+  scenario it was written for -- a packer that does *not* auto-reconsider
+  a dropped sibling on other widgets' resizes -- could not be reproduced
+  on this box's own Linux/Xvfb packer, which does auto-reconsider. Windows
+  CI is the only environment that can confirm this mechanism was the
+  missing piece rather than an untested assumption.
+- `WINDOW_MIN_H = 620`'s margin is now sized against Windows' own live
+  numbers rather than a local measurement, but it is still only one data
+  point from one CI run on one runner image -- re-verify if a future
+  Windows runner image ships different default font metrics.
