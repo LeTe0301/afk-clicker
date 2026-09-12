@@ -993,6 +993,139 @@ class RailCollapse(UITestCase):
             "only signal")
 
 
+class VerticalFill(UITestCase):
+    """Each tab pane's own top/bottom spacer pair (story #24 feature 4,
+    docs/spec.md): absorbs a pane's leftover vertical space so a short tab
+    no longer leaves a large dead band below its last card. `self.ui.
+    _pane_fills["hotkey"/"clicking"/"appearance"/"updates"]` is `(pane,
+    top_spacer, bottom_spacer)`, populated by _build_content()/
+    _build_settings()."""
+
+    def _tall_window(self, height=900):
+        s = self.ui.s
+        default_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * s)
+        self.root.geometry(f"{default_w}x{int(height * s)}")
+        self.root.update()
+
+    def test_short_tab_gains_margin_on_a_tall_window(self):
+        # Hotkey (one card) is the default active tab -- the shortest pane,
+        # and the one with the most leftover space to absorb.
+        self._tall_window()
+        _, top, bottom = self.ui._pane_fills["hotkey"]
+        self.assertGreater(top.winfo_height(), 0)
+        self.assertGreater(bottom.winfo_height(), 0)
+
+    def test_top_and_bottom_spacers_sum_to_the_real_leftover_space(self):
+        # True-by-construction: measured the same way _fill_pane() itself
+        # measures -- the real bottom-minus-top edge span of the content
+        # block, not a reqheight sum (a plain reqheight sum silently drops
+        # any pack()-level pady between direct children, e.g. section()'s
+        # own trailing pady on this very pane) -- not a fixed pixel
+        # comparison (this story's own established discipline: a flat
+        # constant already cost a round on a different feature).
+        self._tall_window()
+        pane, top, bottom = self.ui._pane_fills["hotkey"]
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        self.assertEqual(top.winfo_height() + bottom.winfo_height(),
+                         pane.winfo_height() - natural)
+
+    def test_floor_case_still_splits_symmetrically_with_no_clipping(self):
+        # Deviation from docs/spec.md's acceptance criterion #1 (see
+        # docs/implementation.md): that criterion assumed minh (690 * s,
+        # tuned by docs/history/ac-14-design.md for the OLD single page
+        # holding Hotkey+Clicking+Eating all stacked together) would leave
+        # ~0px extra for the tallest PANE today. Story #24 feature 2 split
+        # that one page into independent tabs without revisiting minh, so
+        # even the tallest single pane (Clicking+Eating, Minecraft) has
+        # ~148px of genuine, pre-existing leftover at the floor -- verified
+        # directly against this app's own widgets (Xvfb probe, not
+        # committed). Touching minh is explicitly out of scope here (Non-
+        # goals; docs/design.md's own "Open question: window minimum
+        # height"), so what this test actually proves is the invariant
+        # this feature IS responsible for at the floor: _fill_pane()
+        # absorbs whatever leftover genuinely exists -- never more, so
+        # never clipping -- split symmetrically, computed the same way
+        # _fill_pane() itself computes it (true by construction, not a
+        # fixed pixel bound).
+        self.ui._select("minecraft")
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        pane, top, bottom = self.ui._pane_fills["clicking"]
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        extra = max(0, pane.winfo_height() - natural)
+        self.assertEqual(top.winfo_height() + bottom.winfo_height(), max(2, extra))
+        self.assertLessEqual(abs(top.winfo_height() - bottom.winfo_height()), 1)
+
+    def test_switching_tabs_recomputes_each_panes_own_margin(self):
+        # Fill is computed per pane, not per page: Clicking's own content is
+        # taller than Hotkey's, so its leftover -- and therefore its
+        # margin -- must be smaller.
+        self._tall_window()
+        _, hotkey_top, _ = self.ui._pane_fills["hotkey"]
+        hotkey_margin = hotkey_top.winfo_height()
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        _, clicking_top, _ = self.ui._pane_fills["clicking"]
+        clicking_margin = clicking_top.winfo_height()
+        self.assertGreater(hotkey_margin, clicking_margin)
+
+    def test_toggling_eating_recomputes_the_clicking_panes_margin(self):
+        # The one case with no natural <Configure> trigger (Empirical
+        # grounding #2): toggling eat_section/eat_card's own pack state
+        # never fires a <Configure> on clicking_pane, so only _select()'s
+        # own explicit, guarded call can ever recompute this.
+        self._tall_window()
+        self.ui._set_content_tab("clicking")
+        self.root.update()
+        self.ui._select("minecraft")   # Eating shows -- margin shrinks
+        self.root.update()
+        _, top, _ = self.ui._pane_fills["clicking"]
+        with_eating = top.winfo_height()
+        self.ui._select("global")      # Eating hides -- margin grows
+        self.root.update()
+        without_eating = top.winfo_height()
+        self.assertGreater(without_eating, with_eating)
+
+    def test_hidden_tabs_own_margin_does_not_desync_the_visible_one(self):
+        # The self._content_tab == "clicking" guard in _select() must
+        # actually prevent a cross-pane write, not merely happen to not
+        # crash: with Hotkey active, a game switch that toggles Eating on
+        # the hidden Clicking pane must leave Hotkey's own spacers alone.
+        self._tall_window()
+        _, top, bottom = self.ui._pane_fills["hotkey"]
+        before = (top.winfo_height(), bottom.winfo_height())
+        self.ui._select("minecraft")
+        self.root.update()
+        self.assertEqual((top.winfo_height(), bottom.winfo_height()), before)
+
+    def test_live_resize_drag_updates_margin_without_a_rebuild(self):
+        # Proves this feature never touches _request_rebuild()/
+        # _rebuild_ui()'s coalescing machinery: several real resizes (each
+        # firing a genuine <Configure> on the mapped Hotkey pane) update the
+        # spacer heights, but never trigger a rebuild.
+        s = self.ui.s
+        default_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * s)
+        calls = []
+        original = self.ui._rebuild_ui
+        def spy():
+            calls.append(1)
+            original()
+        self.ui._rebuild_ui = spy
+        _, top, _ = self.ui._pane_fills["hotkey"]
+        before = top.winfo_height()
+        for h in (700, 850, 750, 900):
+            self.root.geometry(f"{default_w}x{int(h * s)}")
+            self.root.update()
+        self.assertGreater(top.winfo_height(), before)
+        self.assertEqual(len(calls), 0)
+
+
 class RowValueColumn(UITestCase):
     """Row's fixed-width label column (docs/history/ac-24-f1-spec.md):
     the control always starts at the same offset from the row's left edge,

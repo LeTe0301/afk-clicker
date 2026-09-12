@@ -191,6 +191,12 @@ COLLAPSED_BADGE_D = 28   # collapsed-badge diameter -- big enough to read one
     # dynamically off the canvas's own w/h, so this needs no separate
     # per-scale fit-check.
 
+FILL_TOP_SHARE = 0.5   # story #24 feature 4: fraction of a pane's own
+    # leftover vertical space given to its top spacer, the rest to its
+    # bottom spacer. 0.5 (centering) minimizes the largest single dead
+    # band -- see docs/design.md's "Key design decision" for why every
+    # other split leaves a bigger empty band on a single-card pane.
+
 
 def selftest():
     """
@@ -1421,6 +1427,62 @@ def card(parent, s):
     return inner
 
 
+def _fill_pane(pane, top_spacer, bottom_spacer):
+    """Recompute this pane's own top/bottom margin from its *current* real
+    available height vs. its own real content height -- safe to call
+    repeatedly, including from a live resize drag (story #24 feature 4).
+
+    Mirrors card()'s own _redraw() above in two ways that are load-bearing,
+    not stylistic: update_idletasks() BEFORE reading geometry (a pre-map
+    winfo_height() is Tk's `1` placeholder, not the real value), and the
+    same two winfo_exists() guards, for the same reason card()'s docstring
+    gives: update_idletasks() can itself reentrantly service an
+    already-queued idle callback (e.g. a pending _rebuild_ui()) that
+    destroys this very pane while this call is still on the stack.
+
+    `natural` is measured as the span (lowest real bottom edge minus
+    highest real top edge, both winfo_y()-based) of the pane's mapped
+    non-spacer children, not a sum of their own winfo_reqheight() -- a
+    plain reqheight sum silently drops any pack()-level pady between direct
+    children (e.g. section()'s own label pady, or eat_section's pady when
+    shown), which is real space pack actually consumes; measured
+    empirically (Xvfb probe, not committed), a reqheight-sum-based
+    `natural` undercounted the Hotkey pane by exactly section()'s 6px
+    trailing pady, oversizing `extra` and having the excess silently
+    absorbed by Tk shrinking the bottom spacer below its own configured
+    height. This span measurement needs no "reset spacers to 0 first"
+    step -- it excludes the spacers by identity and is translation-
+    invariant in the top spacer's own current height (shifting every
+    non-spacer child down by the same amount changes neither the span nor
+    `pane`'s own externally-set winfo_height(), the latter now genuinely
+    independent of any child thanks to pack_propagate(False) on every pane
+    -- see _build_content()'s hotkey_pane comment). That independence
+    matters here for another, sharper reason: Tk silently IGNORES
+    `config(height=0)` on a plain Frame -- treated as "no explicit height"
+    rather than "make it 0px" -- confirmed empirically, so a reset-to-0
+    step would not even have worked; the floor below (max(1, ...)) is the
+    real fix, not merely a rounding nicety."""
+    if not pane.winfo_exists():
+        return
+    pane.update_idletasks()
+    if not pane.winfo_exists():
+        return
+    available = pane.winfo_height()
+    kids = [c for c in pane.winfo_children()
+            if c.winfo_ismapped() and c not in (top_spacer, bottom_spacer)]
+    natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+               - min(c.winfo_y() for c in kids)) if kids else 0
+    extra = max(0, available - natural)
+    top_h = int(extra * FILL_TOP_SHARE)
+    bottom_h = extra - top_h
+    # Never write a literal 0 (see docstring): Tk ignores it, which would
+    # leave a spacer stuck at its last nonzero height when shrinking back
+    # toward the floor. max(1, ...) is exactly the "<=1px" floor the
+    # acceptance criteria already call for, not a new tolerance.
+    top_spacer.config(height=max(1, top_h))
+    bottom_spacer.config(height=max(1, bottom_h))
+
+
 class GameItem(tk.Canvas):
     """One row in the sidebar: a state dot, the name, and a hover/selected fill.
 
@@ -2090,8 +2152,24 @@ class AfkAutoclicker:
         # still-mapped shell, and pack_forget() afterward does not erase an
         # already-computed width (verified empirically, see docs/spec.md's
         # "Test impact" section).
+        self._pane_fills = {}   # story #24 feature 4: {"hotkey": (pane, top,
+            # bottom), ...} -- looked up by _set_content_tab()/
+            # _set_settings_tab()/_select()'s own explicit _fill_pane() calls.
+
         self.hotkey_pane = tk.Frame(body, bg=BG)
         self.hotkey_pane.pack(fill="both", expand=True)
+        self.hotkey_pane.pack_propagate(False)   # story #24 feature 4: this
+            # pane's own children (including its two spacers, whose whole
+            # job is to change size) must never feed back into the pane's
+            # own requested size -- it already gets its real size from
+            # body's fill=both/expand=True alone (matching self.content's
+            # own pack_propagate(False), same reasoning). Without this, a
+            # spacer resize can itself change the pane's own reqheight,
+            # cascading into a further geometry pass that re-fires this same
+            # pane's <Configure> -- a genuine feedback loop, confirmed
+            # empirically (Xvfb probe, not committed).
+        hotkey_top = tk.Frame(self.hotkey_pane, bg=BG, height=0)
+        hotkey_top.pack(fill="x")
         section(self.hotkey_pane, "Hotkey  ·  shared by every game", s, top=0)
         hk = card(self.hotkey_pane, s)
         row = Row(hk, "Toggle", s)
@@ -2106,9 +2184,18 @@ class AfkAutoclicker:
                                    primary=True)
         self.apply_button.pack(side="right")
         self.apply_button.set_enabled(False)
+        hotkey_bottom = tk.Frame(self.hotkey_pane, bg=BG, height=0)
+        hotkey_bottom.pack(fill="x")
+        self._pane_fills["hotkey"] = (self.hotkey_pane, hotkey_top, hotkey_bottom)
+        self.hotkey_pane.bind("<Configure>",
+            lambda e: _fill_pane(self.hotkey_pane, hotkey_top, hotkey_bottom))
 
         self.clicking_pane = tk.Frame(body, bg=BG)
         self.clicking_pane.pack(fill="both", expand=True)
+        self.clicking_pane.pack_propagate(False)   # story #24 feature 4 --
+            # see hotkey_pane's own comment above for why.
+        clicking_top = tk.Frame(self.clicking_pane, bg=BG, height=0)
+        clicking_top.pack(fill="x")
         # No "Clicking" section header here -- the tab label above already
         # names the pane (docs/design.md's redundant-header decision).
         cl = card(self.clicking_pane, s)
@@ -2139,6 +2226,11 @@ class AfkAutoclicker:
         self.eat_every = NumBox(r.control, DEFAULT_EAT_EVERY_S, "s", s); self.eat_every.pack()
         r = Row(self.eat_card_inner, "Hold for", s); r.pack(fill="x", pady=(int(6 * s), 0))
         self.eat_hold = NumBox(r.control, DEFAULT_EAT_HOLD_S, "s", s); self.eat_hold.pack()
+        clicking_bottom = tk.Frame(self.clicking_pane, bg=BG, height=0)
+        clicking_bottom.pack(fill="x")
+        self._pane_fills["clicking"] = (self.clicking_pane, clicking_top, clicking_bottom)
+        self.clicking_pane.bind("<Configure>",
+            lambda e: _fill_pane(self.clicking_pane, clicking_top, clicking_bottom))
 
         # Any edit belongs to the selected game, so persist as it happens.
         for var in (self.click_ms.var, self.jitter_ms.var, self.autostop_min.var,
@@ -2182,8 +2274,15 @@ class AfkAutoclicker:
         # _set_update_state() already assumes exactly this contract, and
         # this feature does not change either method). See _build_content()'s
         # own comment for why build-then-pack-then-hide is the required order.
+        self._pane_fills = {}   # story #24 feature 4 -- see _build_content()'s
+            # own comment for the shape and how it's consumed.
+
         self.appearance_pane = tk.Frame(body, bg=BG)
         self.appearance_pane.pack(fill="both", expand=True)
+        self.appearance_pane.pack_propagate(False)   # story #24 feature 4 --
+            # see _build_content()'s hotkey_pane comment for why.
+        appearance_top = tk.Frame(self.appearance_pane, bg=BG, height=0)
+        appearance_top.pack(fill="x")
         # No "Appearance" section header here -- the tab label above
         # already names the pane (docs/design.md's redundant-header decision).
         ap = card(self.appearance_pane, s)
@@ -2223,6 +2322,11 @@ class AfkAutoclicker:
             self._os_theme = detect_os_theme()
         tk.Label(ap, text=f"System is currently {self._os_theme}", bg=CARD, fg=MUTED,
                  anchor="w", font=("Segoe UI", int(8 * s))).pack(fill="x", pady=(int(6 * s), 0))
+        appearance_bottom = tk.Frame(self.appearance_pane, bg=BG, height=0)
+        appearance_bottom.pack(fill="x")
+        self._pane_fills["appearance"] = (self.appearance_pane, appearance_top, appearance_bottom)
+        self.appearance_pane.bind("<Configure>",
+            lambda e: _fill_pane(self.appearance_pane, appearance_top, appearance_bottom))
 
         self.appearance_var.trace_add("write",
             lambda *_a: self._apply_appearance(self.appearance_var.get()))
@@ -2246,6 +2350,10 @@ class AfkAutoclicker:
 
         self.updates_pane = tk.Frame(body, bg=BG)
         self.updates_pane.pack(fill="both", expand=True)
+        self.updates_pane.pack_propagate(False)   # story #24 feature 4 --
+            # see _build_content()'s hotkey_pane comment for why.
+        updates_top = tk.Frame(self.updates_pane, bg=BG, height=0)
+        updates_top.pack(fill="x")
         # No "Updates" section header here -- same redundant-header decision
         # as Appearance above.
         up = card(self.updates_pane, s)
@@ -2257,6 +2365,11 @@ class AfkAutoclicker:
         self.update_button = Button(up, "Check for updates", self.check_update, s,
                                     width=CARD_INNER_W)
         self.update_button.pack(pady=(int(8 * s), 0))
+        updates_bottom = tk.Frame(self.updates_pane, bg=BG, height=0)
+        updates_bottom.pack(fill="x")
+        self._pane_fills["updates"] = (self.updates_pane, updates_top, updates_bottom)
+        self.updates_pane.bind("<Configure>",
+            lambda e: _fill_pane(self.updates_pane, updates_top, updates_bottom))
 
         self._set_settings_tab(self._settings_tab)   # hide the inactive pane last
 
@@ -2359,6 +2472,11 @@ class AfkAutoclicker:
         self.clicking_pane.pack_forget()
         (self.hotkey_pane if value == "hotkey" else self.clicking_pane).pack(
             fill="both", expand=True)
+        # Story #24 feature 4: belt-and-suspenders explicit recompute for
+        # the newly-active pane -- the pack() call above already fires a
+        # correctly-sized <Configure> on it (Empirical grounding #3), so
+        # this does not depend on Tk's own event-dispatch timing.
+        _fill_pane(*self._pane_fills[value])
 
     def _set_settings_tab(self, value):
         """Same toggle as _set_content_tab(), for the Settings page's
@@ -2377,6 +2495,9 @@ class AfkAutoclicker:
         self.updates_pane.pack_forget()
         (self.appearance_pane if value == "appearance" else self.updates_pane).pack(
             fill="both", expand=True)
+        # Story #24 feature 4: same belt-and-suspenders explicit recompute
+        # as _set_content_tab()'s own tail -- see its comment.
+        _fill_pane(*self._pane_fills[value])
 
     # ---------- game list ----------
 
@@ -2418,12 +2539,32 @@ class AfkAutoclicker:
 
         # The eating panel is Minecraft's, not everyone's -- hide it rather than
         # leave a dead control sitting there for games it means nothing to.
+        #
+        # `before=clicking_bottom` (story #24 feature 4) is load-bearing, not
+        # cosmetic: pack_forget() unmanages a widget, and a later plain
+        # pack() re-adds it at the END of its master's current packing list,
+        # not back where it was -- confirmed empirically against this app's
+        # own widgets (Xvfb probe, not committed). Without `before=`, the
+        # first eating->non-eating->eating cycle would re-pack eat_section/
+        # eat_card AFTER the already-packed bottom spacer, putting the
+        # spacer above the Eating card instead of below it.
+        clicking_bottom = self._pane_fills["clicking"][2]
         if profile["eating"]:
-            self.eat_section.pack(fill="x", pady=(int(14 * self.s), int(6 * self.s)))
-            self.eat_card.pack(fill="x")
+            self.eat_section.pack(fill="x", pady=(int(14 * self.s), int(6 * self.s)),
+                                  before=clicking_bottom)
+            self.eat_card.pack(fill="x", before=clicking_bottom)
         else:
             self.eat_section.pack_forget()
             self.eat_card.pack_forget()
+
+        # Story #24 feature 4: the one trigger nothing Tk-driven ever fires
+        # for -- toggling a child's pack state inside an already-expand=True
+        # pane produces zero <Configure> events on the pane itself (Empirical
+        # grounding #2). Guarded on the Clicking tab actually being visible:
+        # reading a hidden pane's winfo_height() would be the exact
+        # unmapped-widget hazard this story has hit before.
+        if self._content_tab == "clicking":
+            _fill_pane(*self._pane_fills["clicking"])
 
         if persist:
             self.store.data["selected"] = game_id
