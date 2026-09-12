@@ -14,9 +14,9 @@ GitHub number. Shown below as **G#** / **GH#**.
 - [ ] **Story: responsive layout and an icon-led minimal restyle** — G#24 / GH#36.
       **Features 1, 2 and 3 of 5 are merged** — PR #37 (`db20af2`, row value-column
       alignment), PR #40 (`5ab0196`, horizontal tab bar), PR #41 (`18c6f7c`, icon rail).
-      Next: feature 4, content filling the available vertical height (no dead band
-      below the last card). Depends on feature 2, which is in. Feature 5 (flat
-      minimal restyle) is last and depends on all of 1-4.
+      **Feature 4 (content fills the available vertical height, no dead band below
+      the last card) is now in progress** — spec stage. Depends on feature 2, which
+      is in. Feature 5 (flat minimal restyle) is last and depends on all of 1-4.
       Branch `feature/ac-24/responsive-layout-icon-restyle`, worktree `ac-24`.
       Reference screenshots: `handoff/nvidia-reference/`.
       Still open: whether the accent moves from red toward the reference's green —
@@ -139,7 +139,8 @@ Housekeeping:
 - The local checkout is on `main` and clean. The `ac-24` worktree is on
   `feature/ac-24/responsive-layout-icon-restyle` at merged `main`, clean, with
   its `docs/*.md` ready to be overwritten by feature 4.
-- **Story G#24 / GH#36 is 3 of 5 features done. Nothing is in flight.**
+- **Story G#24 / GH#36 is 3 of 5 features done; feature 4 is in progress (spec
+  stage) as of the end of this session.**
 
 Merged this session, each after a critical PR review posted on the PR:
 
