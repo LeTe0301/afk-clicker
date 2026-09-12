@@ -69,7 +69,7 @@ Bugs and residue:
       nothing in the diff could have caused it) and earlier during story #24
       feature 3, passing on the retry both times. Non-fatal — exit 1, not an abort.
       It is why `main` shows a red macOS leg at `5c32f3c`.
-- [ ] **The test suite intermittently aborts at interpreter shutdown** —
+- [x] **The test suite intermittently aborts at interpreter shutdown** —
       `Tcl_AsyncDelete: async handler deleted by the wrong thread`, exit 134, and
       unittest's summary never prints, so a run that passed looks like a failure.
       Reproduced on clean `main` at roughly 1 run in 4 (and at a similar rate on the
@@ -126,6 +126,35 @@ Bugs and residue:
       tests.test_ui.<any test that constructs+on_close()s a second UI in the same
       process>` and check `gc.get_referrers()` on a `weakref.ref()` taken before that
       second UI's `on_close()`.
+      **Round 3 (ac-27, this ticket, GH#46 blocking PR #49) — resolved as a test-suite
+      symptom, root leak(s) still open.** Round 1/2 both tried to make the leaks not
+      exist (release specific references in `on_close()`); this round instead accepted
+      that at least one leak (the round-2 residual above) cannot currently be
+      eliminated, and targeted *which thread finalises the leaked `Variable`* instead —
+      the actual, confirmed cause of both the benign `RuntimeError` and the fatal abort.
+      Python's cyclic GC runs on allocation-count thresholds it hits on whatever thread
+      is executing at that moment, including this app's own worker threads (the click
+      loop, the hotkey listener); `tests/context.py` now calls `gc.disable()` for the
+      whole suite, and `UITestCase.tearDown()`/`AppearanceThemeSwitch.tearDown()`
+      explicitly `gc.collect()` right after each test's own `on_close()` — always on
+      the main/test-running thread. Measured: an explicit `gc.collect()` added only to
+      `tearDown()` with automatic collection left *on* did not move the benign
+      `RuntimeError` count (~55–57/285, same as unmodified `main`, over 7 runs) —
+      most occurrences happen mid-test, before any `tearDown()` runs, whenever the
+      automatic collector happens to land on a worker thread. Disabling automatic
+      collection collapsed it to 0/285 across 5 repeated full-suite runs (plus a
+      isolated repro of the two tests originally named on GH#46, `HotkeyListenerSurvives
+      Rebuild.test_listener_object_identity_is_unchanged_across_a_rebuild` and
+      `ClickLoop.test_interval_is_honoured`, run together 1/1 clean). No production
+      code touched — the app never creates more than one `Tk()` per process, so this
+      leak-finalised-on-a-worker-thread pattern is specific to the test suite building
+      and tearing down ~140 interpreters in one process. The underlying reference
+      leaks this item's Round 2 left open (`bind_all`'s funcid, the final generation's
+      variable traces, and the still-unidentified `restart()` interaction) are
+      unaffected by this round and remain real — tracked under the `Segmented` item
+      above and the `restart()` repro just above this note — but none of them can
+      abort the suite anymore, since nothing is left to finalise them off the main
+      thread. Full account: `docs/implementation.md`.
 - [ ] **The trace-registration-order hazard is overclaimed in merged code and in the
       story's spec** — `_apply_appearance`'s own comment (~`afk_clicker.py:1939-1958`)
       and `docs/spec.md` §2 both attribute Theme's safety to registering `trace_add`

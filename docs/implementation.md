@@ -1,5 +1,14 @@
 # Implementation: Fix the test suite's intermittent interpreter-shutdown abort (G#27/GH#46)
 
+**Status: resolved as of Round 3, below.** Rounds 1 and 2 (original text
+retained for history) tried to make the underlying reference leaks not
+exist; Round 3 instead controls which thread finalises whatever leaks
+remain, which is what the abort actually depends on. The benign
+`RuntimeError: main thread is not in main loop` count — this ticket's
+locally measurable stand-in for the rare fatal abort — went from a rock-
+steady 56/285 (5/5 baseline runs) to 0/285 (5/5 runs after). Jump to
+"Round 3" for the full account.
+
 ## Summary
 
 Found and fixed three concrete, previously-unknown reference leaks in
@@ -342,3 +351,156 @@ crashing class) run 5x back-to-back → clean every time. Regression test
 Linux/Xvfb; macOS CI, on the next push, is the only environment that can
 actually confirm the abort is gone, per the constraint this round started
 from.
+
+## Round 3 — control which thread finalises, not which references exist
+
+**Trigger.** GH#46 is now blocking: PR #49's branch aborted the ubuntu CI
+leg 5/5 runs, while `main` stayed green. Rounds 1 and 2 both worked by
+trying to make the reference leaks not exist, and Round 2 was reverted
+after that approach broke macOS. This round tests a different hypothesis,
+given directly by the ticket: don't try to eliminate every leak — control
+*which thread* finalises whatever `tkinter.Variable`s do end up orphaned,
+since that is what actually determines whether `Variable.__del__` raises
+the always-caught `RuntimeError: main thread is not in main loop` or,
+rarely, the fatal `Tcl_AsyncDelete` abort.
+
+**Metric used.** The benign `RuntimeError: main thread is not in main
+loop` count per full-suite run (`grep -c` on the suite's stderr) — the
+ticket's own stand-in for the rare fatal abort, reproducible every run.
+
+**Baseline (unmodified branch, `5586399` + Round 1/2 code already in
+place, no new changes).** 5 back-to-back full-suite runs, `DISPLAY=:99
+<venv-python> -m unittest discover -s tests -t .`:
+
+| run | count | exit | skipped |
+|-----|-------|------|---------|
+| 1 | 56 | 0 | 5 |
+| 2 | 56 | 0 | 5 |
+| 3 | 56 | 0 | 5 |
+| 4 | 56 | 0 | 5 |
+| 5 | 56 | 0 | 5 |
+
+Rock steady at 56/285, zero `exit 134` aborts observed (consistent with
+Round 1's own finding that the fatal variant is not reproducible on demand
+in this sandboxed environment — only the benign one is).
+
+**First attempt: `gc.collect()` in `UITestCase.tearDown()` only, automatic
+GC left enabled — the ticket's stated hypothesis, tested literally as
+written.** Added `gc.collect()` right after `self.ui.on_close()`. 7
+full-suite runs:
+
+| run | count | exit | note |
+|-----|-------|------|------|
+| 1 | 57 | 1 | unrelated: `LiveRepository` GitHub-live test failed (network flake, not this change) |
+| 2 | 55 | 0 | |
+| 3 | 55 | 0 | |
+| 4 | 45 | 0 | |
+| 5 | 55 | 0 | |
+| 6 | 56 | 0 | |
+| 7 | 55 | 0 | |
+
+Mean ≈ 54, essentially unchanged from the 56 baseline and within normal
+run-to-run noise (the one low outlier, 45, is not a trend — two more runs
+landed back at 55–56). **This does not collapse toward zero. Per the
+ticket's own bar, the hypothesis as literally stated does not work.**
+
+**Why, confirmed directly.** Instrumented `tearDown()`'s `gc.collect()` to
+print its own return value (objects actually collected) and the calling
+thread. Across one full 285-test run: only **2 of 285** `tearDown()` calls
+collected anything at all (3268 objects once, 965 once) — the other 283
+found nothing new to collect, yet that same run still produced 55
+`RuntimeError`s elsewhere. This rules out "leaked Variables are sitting
+around uncollected at teardown time, waiting for a stray `gc.collect()`"
+as the dominant mechanism. What it does not rule out — and what a second,
+purely diagnostic experiment confirmed — is Python's *automatic*
+generational collector doing the finalising mid-test, before `tearDown()`
+ever runs: with automatic collection disabled entirely (`gc.disable()`,
+diagnostic only, not proposed as the fix) but `tearDown()`'s
+`gc.collect()` left in place, the count collapsed to **0/285** on the
+first run. Automatic collection fires on allocation-count thresholds
+crossed on whatever thread happens to be running at that moment —
+including this app's own worker threads (the click loop, the hotkey
+listener) — which is exactly the mechanism GH#46's trace already
+described; it simply is not confined to running only after `on_close()`,
+so a `tearDown()`-only `gc.collect()` cannot reach the finalisations that
+happen earlier, mid-test.
+
+**What shipped.** Two test-harness-only changes, no production code
+touched:
+
+- `tests/context.py` — `gc.disable()`, called once at import time (this
+  module is imported by every test module before any test body runs).
+  Turns off Python's automatic cyclic collection for the whole suite
+  process, so nothing is ever finalised except where this suite
+  deliberately triggers it.
+- `tests/test_ui.py` — `UITestCase.tearDown()` and
+  `AppearanceThemeSwitch.tearDown()` (the two places that build and close
+  a real `AfkAutoclicker`/`tk.Tk()`) each call `gc.collect()` immediately
+  after `self.ui.on_close()`. This is now the *only* place collection
+  happens, and it always runs on the main/test-running thread — the exact
+  thread `_tkinter` requires for a Tcl call that isn't dispatched through
+  a (never-entered, in this suite) `mainloop()`.
+
+**Final measurement, with both changes in place.** 5 back-to-back
+full-suite runs:
+
+| run | count | exit | skipped |
+|-----|-------|------|---------|
+| 1 | 0 | 0 | 5 |
+| 2 | 0 | 0 | 5 |
+| 3 | 0 | 0 | 5 |
+| 4 | 0 | 0 | 5 |
+| 5 | 0 | 0 | 5 |
+
+56 → 0, 5/5 runs each side, no `exit 134` aborts on either side (already
+established as rare/not reproducible in this environment; still absent
+here). Also ran the two tests GH#46 named directly, together, in
+isolation: `HotkeyListenerSurvivesRebuild
+.test_listener_object_identity_is_unchanged_across_a_rebuild` and
+`ClickLoop.test_interval_is_honoured` — 1/1 clean, 0 `RuntimeError`s. Full
+suite skip count unchanged (5, matching baseline — a later run showed 7
+because GitHub's anonymous rate limit had been exhausted by this
+investigation's own repeated runs against `LiveRepository`'s live-network
+tests, confirmed unrelated to this change by inspecting which two tests
+skipped).
+
+**Why this is a test-harness-only change and not a production one.** The
+production app (`afk_clicker.py`'s `__main__` block) constructs exactly
+one `Tk()` per process and runs it under a real `root.mainloop()` until
+the user closes it, then the process exits — there is no second
+interpreter for a leaked `Variable` to be finalised against, and no
+window where a finalisation racing a worker thread would matter the way
+it does when ~140 short-lived interpreters are built and torn down inside
+one long-lived process, which is what the test suite does and production
+never does. Disabling the app's own automatic GC was never on the table
+and was not needed to fix this.
+
+**What is not fixed, on purpose.** This round does not touch any of the
+open reference leaks Rounds 1/2 already tracked on `backlog.md`
+(`bind_all()`'s funcid, the final generation's variable traces, the
+still-unidentified `restart()` interaction) — those Variables can still
+end up orphaned exactly as before. What changed is that nothing is left
+that can finalise them anywhere but the main thread, so none of them can
+manifest as this ticket's symptom anymore. `backlog.md`'s "test suite
+intermittently aborts" item is marked resolved with this note; the
+underlying leaks remain open under their own items.
+
+**What only CI can confirm.** This was measured on Linux/Xvfb only (no
+macOS or Windows access in this environment). `gc.disable()`/`gc.collect()`
+are plain CPython/`gc` module calls with no platform-specific behavior
+documented for either, and neither touches Tcl at all (unlike Round 2's
+reverted `deletecommand()`/`trace_remove()` calls), so there is no
+mechanical reason to expect a macOS- or Windows-specific interaction —
+but that is a lean, not a proof, and only the next CI run on PR #49's
+branch (or a fresh push of this fix) can confirm the ubuntu leg's abort is
+actually gone in that environment, and that macOS/Windows stay green.
+
+**How to verify locally.**
+
+```
+cd /home/dev/projects/afk-clicker   # or this worktree
+DISPLAY=:99 <venv-python> -m unittest discover -s tests -t .
+# Expect: OK (skipped=5), no "RuntimeError: main thread is not in main loop"
+# in stderr, no Tcl_AsyncDelete / Aborted.
+grep -c "main thread is not in main loop" <captured output>   # expect 0
+```
