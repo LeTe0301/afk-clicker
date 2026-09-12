@@ -174,3 +174,169 @@ of the matrix, and a pixel-level side-by-side against
 `handoff/nvidia-reference/*.png` — that comparison is the story's own
 closing end-to-end pass per `docs/spec.md`'s final section, not this
 feature's job.
+
+## Round 2 (fix round after "changes requested")
+
+`docs/test-review.md`'s verdict was changes-requested: one must-fix in
+`tests/test_ui.py`'s `SectionHeader.test_section_action_factory_is_actually_wired`,
+plus three should-fix corrections in `docs/design.md`. Production code
+(`afk_clicker.py`) was confirmed correct by the reviewer and is untouched in
+this round (`git diff afk_clicker.py` is empty throughout).
+
+### Must-fix: the test fixture, not the assertion
+
+**What the old fixture actually proved.** Nothing about alignment. It built
+`section()` against a bare `tk.Tk()` root with no forced width. A `Frame`
+left at its default `pack_propagate(True)` shrink-wraps to its packed
+children's own requested size, so when the root has no leftover width to
+distribute, `pack(side="right")` and `pack(side="left")` place the action
+widget at the *identical* `winfo_x()` — there's no slack for `side="right"`
+to push against. Confirmed directly with a throwaway probe building the same
+row shape both ways in an unconstrained parent: both produced `action x: 33`.
+`assertGreaterEqual(action.winfo_x(), label.winfo_x() + label.winfo_width())`
+therefore passed on equality alone, which it would have done identically
+whether `section()` packed the action `side="right"` (as shipped) or a
+hypothetical regression to `side="left"` — the exact `TabBar.height`-shaped
+trap the test's own docstring says it exists to prevent, just relocated from
+the parameter into the test.
+
+**What the new fixture proves.** The test now wraps `section()`'s call in a
+`tk.Frame(self.root, width=500, height=50)` with `pack_propagate(False)` —
+the same fixed-width-container shape every real content pane in this app
+already uses — before building the row inside it. That gives the row genuine
+extra width, so `side="right"` and `side="left"` now produce different
+`winfo_x()` values. Two assertions:
+- `assertGreater(action.winfo_x(), label.winfo_x() + label.winfo_width())` —
+  restores the spec's own original assertion (see "Deviations" below).
+- `assertEqual(action.winfo_x() + action.winfo_width(), row.winfo_width())` —
+  a direct, stronger proof that the action is flush against the row's own
+  right edge (i.e. `section()` used `pack(side="right")`, not merely "placed
+  somewhere right of the label via some other layout" — a left-packed action
+  preceded by a spacer could satisfy the first assertion alone without being
+  actually right-aligned).
+
+**Sabotage results, both directions:**
+- Shipped code (`action_factory(row).pack(side="right")`, unchanged): test
+  passes — `DISPLAY=:99 <venv> -m unittest
+  tests.test_ui.SectionHeader.test_section_action_factory_is_actually_wired -v`
+  → `OK`.
+- Sabotaged (`afk_clicker.py:1350` temporarily edited to
+  `action_factory(row).pack(side="left")`, then reverted — `git diff
+  afk_clicker.py` confirmed empty afterward): test fails —
+  `AssertionError: 37 not greater than 37` (the action lands immediately
+  adjacent to the label, zero gap, exactly as `side="left"` should). Restored
+  the file from a pre-edit copy and re-diffed against git to confirm
+  byte-identical to `008414d`'s version before re-running the suite.
+
+Direct probe numbers (width-constrained container, `row_w=500`,
+`label x=0 w=37`): `side="right"` → `action x=451, w=49` (flush,
+`451+49=500`); `side="left"` → `action x=37, w=49` (adjacent to the label,
+`37+49=86`, nowhere near the right edge). This is what "genuinely
+distinguishable" means in the fixture, and it's why both new assertions pass
+for the real code and fail for the sabotaged version.
+
+**`assertGreaterEqual` vs. `assertGreater`, revisited.** The prior round
+chose `assertGreaterEqual` specifically because, in the *unconstrained*
+fixture, the correct implementation produced `action.winfo_x() ==
+label.winfo_x() + label.winfo_width()` (adjacent, no gap) — `assertGreater`
+literally failed on correct code there, so `assertGreaterEqual` was the only
+way to keep the test green without either fixing the fixture or weakening
+the claim further. That justification depended entirely on the broken
+fixture; it doesn't carry over. In the now-width-constrained fixture, the
+correct (`side="right"`) implementation produces a *real* gap (`451 > 37`),
+and the sabotaged (`side="left"`) implementation produces the same
+zero-gap equality as before (`37 == 37`, i.e. not `>`). `assertGreater` is
+therefore the right call now: it passes on the correct code and fails on the
+sabotaged code, which is the whole point of a regression test.
+`assertGreaterEqual` would still pass on the correct code but would also
+have passed if some future change happened to reintroduce a zero-gap
+adjacency by coincidence — a weaker guard than the fixture can now support.
+
+### Should-fix: three `docs/design.md` corrections
+
+**1. Contrast table — recomputed every figure, not just the five named.**
+Wrote a scratch WCAG relative-luminance calculator (sanity-checked against
+white/black = 21:1, matching the reviewer's own check), fed it every unique
+color pair referenced anywhere in `docs/design.md` (seven pairs total, found
+via `grep` for every `N.NN:1` occurrence in the file, not just the ones the
+reviewer's table named), and corrected every wrong occurrence everywhere it
+appears in the document (the same wrong numbers were repeated across the
+decision rationale, the walkthrough prose, the contrast table, and the
+"Summary of design decisions" section — all instances fixed, not just the
+table):
+
+| Pair | Old (wrong) doc figure | Corrected figure | WCAG floor | Passes? |
+|---|---|---|---|---|
+| `MUTED` dark (#9299a3) on `BG` dark (#15171a) | 5.23:1 | **6.25:1** | 4.5:1 text | yes |
+| `MUTED` light (#596170) on `BG` light (#e8ebf0) | 6.68:1 | **5.22:1** | 4.5:1 text | yes |
+| `ACCENT` dark (#e08a55) on `CARD_HI` dark (#262a30) | 5.45:1 | 5.45:1 (already correct) | 3:1 non-text | yes |
+| `ACCENT` light (#2b58cc) on `CARD_HI` light (#eff2f7) | 5.55:1 | 5.55:1 (already correct) | 3:1 non-text | yes |
+| `BAD` dark (#f06262) on `CARD` dark (#1c1f23) | 7.84:1 | **5.22:1** | 3:1 non-text | yes |
+| `OK` dark (#5cc9a4) on `CARD` dark (#1c1f23) | 7.40:1 | **8.15:1** | 3:1 non-text | yes |
+| `ACCENT` dark (#e08a55) on `CARD` dark (#1c1f23) | 5.42:1 | **6.25:1** | 3:1 non-text | yes |
+
+Every corrected figure still clears its WCAG floor by a comfortable margin,
+so this is purely a documentation-accuracy fix — no color or contrast
+decision changes as a result. Fixed at every line the wrong figures
+appeared: `docs/design.md`'s §1 rationale (`MUTED`/`BG` pair), §"StatusPill's
+new flat form" contrast block (`BAD`/`OK`/`ACCENT` on `CARD`), the light-theme
+walkthrough prose, the "Contrast verification" table, and the "Summary of
+design decisions" bullet #5 — five separate locations that all repeated the
+original wrong numbers.
+
+**2. Accent-bar stacking-order prose.** `docs/design.md`'s §2 prose said the
+bar renders "*before* (below) `self.shape`," which contradicts both its own
+code sample two sections later and the shipped implementation (both place
+`self.accent_bar`'s creation *after* `self.shape`'s). Corrected the prose to
+say *after* (on top of), and added the concrete reason so a future reader
+doesn't "fix" it back to the wrong direction: `self.shape` spans `x=1..w-1`,
+covering all but the item's leftmost 1px column, so a bar created *before*
+the shape would have nearly its entire width painted over by the
+shape and would not read as a visible stripe at all. Creation-order-after is
+the only ordering that renders a visible bar — this matches
+`docs/implementation.md`'s own "Key decisions" section from the prior round,
+which already reasoned through this correctly; only the design doc's prose
+sentence was wrong.
+
+**3. `int(10 * 0.675)` "rounds to 7pt" claim.** `int()` truncates toward
+zero; `int(10 * 0.675)` is `6`, not `7`, confirmed directly
+(`python3 -c "print(int(10*0.675))"` → `6`). Corrected in all four places
+this claim appeared (§1 rationale, the compound-scale walkthrough section,
+the pixel-level spec's code-adjacent note, and "Summary of design decisions"
+bullet #7). Stated the consequence honestly rather than softening it: the
+section header renders at **6pt**, not 7pt, at the compound worst case
+(`s=0.675`), one point smaller than the design doc's own prior comparison
+claimed (it said the header ends up "1pt larger" than the collapsed badge's
+~7pt; corrected to note the header is actually 1pt *smaller*, 6 vs. 7 —
+`int(10.5 * 0.675) = int(7.0875) = 7` for the badge letter, confirmed
+directly). This is still bigger than the *old* 8pt header's own worst case
+(`int(8 * 0.675) = 5`), so still a net improvement over the pre-feature
+baseline, and no test asserts a specific font-size number. 6pt at this
+compound worst case is consistent with what the app already ships under open
+backlog ticket **G#23** (macOS `_dpi_s` ~0.75 × the 90% UI-scale step already
+renders 5–6pt labels elsewhere in this codebase) — not a new defect
+introduced by this feature, but the design doc needed to state the real
+number rather than the rounded-up one.
+
+### Deviations from spec (round 2)
+
+- None beyond the round-1 deviation already recorded above (`assertGreater`
+  → `assertGreaterEqual`), which this round reverses now that the fixture
+  supports the stricter assertion — see "`assertGreaterEqual` vs.
+  `assertGreater`, revisited" above. No production code changed in this
+  round; `git diff afk_clicker.py` is empty from `008414d` through this
+  round's commit.
+
+### How to verify locally (round 2)
+
+```
+DISPLAY=:99 <venv-python> -m unittest tests.test_ui.SectionHeader -v
+DISPLAY=:99 <venv-python> -m unittest discover -s tests -t .
+DISPLAY=:98 <venv-python> -m unittest discover -s tests -t .
+```
+
+Both full-suite runs: `Ran 284 tests ... OK (skipped=5)`. `SectionHeader`
+alone: 3/3 green. Sabotage (temporary `afk_clicker.py:1350`
+`side="right"` → `side="left"`, reverted before committing): the must-fix
+test fails with `37 not greater than 37`, confirming the fixture now
+actually discriminates the two states it exists to tell apart.

@@ -21,11 +21,11 @@ Sentence case: "Hotkey  ·  shared by every game" at 8pt would lose the size com
 
 **Bold weight stays** — Feature 3's collapsed-rail badge uses 10pt bold for a single letter; 10pt bold for a header label (5–10 words) maintains visual hierarchy without duplication.
 
-**Color remains `MUTED`** — Feature 2's existing `section()` call already assigns `fg=MUTED` for the label. Sentence case does not change the semantic meaning (a secondary, scoping label), so the color token stays. On dark (#9299a3), this is 5.23:1 against BG (#15171a), exceeding AA (4.5:1) for text. On light (#596170) against BG (#e8ebf0), this is 6.68:1, well above AA. Both pairs are in the documentation's already-computed contrast set.
+**Color remains `MUTED`** — Feature 2's existing `section()` call already assigns `fg=MUTED` for the label. Sentence case does not change the semantic meaning (a secondary, scoping label), so the color token stays. On dark (#9299a3), this is 6.25:1 against BG (#15171a), exceeding AA (4.5:1) for text. On light (#596170) against BG (#e8ebf0), this is 5.22:1, also above AA. Both pairs are in the documentation's already-computed contrast set.
 
 **Spacing unchanged** — existing `section()` defaults `top=14, bottom=6` (feature 2's own constructor, `afk_clicker.py:1377`). These are applied to the header `Frame` now (per spec §2) instead of the bare `Label`, but the visual spacing to the card below remains identical — no visual change here, only the return type.
 
-**At compound scale s=0.675:** 10pt × 0.675 = 6.75pt → rounds to 7pt in Tk (int conversion). This remains readable; it is 1pt larger than Feature 3's collapsed-badge letter (which uses 10.5pt at s=1, becoming ~7pt at s=0.675). No floor breach.
+**At compound scale s=0.675:** 10pt × 0.675 = 6.75pt → `int(10 * 0.675)` **truncates** to **6pt** in Tk (`int()` truncates toward zero; it does not round). This is 1pt *smaller*, not larger, than Feature 3's collapsed-badge letter (which uses 10.5pt at s=1, `int(10.5 * 0.675) = int(7.0875) = 7pt` at s=0.675) — the comparison in this section runs the other direction from what an earlier draft claimed. The header is still bigger than the *old* 8pt header's own worst case (`int(8 * 0.675) = 5pt`), so this remains a net improvement over the pre-feature baseline, and no test asserts a specific font-size number. 6pt at the compound worst case is consistent with the marginal-legibility tier the app already ships elsewhere at this scale (backlog **G#23**: macOS `_dpi_s` ~0.75 × the 90% UI-scale step already renders 5–6pt labels) — this is not a new defect introduced by this feature, but the real number is 6pt, not 7pt, and should be stated as such.
 
 ### 2. The accent bar's thickness and inset on selected rail items
 
@@ -50,7 +50,7 @@ The spec proposes `bar_w = int(3 * s)` as a concrete default and notes "exact th
 
 Both exceed the 3:1 minimum for graphical elements by a wide margin. No color adjustment needed.
 
-**Stacking order:** The accent bar is created once at `__init__` and toggled in `_paint()` (spec §3), rendered *before* (below) `self.shape` (the item's background fill) so the background can cover any overlap and the bar visually sits as a left-edge stripe, not a floating overlay. Tk's canvas drawing order is last-created = topmost; creating the accent bar *after* `self.shape` achieves this layering naturally — developer can verify by checking `canvas.find_all()` ordering if needed.
+**Stacking order:** The accent bar is created once at `__init__` and toggled in `_paint()` (spec §3), rendered *after* (on top of) `self.shape` (the item's background fill), matching this section's own code sample below and the shipped implementation. Tk's canvas drawing order is last-created = topmost, so creating the bar after the shape is what makes it visible at all — `self.shape` spans `x=1..w-1`, covering all but the leftmost 1px column of the item, so a bar created *before* the shape would have nearly its entire width painted over and would not read as a visible stripe. (An earlier draft of this sentence said "before/below," which contradicts both the code sample directly below it and the shipped behavior — do not "fix" the ordering back to match that wording.)
 
 ### 3. "Selection" as an accent home — confirmed interpretation
 
@@ -81,9 +81,9 @@ Proceeding with the `NumBox` interpretation: no change needed in this feature. I
 
 **Contrast and legibility:**
 - The dot (fill `BAD`/`OK`/`ACCENT` depending on state) sits on a `CARD` (#1c1f23 dark) background:
-  - `BAD` (#f06262) on `CARD`: WCAG 1.4.11 (non-text) requires 3:1; measured = 7.84:1 ✓
-  - `OK` (#5cc9a4) on `CARD`: measured = 7.40:1 ✓
-  - `ACCENT` (#e08a55) on `CARD`: measured = 5.42:1 ✓
+  - `BAD` (#f06262) on `CARD`: WCAG 1.4.11 (non-text) requires 3:1; measured = 5.22:1 ✓
+  - `OK` (#5cc9a4) on `CARD`: measured = 8.15:1 ✓
+  - `ACCENT` (#e08a55) on `CARD`: measured = 6.25:1 ✓
   - All exceed 3:1 by a wide margin.
   - Light theme (`OK` #0f7f4c, `BAD` #cc3527, `ACCENT` #2b58cc on `CARD` #ffffff): similarly pass (light mode uses white `CARD`, highest contrast environment).
 
@@ -163,7 +163,7 @@ Status pill at bottom of content:
 
 ### Light theme visual walkthrough (same structure)
 
-Background colors are lighter (#e8ebf0), cards are white (#ffffff). All flat rectangles render with the same `create_rectangle` logic. The ACCENT accent bar on selected rail items renders `#2b58cc` (light blue) on `CARD_HI` (#eff2f7, very light gray) — contrast 5.55:1, passes WCAG 1.4.11 ✓. The section header "Hotkey  ·  shared by every game" appears in 10pt bold `MUTED` (#596170, dark gray), contrast 6.68:1 against BG (#e8ebf0) ✓.
+Background colors are lighter (#e8ebf0), cards are white (#ffffff). All flat rectangles render with the same `create_rectangle` logic. The ACCENT accent bar on selected rail items renders `#2b58cc` (light blue) on `CARD_HI` (#eff2f7, very light gray) — contrast 5.55:1, passes WCAG 1.4.11 ✓. The section header "Hotkey  ·  shared by every game" appears in 10pt bold `MUTED` (#596170, dark gray), contrast 5.22:1 against BG (#e8ebf0) ✓.
 
 ### Collapsed rail (s=1, narrow window, Feature 3 collapsed)
 
@@ -171,7 +171,7 @@ The accent bar remains 3px wide on the left edge, rendering the same ACCENT colo
 
 ### Compound scale s=0.675 (worst case: low DPI + 90% UI scale)
 
-All dimensions scale uniformly. Section header: 10pt × 0.675 = 7pt (after rounding). Accent bar: 3px × 0.675 = 2px. The bar remains visible (above the 1px floor established by `TAB_UNDERLINE_H = 2` at the same scale). Every other dimension — card heights, button sizes, rail width — scales identically to how Features 1–4 already handle it. No special cases needed.
+All dimensions scale uniformly. Section header: `int(10 * 0.675)` truncates to **6pt** (not 7pt — `int()` truncates, it does not round; see decision #1 above). Accent bar: 3px × 0.675 = 2px. The bar remains visible (above the 1px floor established by `TAB_UNDERLINE_H = 2` at the same scale). Every other dimension — card heights, button sizes, rail width — scales identically to how Features 1–4 already handle it. No special cases needed.
 
 ## Component reuse and changes
 
@@ -224,13 +224,13 @@ All new color pairings have been computed against the live hex values using WCAG
 
 | Pair | Ratio | Pass? |
 |---|---|---|
-| Section header MUTED (#9299a3) on BG dark (#15171a) | 5.23:1 | AA text (4.5:1) ✓ |
-| Section header MUTED (#596170) on BG light (#e8ebf0) | 6.68:1 | AA text ✓ |
+| Section header MUTED (#9299a3) on BG dark (#15171a) | 6.25:1 | AA text (4.5:1) ✓ |
+| Section header MUTED (#596170) on BG light (#e8ebf0) | 5.22:1 | AA text ✓ |
 | Accent bar ACCENT (#e08a55) on CARD_HI dark (#262a30) | 5.45:1 | 3:1 UI component floor ✓ |
 | Accent bar ACCENT (#2b58cc) on CARD_HI light (#eff2f7) | 5.55:1 | 3:1 UI component floor ✓ |
-| StatusPill dot BAD (#f06262) on CARD dark (#1c1f23) | 7.84:1 | 3:1 UI component floor ✓ |
-| StatusPill dot OK (#5cc9a4) on CARD dark | 7.40:1 | 3:1 UI component floor ✓ |
-| StatusPill dot ACCENT (#e08a55) on CARD dark | 5.42:1 | 3:1 UI component floor ✓ |
+| StatusPill dot BAD (#f06262) on CARD dark (#1c1f23) | 5.22:1 | 3:1 UI component floor ✓ |
+| StatusPill dot OK (#5cc9a4) on CARD dark | 8.15:1 | 3:1 UI component floor ✓ |
+| StatusPill dot ACCENT (#e08a55) on CARD dark | 6.25:1 | 3:1 UI component floor ✓ |
 
 All exceed their respective WCAG thresholds. No color adjustment needed for any pairing.
 
@@ -275,7 +275,7 @@ def section(parent, text, s, top=14, action_factory=None):
 ```
 
 At s=1: label font = 10pt.
-At s=0.675: label font = int(10 * 0.675) = int(6.75) = 6.75, Tk rounds to 7pt.
+At s=0.675: label font = int(10 * 0.675) = int(6.75) = **6pt** — `int()` truncates toward zero, it does not round.
 
 At both scales, 10/bold is clearly larger and heavier than body text (9pt regular for rows), making headers scan naturally.
 
@@ -434,11 +434,11 @@ The top and bottom spacers (Feature 4) have `bg=BG`, no rounded corners, no rest
 
 4. **StatusPill becomes a flat rectangle via `create_rectangle(1, 1, w-1, h-1)`.** Same coordinates, fill, outline as before; only the shape drawing changes. Dot and labels untouched.
 
-5. **All contrast pairs verified via WCAG formula, not eyeballed.** Section header text: 5.23:1 (dark), 6.68:1 (light), both exceed AA. Accent bar: 5.45:1 (dark), 5.55:1 (light), both exceed 3:1 UI-component floor. StatusPill dot states all exceed 3:1.
+5. **All contrast pairs verified via WCAG formula, not eyeballed.** Section header text: 6.25:1 (dark), 5.22:1 (light), both exceed AA. Accent bar: 5.45:1 (dark), 5.55:1 (light), both exceed 3:1 UI-component floor. StatusPill dot states all exceed 3:1 (5.22:1–8.15:1 across BAD/OK/ACCENT on CARD dark).
 
 6. **No geometry moves; every coordinate, size, color token, and behavior stays identical except for drawing primitives and typography.** Features 1–4 settled the layout; Feature 5 is a pure chrome/theme pass.
 
-7. **Compound scale (s=0.675) verified**: section header at 7pt (rounded from 6.75pt), accent bar at 2px (visible, above floor), all other dimensions scale uniformly. No special cases needed.
+7. **Compound scale (s=0.675) verified**: section header at 6pt (`int(10 * 0.675)` truncates 6.75 down to 6, not up to 7), accent bar at 2px (visible, above floor), all other dimensions scale uniformly. No special cases needed.
 
 ## References and precedent
 

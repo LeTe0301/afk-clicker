@@ -2049,11 +2049,29 @@ class SectionHeader(unittest.TestCase):
         self.assertEqual(row.winfo_reqwidth(), label.winfo_reqwidth())
 
     def test_section_action_factory_is_actually_wired(self):
-        row = app.section(self.root, "Test", 1.0,
+        # A bare tk.Tk() root shrink-wraps to its packed children's own
+        # requested size, so with no forced width there's no leftover space
+        # for pack(side="right") to push against -- side="right" and
+        # side="left" land the action widget at the *same* winfo_x() in an
+        # unconstrained parent (confirmed directly: 33 both ways). A fixed-
+        # width, pack_propagate(False) container -- the same shape every
+        # real content pane in this app already uses -- gives the row real
+        # slack, so "packed at the right edge" and "packed adjacent to the
+        # label" actually produce different numbers.
+        container = tk.Frame(self.root, width=500, height=50)
+        container.pack_propagate(False)
+        container.pack()
+        row = app.section(container, "Test", 1.0,
                           action_factory=lambda r: tk.Button(r, text="Do"))
         row.update_idletasks()
         label, action = row.winfo_children()
-        self.assertGreaterEqual(action.winfo_x(), label.winfo_x() + label.winfo_width())
+        # Right of the label, with a genuine gap now that one can exist.
+        self.assertGreater(action.winfo_x(), label.winfo_x() + label.winfo_width())
+        # Flush against the row's own right edge -- the direct proof that
+        # section() used pack(side="right"), not merely "somewhere right of
+        # the label" (which a left-packed-after-some-spacer layout could
+        # also satisfy).
+        self.assertEqual(action.winfo_x() + action.winfo_width(), row.winfo_width())
 
 
 @needs_display
