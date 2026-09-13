@@ -64,11 +64,18 @@ Bugs and residue:
       §3 assumption that `_dpi_s >= 1.0` was simply wrong about macOS. Decide whether
       to add the `fs(base, s)` floor across the ~20 font call sites, drop 90 % on
       low-DPI displays, or accept it. Only verifiable via CI — no real Mac here (G#4).
-- [ ] **`QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`
-      is flaky on macOS.** Failed on `main` at `5c32f3c` (a docs-only commit, so
-      nothing in the diff could have caused it) and earlier during story #24
-      feature 3, passing on the retry both times. Non-fatal — exit 1, not an abort.
-      It is why `main` shows a red macOS leg at `5c32f3c`.
+- [x] **`QueuedNonResyncedUpdatesSurviveARebuild...still_lands` macOS flake — fixed
+      2026-09-13** (G#30 / GH#53, PR #58, `22815c9`). Failed four times, always on
+      macOS, always passing on re-run — twice on diffs containing no executable code
+      at all. Cause: `_rebuild_ui()`'s tail unconditionally restarts `_poll_games()`,
+      so a second *real* OS scan races the test's fake one and overwrites
+      `{"minecraft"}` with the runner's actual window state. Fixed by stubbing
+      `_poll_games` to a no-op for that test. Two dead ends are recorded in
+      `docs/history/ac-30-implementation.md` and worth reading before touching it:
+      stubbing `detect_running` to the value the test queues blinds the guard
+      entirely, and stubbing it to a *distinguishable* value fails 5/5 on correct
+      code, because an instant stub makes the second scan land deterministically
+      first.
 - [x] **The test suite intermittently aborts at interpreter shutdown** —
       `Tcl_AsyncDelete: async handler deleted by the wrong thread`, exit 134, and
       unittest's summary never prints, so a run that passed looks like a failure.
@@ -195,9 +202,53 @@ Two follow-ups from its review are below.
 - [ ] G#12 / GH#14 — Calibration suite for the review agent. Rebase its branch first.
 
 Housekeeping:
+- [ ] **A flake "fix" tends to work by blinding the test — sabotage-verify every
+      one.** Three cases in two days, each caught only by deliberately breaking the
+      product and checking the test still failed: a settling loop added to a *test*
+      drove panes to a state the app never reached (289/289 green while a row was
+      visibly clipped off-screen); `test_holding_does_not_repeat`'s quiet window fell
+      inside `DEBOUNCE_S`, so debounce alone satisfied the assertion (sabotaged
+      product: old test caught it 5/5, new test passed 10/10); and
+      `QueuedNonResynced...` stubbed a dependency to the same value the test queues,
+      so a dropped entry was indistinguishable from a delivered one (passed 3/3).
+      Removing a flake means removing variation, and the test's own sensitivity is
+      the easiest variation to remove. **The acceptance test is not "it stopped
+      failing" but "it still fails when the product is broken."**
+- [ ] **Anything matching on a command line matches the process doing the matching.**
+      `pgrep -f` / `pkill -f` see the full command line **including the shell running
+      them**, so `pkill -f foo.py` inside a `bash -c` containing that string SIGKILLs
+      itself and leaves the target alive (hit twice on 2026-09-13, exit 144 both
+      times). Collect PIDs first, then `kill -9` those. For waiting, prefer
+      `tail --pid=<pid> -f /dev/null`, or `until ! pgrep -f "[f]oo" >/dev/null; do
+      sleep 2; done` — and bracket **every** alternative: a loop whose pattern was
+      `"[u]nittest ...\|fullsuite"` matched its own command line on the second
+      alternative and spun for 15 hours, burning a core, noticed only from the host.
+- [ ] **`ps` CPU and elapsed-time accounting is broken in this container.** Process
+      ages read as ~130 years and `%CPU` shows ~0 even for a pegged core; a
+      `/proc`-based age calculation comes out *negative*. To tell whether a process
+      is working or hung, sample `utime+stime` from `/proc/<pid>/stat` twice a few
+      seconds apart — zero delta with state `S` means blocked. Use `top` in the
+      container, or ask the host session for cgroup figures, when real numbers matter.
+- [ ] **"CI didn't run" usually means the PR is unmergeable, not that GitHub dropped
+      it.** A `pull_request` run cannot be created while `mergeable_state` is
+      `dirty`, and nothing in the runs list or check-runs API says so — it simply
+      shows nothing. Two pushes and a close/reopen were spent before checking
+      `mergeable` on PR #57 (2026-09-13). Check `mergeable_state` first.
 - [ ] Branches `feature/ac-12/…` and `feature/ac-13/…` are stacked on `901f0a4`, whose FIFO tests fail on Windows. They stay red on CI until rebased onto `main`.
-- [ ] Release: `main` carries #19, #21, #24, #27, #28–#31, #37, #39, #40, #41 since v0.3.1. `release.yml` needs `__version__` to match the `release/x.y.z` branch, so bump it there (0.4.0 suggested, since Settings is new UI).
-- [ ] The GitHub token in `~/.config/afk-clicker/gh-token` can't re-run Actions jobs (no `actions:write`). A flaky run needs a new push to go again.
+- [ ] **Release 0.5.0 is built and waiting on the owner's approval.** Run
+      https://github.com/LeTe0301/afk-clicker/actions/runs/34723400064 — `version`,
+      `test` and all three `build` jobs green; `publish` is parked at the `release`
+      environment's required-reviewers gate. Nothing is on the Releases page until it
+      is approved, which is why the in-app updater still reports "up to date".
+      **GitHub mobile cannot approve deployment gates** — it needs a desktop browser
+      ("Review deployments" on the run page), or `actions: write` on the token.
+- [ ] **The GitHub token lacks `actions: write`**, which blocked four different
+      things on 2026-09-13: approving the 0.5.0 release, re-running a failed job
+      (four times, each costing an empty commit), `workflow_dispatch`, and a
+      subagent's attempt to post a PR comment via `gh`. Reads work fine — the
+      `pending_deployments` endpoint even reports `current_user_can_approve: true`,
+      which is about the *user*, not the token's scope. Adding `actions: write`
+      would remove all four.
 - [ ] **Stress-testing the suite needs two Xvfb displays, not one.** There is no
       window manager, so X input focus is a single global resource:
       `UITestCase.setUp` (`tests/test_ui.py:74-79`) calls `root.focus_force()` to
@@ -241,87 +292,76 @@ Housekeeping:
       the last stage to touch a worktree before the next cycle overwrites those files.
       Arguably belongs in the global pipeline description in `~/.claude/CLAUDE.md`
       too — left alone, as that's the owner's file.
-## Session handoff — 2026-09-12 (end of session)
+## Session handoff — 2026-09-13
 
 **Where things stand:**
-- `main` is at `6c4de48`, CI green on all three platforms, **284 tests**. Local checkout clean; the `ac-24` worktree is on its branch at
-  the merged state, clean.
-- **Story G#24 / GH#36 is closed — all five features merged.** Nothing is in
-  flight. There is no story queued behind it.
+- `main` is at `6519786`, CI green on all three platforms, **293 tests**. Local
+  checkout clean, on `main`. No worktrees beyond the repo itself.
+- **Nothing is in flight.** No agents running, no tests running.
+- **Release 0.5.0 is built and parked on the owner's approval** — see the Release
+  item under Housekeeping. That is the only thing blocking a shipped release.
 
-Merged this session, each after a critical ten-round PR review posted on the PR
-and green CI on all three platforms:
+Merged since the last handoff, each after one in-depth review and green CI:
 
-| PR | Feature | Merge |
+| PR | What | Merge |
 |---|---|---|
-| #40 | 2 — horizontal tab bar (`Hotkey \| Clicking`, `Appearance \| Updates`) | `5ab0196` |
-| #41 | 3 — icon rail; window minimum width rederived | `18c6f7c` |
-| #42 | 4 — each tab pane fills its own leftover vertical space | `cb5900e` |
-| #43 | 5 — flat restyle, sparing accent, sentence-case headers | `06f5900` |
+| #49 | Window height floor, `690 * s` → `WINDOW_MIN_H = 620` (G#28) | `8ac6e35` |
+| #51 | Review protocol: one in-depth pass, not ten rounds (G#29) | — |
+| #52 | GC teardown fix — the interpreter-shutdown abort (G#27) | `08eb891` |
+| #56 | GC regression guard + corrected class enumeration (G#31) | `6626fdd` |
+| #58 | macOS queued-scan flake (G#30) | `22815c9` |
+| #57 | `test_holding_does_not_repeat` flake (G#32) | `6519786` |
 
-(Feature 1, the row value column, merged as PR #37 / `db20af2` at the end of the
-previous session.)
+**All three known flaky tests are now fixed.** The merge path should stop costing
+an empty commit every few PRs, and a release should no longer hit a coin-flip test
+that only runs at release time.
 
-Story-level end-to-end pass: clean. `handoff/story-24-e2e.md`, screenshots in
-`handoff/story24-shots/`.
+**Process change (owner, homelab-wide):** a pull request gets **one in-depth
+review pass**, not ten rounds. `docs/REVIEW-PROTOCOL.md` was reworded to match; its
+ten lenses are that pass's checklist, and `ANOTHER ROUND` means the PR needs more
+work and the *new* diff gets a fresh review — never re-reviewing the same diff.
 
-Merged after the story closed: G#26 / GH#44 (PR #45, `6c4de48`) — the number in
-every numeric input sat flush against the field's right border, since
-`justify="right"` pins it to the entry's own edge and `pack`'s `ipadx` pads both
-sides equally. A background-coloured spacer insets it without changing the
-entry's character width, so feature 1's value column keeps its offsets.
-
-**Next:** nothing is queued. The open items are in the sections above — the
-largest are the `minh` window-floor question (a product decision, and the one
-most visible to a user), G#13's Macros tab, and G#12's calibration suite. Both
-of those last two need a rebase before they build.
+**Next:** nothing is queued. The largest open items are G#13's Macros tab and
+G#12's calibration suite (both need a rebase before they build), G#23's macOS DPI
+decision, and the accumulated review residue. `docs/ROADMAP.md` has the plan.
 
 **Workflow:**
-1. product-manager → ux-designer → developer → reviewer, each stage reading the
-   previous stage's `docs/*.md`.
+1. product-manager → ux-designer → developer → reviewer, each reading the previous
+   stage's `docs/*.md`.
 2. An approved cycle is pushed and PR'd without asking.
-3. The review agent gives each PR a critical ten-round review per
+3. The review agent gives each PR one in-depth critical pass per
    `docs/REVIEW-PROTOCOL.md`, re-deriving claims rather than trusting the cycle's
    own docs, and posts it on the PR.
 4. Merge on a `MERGE` verdict **and** green CI on all three platforms. A red leg
-   routes back to the developer as a new round — never merge through it.
-5. If a fix lands after a verdict, ask the same reviewer to verify the delta and
-   re-issue rather than paying for a fresh ten-round pass.
-6. Archive the cycle's `docs/*.md` into `docs/history/` **after** CI is green,
-   not at reviewer approval — approval is not the last gate.
+   routes back to the developer — never merge through it.
+5. After a fix lands post-verdict, ask the same reviewer for a fresh pass on the
+   new diff rather than paying for a full re-review.
+6. Archive the cycle's `docs/*.md` into `docs/history/` **after** CI is green, and
+   before the next cycle overwrites them. Two conflicts this session came from
+   skipping that.
+7. **Ask about cutting a release after every merge** (owner's standing rule).
 
-**Running tests here:** the README's `xvfb-run` needs `xauth`, which this
-container lacks. Start `Xvfb :99` directly and use a venv with `pynput`:
-`DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .` — 284 tests on
+**Running tests here:** the README's `xvfb-run` needs `xauth`, which this container
+lacks. Start `Xvfb :99` directly and use a venv with `pynput`:
+`DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .` — 293 tests on
 `main`. The venv lives in the session scratchpad and does not survive a container
-reset. Keep a second display (`:98`) for load loops — see Housekeeping.
+reset. Slow tests (`test_chords_slow`) need `AFK_SLOW_TESTS=1` and run **only on
+releases**. Keep a second display for load loops — see Housekeeping.
 
-**The one lesson this story is worth remembering for:** *a green local run is not
-evidence for behaviour this box cannot produce.* CI's Windows and macOS legs
-caught **eleven** things the cycle reviews missed, and they share that one shape.
-Xvfb has no window manager, so it never clamps a window, never sends a post-map
-root `<Configure>`, and never arbitrates focus between processes. Anything
-resize-, mapping- or focus-driven is only really tested on CI.
+**The lessons worth carrying, in order of how much they cost:**
 
-Concretely, before asserting a pixel value, ask what else could legitimately
-produce a different number elsewhere — the font, the screen, the DPI, the WM.
-Prefer assertions true by construction: compare two things measured the same way,
-or derive the expectation from what was actually measured, rather than comparing
-one measurement against a constant or against a starting value you assumed the
-platform would honour.
-
-**Other lessons that cost a round each:**
-- Tk prints callback exceptions instead of raising them. `UITestCase` records them.
-- Design-doc contrast arithmetic has been wrong **four** times. Recompute with the
-  real WCAG formula, and sanity-check the calculator against white/black = 21:1.
-  The compound scale is `_dpi_s * UI_SCALE_FACTORS[...]` — the two **multiply**, so
-  the worst case is low-DPI *and* the 90% step together (`s = 0.675`), not either
-  alone. `int()` truncates, so `int(10 * 0.675)` is 6, not 7.
-- A comment asserting a hazard is worth empirically testing before trusting it.
-  Three in this codebase claimed safety properties that were simply false.
-- Verify a stress-test harness before trusting its numbers. A load loop killed by
-  PID rather than process group leaves an orphan hammering the display, which
-  produced a fake 25% failure rate briefly reported as a real regression.
-- A test written to prevent a latent-parameter bug can contain one. Two tests this
-  story shipped passed in both the working and sabotaged states. **Sabotage every
-  new test in both directions** before believing it.
+1. *A green local run is not evidence for behaviour this box cannot produce.*
+   CI's Windows and macOS legs caught **eleven** things the cycle reviews missed.
+   Xvfb has no window manager, so it never clamps a window, never sends a post-map
+   root `<Configure>`, and never arbitrates focus between processes.
+2. *A flake fix tends to work by blinding the test.* Sabotage-verify every one —
+   three cases in two days, detail under Housekeeping.
+3. *Anything matching on a command line matches the process doing the matching.*
+   Cost a 15-hour hot loop and two self-inflicted `pkill`s — detail under
+   Housekeeping.
+4. Design-doc contrast arithmetic has been wrong **four** times; recompute with the
+   real WCAG formula and sanity-check the calculator against white/black = 21:1.
+   The compound scale `_dpi_s * UI_SCALE_FACTORS[...]` **multiplies**, so the worst
+   case is low-DPI *and* the 90% step together (`s = 0.675`). `int()` truncates.
+5. A comment asserting a hazard is worth testing before trusting it. Three in this
+   codebase claimed safety properties that were simply false.
