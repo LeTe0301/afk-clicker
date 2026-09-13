@@ -42,6 +42,8 @@ process-wide):**
   `AfkAutoclicker`.
 - `SectionHeader` (`tests/test_ui.py:2291`) — bare `tk.Tk()`, no
   `AfkAutoclicker`.
+- `FlatChrome` (`tests/test_ui.py:2248`) — bare `tk.Tk()`, no
+  `AfkAutoclicker`.
 - `RailAccent` (`tests/test_ui.py:2343`) — bare `tk.Tk()`, no
   `AfkAutoclicker`.
 - `PrimaryButtonTheme` (`tests/test_ui.py:2390`) — bare `tk.Tk()`, no

@@ -41,8 +41,10 @@ if ROOT not in sys.path:
 # Several *other* test classes in test_ui.py also build and close a real
 # tk.Tk()/AfkAutoclicker without ever calling gc.collect() themselves (e.g.
 # CardShell, SetActiveThemeWidgets, StartupHonoursSavedAppearance,
-# PollGamesScanDoesNotHoldSelfWhileBlocked -- see G#31's review of this
-# ticket for the fuller list) -- that is fine and does not need fixing:
+# PollGamesScanDoesNotHoldSelfWhileBlocked, FlatChrome -- eleven in all;
+# docs/history/ac-27-r3-implementation.md has the enumerated list, and it
+# is deliberately not repeated here because a list in a comment goes stale
+# the moment someone adds a class) -- that is fine and does not need fixing:
 # gc.disable() below is process-wide, so the fix's safety never depended on
 # which class leaks or how many places explicitly collect. Scoped to the
 # test suite only: the production app never creates more than one Tk() per

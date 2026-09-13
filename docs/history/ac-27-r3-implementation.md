@@ -449,9 +449,9 @@ built and closed. At least four more test classes do that without ever
 calling `gc.collect()` themselves: `PollGamesScanDoesNotHoldSelfWhileBlocked`,
 `SetActiveThemeWidgets` (via its `_build()` helper),
 `StartupHonoursSavedAppearance`, and `CardShell`, plus `FillPaneOverflow`,
-`SectionHeader`, `RailAccent`, and `PrimaryButtonTheme` (these last four
-build a bare `tk.Tk()` without an `AfkAutoclicker`, but still build and
-destroy a real Tcl interpreter). This was always harmless — `gc.disable()`
+`SectionHeader`, `RailAccent`, `FlatChrome` and `PrimaryButtonTheme` (these
+last five build a bare `tk.Tk()` without an `AfkAutoclicker`, but still build
+and destroy a real Tcl interpreter). This was always harmless — `gc.disable()`
 turns off automatic collection process-wide, so the fix's safety never
 depended on which class leaks or how many places explicitly collect — but
 the original wording was a trap for whoever added the next UI-building test
