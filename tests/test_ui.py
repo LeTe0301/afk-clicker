@@ -12,6 +12,7 @@ import types
 import unittest
 import weakref
 
+from . import context
 from .context import app, kb, needs_display, hotkey
 
 if app is not None:
@@ -327,6 +328,27 @@ class PollGamesScanDoesNotHoldSelfWhileBlocked(unittest.TestCase):
                 root.destroy()
             except tk.TclError:
                 pass
+
+
+class GcAutomaticCollectionStaysDisabled(unittest.TestCase):
+    """G#31/GH#54: nothing else in this suite fails if someone removes
+    context.py's gc.disable() or otherwise re-enables automatic collection.
+    The abort that mechanism prevents would just start happening again --
+    intermittently, on CI only, which is exactly what made it take five
+    attempts to characterise the first time (docs/history/
+    ac-27-r3-implementation.md's Round 3). This is the direct half of the
+    guard: the one process-wide flag the whole fix rests on. tearDownModule()
+    below is the independent half -- it fails if the actual symptom (an
+    off-main-thread Variable.__del__ RuntimeError) is ever observed anywhere
+    in this module's run, not just if this flag gets flipped back on."""
+
+    def test_automatic_collection_is_disabled_for_the_whole_suite(self):
+        self.assertFalse(
+            gc.isenabled(),
+            "automatic GC is enabled -- context.py's gc.disable() was "
+            "removed, or something re-enabled collection. This reintroduces "
+            "an intermittent, CI-only interpreter abort; see "
+            "docs/history/ac-27-r3-implementation.md's Round 3.")
 
 
 class CorruptConfig(UITestCase):
@@ -3835,6 +3857,22 @@ class StartupHonoursSavedAppearance(CapturesCallbackExceptions, unittest.TestCas
                 except tk.TclError:
                     pass
         self._assert_no_callback_exceptions()
+
+
+def tearDownModule():
+    # See GcAutomaticCollectionStaysDisabled above (G#31/GH#54). Checked
+    # once per module run, not per-test: the symptom this counts is
+    # process-wide -- any test's worker thread can trip it, at any point in
+    # the run -- not attributable to whichever test happens to be executing
+    # when it fires, so there is no single test to attach this assertion to.
+    count = context.MAIN_THREAD_UNRAISABLE_COUNT
+    if count:
+        raise AssertionError(
+            f"{count} off-main-thread Variable.__del__ RuntimeError(s) "
+            "('main thread is not in main loop') occurred during this run "
+            "-- the G#27/GH#46 abort mechanism is back. See "
+            "tests/context.py's gc.disable()/unraisablehook comment and "
+            "docs/history/ac-27-r3-implementation.md's Round 3.")
 
 
 if __name__ == "__main__":
