@@ -3700,19 +3700,67 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
                     "be silently dropped by the old _ui_queue swap")
 
     def test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands(self):
+        # G#30/GH#53 (macOS-only flake): _build_ui()'s own tail -- reached
+        # from inside the _rebuild_ui() call below -- unconditionally starts
+        # a brand new _poll_games() scan of its own, on a real background
+        # thread, same as construction did for setUp()'s settle(). That scan
+        # is genuinely real here (detect_running is never mocked in this
+        # class): a Xlib tree walk on Linux, an `osascript` subprocess on
+        # macOS. If that second, uninvited scan's own self._ui(self.
+        # _mark_running, ...) call lands -- via this test's own trailing
+        # _drain_ui() below, there being no other drain path between the two
+        # -- before the assertion runs, it overwrites self._seen_running
+        # with whatever real windows happen to be open on the CI runner,
+        # which never includes "minecraft". That is a real race, not a
+        # dropped queue entry: _seen_running does get set, just to the
+        # second scan's real result instead of this test's queued one,
+        # which reads identically to "queued update silently dropped" in
+        # the assertion below (a plain set difference) without actually
+        # being that historical bug. Nothing in the linear code path between
+        # the queue-put and the drain gives the *original* queued value
+        # anywhere else to be lost -- no root.update() runs in between for
+        # a stray timer to be serviced through, and _rebuild_ui()'s own
+        # _rebuilding/_rebuild_after_id guards already rule out a second,
+        # reentrant _rebuild_ui() call interleaving here.
+        #
+        # Round 2 (G#30 PR review): an earlier version of this fix stubbed
+        # detect_running to return this test's own target instead of
+        # disabling _poll_games() below. That collapsed the race rather than
+        # closing it: threading.Thread.start() does not return until the new
+        # thread has signalled it has begun (an internal Event), which in
+        # practice hands the child the GIL first -- so with detect_running
+        # made instant (no real Xlib/osascript call to block on and yield
+        # the GIL), the second scan's own self._ui(self._mark_running, ...)
+        # call reliably lands before this test's own _drain_ui() below, every
+        # time, not merely "if it wins a race". Stubbing it to the SAME value
+        # this test queues made that reliable second landing invisible --
+        # sabotage (reintroducing the historical _ui_queue swap at
+        # _rebuild_ui(), so the manually-queued call below is genuinely
+        # dropped) still passed 3/3, because the second scan's forged
+        # "minecraft" landed in its place and the assertion cannot tell the
+        # two apart. Disabling _poll_games() for the duration of this test
+        # instead removes the confound entirely -- no second scan, real or
+        # stubbed, ever starts, so nothing but this test's own queued call
+        # can land, and a genuinely dropped entry has nothing left to hide
+        # behind.
         old_seen = self.ui._seen_running   # already set by setUp()'s settle()
         target = {"minecraft"}
         self.assertNotEqual(old_seen, target,
                             "test needs a genuinely different value to prove "
                             "the queued call actually landed, not that "
                             "_seen_running just happened to already match")
-        self.ui._ui(self.ui._mark_running, target)
-        self.ui._rebuild_ui()
-        self.ui._drain_ui()
-        self.assertEqual(
-            self.ui._seen_running, target,
-            "a queued _mark_running() scan result should survive a rebuild, "
-            "not be silently dropped by the old _ui_queue swap")
+        original_poll_games = self.ui._poll_games
+        self.ui._poll_games = lambda: None
+        try:
+            self.ui._ui(self.ui._mark_running, target)
+            self.ui._rebuild_ui()
+            self.ui._drain_ui()
+            self.assertEqual(
+                self.ui._seen_running, target,
+                "a queued _mark_running() scan result should survive a "
+                "rebuild, not be silently dropped by the old _ui_queue swap")
+        finally:
+            self.ui._poll_games = original_poll_games
 
 
 class QueuedStatusSurvivesARebuild(UITestCase):
