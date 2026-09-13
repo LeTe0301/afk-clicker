@@ -1,273 +1,311 @@
-# Implementation: G#30/GH#53 — macOS flake in QueuedNonResyncedUpdatesSurviveARebuild
+# Implementation: Fix the flaky `test_holding_does_not_repeat` (G#32/GH#55)
 
 ## Summary
-Fixed the macOS-only flake in
-`tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`
-by removing the one genuinely non-deterministic input the test was
-unintentionally depending on: a real, unmocked `detect_running()` OS scan
-that `_rebuild_ui()` legitimately (and correctly) triggers as a side effect.
-No production code (`afk_clicker.py`) changed — this is a test-only fix.
-`tests/test_ui.py` is the only file touched.
+
+`tests.test_chords_slow.Firing.test_holding_does_not_repeat` was flaky
+because of a race in how the test drives synthetic input, not a bug in
+`HotkeyWatcher`. Caught it failing in the act with instrumentation, traced it
+to pynput's own double-delivery of every synthetic key transition when a
+`Controller` and a `Listener` share a process, and fixed it by having the
+test wait for an independent listener to go quiet between actions instead of
+sleeping a fixed duration. No production code changed.
 
 ## Root cause
-**Established, from reading the code (not from a macOS reproduction — see
-"What is inference vs. established" below):**
 
-The test's sequence is:
-```python
-self.ui._ui(self.ui._mark_running, target)   # (A) queue a fake scan result
-self.ui._rebuild_ui()                         # (B) tear down + rebuild
-self.ui._drain_ui()                           # (D) test's own drain
-self.assertEqual(self.ui._seen_running, target, ...)
-```
+**This is a test-harness artifact, confirmed not reachable from a real
+keyboard, not a product bug.** Evidence:
 
-`_rebuild_ui()` calls `_build_ui()`, whose own tail (`afk_clicker.py:2140-2143`)
-does exactly this, unconditionally, on every rebuild:
-```python
-self._drain_ui()      # drains (A) -- this part is deterministic and correct
-self._poll_games()    # starts a NEW background thread, unrelated to (A)
-```
+- `pynput`'s X11 `Controller._handle()` (`pynput/keyboard/_xorg.py:271-272`)
+  sends the XTEST fake-input event to the X server **and then**
+  synchronously calls `self._emit('_on_fake_event', key, is_press)`, which
+  notifies every `Listener` in the same process directly, in-process,
+  immediately. The **same** listener also gets the transition a second time,
+  asynchronously, whenever the real X server round-trip actually arrives
+  (`ListenerMixin._handle_message`, fed by the listener's own background
+  thread reading the X record extension stream). This double-notification is
+  a documented pynput characteristic for this exact situation (a `Controller`
+  and `Listener` coexisting in one process) — it is not specific to Xvfb, and
+  it is already called out in this test file's own module docstring ("XTEST
+  under Xvfb delivers every synthetic press and release exactly twice").
+- The second (real round-trip) copy is delivered on the listener's own
+  background thread and has no delivery-time guarantee. Under CPU pressure
+  (confirmed directly on the box this was diagnosed on — `uptime` showed a
+  sustained load average around 40 on 10 cores from unrelated jobs) that
+  thread can be starved for anywhere from tens of milliseconds to multiple
+  seconds, so the delayed duplicate of an *earlier* action can arrive after a
+  *later* action's own immediate copy has already changed watcher state.
+- Caught this exact interleaving with instrumentation wrapping
+  `HotkeyWatcher._press`/`_release` (scratch script, not committed): the
+  delayed duplicate of the test's own "auto-repeat" press (the second
+  `controller.press(kb.Key.f7)` call, sent while `f7` is already held) landed
+  *after* the real `controller.release(kb.Key.f7)` call had already
+  re-armed the watcher (because `f6` was still logically held at that point).
+  `HotkeyWatcher` correctly saw a complete chord again and fired a second
+  time — exactly the reported `AssertionError: 2 != 1`. Sample of the actual
+  captured event sequence (timestamps relative to test start, columns are
+  `armed before -> armed after`, `keys before -> keys after`):
+  ```
+  PRESS  f7  t=1.064   False->True   keys:[f6,f7]->[f6]   <- real release, chord breaks, re-arm
+  PRESS  f7  t=1.0641  True->False   keys:[f6]->[f6,f7]    <- FIRE #2: stale duplicate of the
+                                                                repeat-press, arriving late, re-
+                                                                completes the chord while f6 is
+                                                                still down
+  ```
+- Confirmed there is no in-process `keyboard.Controller` anywhere in shipped
+  code (`afk_clicker.py:41` only imports `pynput.mouse.Controller` for the
+  click simulation). `HotkeyWatcher`'s listener, in production, only ever
+  receives the real X round-trip copy of a genuine hardware key event — the
+  `_on_fake_event` fast path this bug depends on is never invoked outside a
+  test that constructs its own `keyboard.Controller`. There is therefore no
+  way for a real user's keyboard to trigger the interleaving above.
+- `HotkeyWatcher.DEBOUNCE_S` (0.25s) already exists specifically to absorb
+  genuine hardware auto-repeat duplicate events, per its own comment. Raising
+  it to also cover a multi-hundred-millisecond-to-multi-second test-only
+  delivery race would weaken real debounce behavior for legitimate rapid
+  re-presses in production to paper over a test artifact — not done.
 
-`_poll_games()` (`afk_clicker.py:2950-2990`) spawns a real
-`threading.Thread` that calls `detect_running(profiles)` — a genuine OS
-scan (an Xlib tree walk on Linux, an `osascript` subprocess on macOS,
-per `_window_titles()` at `afk_clicker.py:1104-1159`) — and then does
-`self._ui(self._mark_running, running)` with whatever it actually finds.
-This class never mocks `detect_running` (unlike
-`PollGamesScanDoesNotHoldSelfWhileBlocked`, which already does, at
-`tests/test_ui.py:275-330` in the pre-fix file), so on any platform this is
-a real scan of the CI runner's real windows.
-
-For the assertion to fail with "'minecraft' missing" (the actual observed
-`AssertionError`, an `assertEqual`-on-sets diff, not a raised exception), the
-value that ends up in `self.ui._seen_running` must be a genuine, different
-*set* — not merely absent. `_mark_running` only ever gets there by actually
-running to completion (it unconditionally does `self._seen_running =
-running_ids` partway through its own body). The only second source of a
-`_mark_running(running_ids)` call anywhere in this sequence is the new scan
-thread `_poll_games()` just started. If that thread's real scan finishes and
-its queued `_mark_running(real_running_ids)` call gets drained — by the
-test's own `self.ui._drain_ui()` call (D), there being no other drain path
-in between (no `root.update()` runs between (A) and (D), and
-`_rebuild_ui()`'s own `_rebuilding`/`_rebuild_after_id` guards already rule
-out a second, reentrant `_rebuild_ui()` interleaving here, per the reasoning
-already recorded in `docs/history/ac-24-f3-implementation.md`'s "The third
-macOS failure" section) — before the assertion runs, `real_running_ids`
-(which never contains "minecraft" on a CI runner) overwrites the test's
-`target`. That reads exactly like "queued update silently dropped" in the
-assertion, without being the historical `_ui_queue`-swap bug this test
-exists to guard (which is still fixed, and stays fixed — nothing here
-touches that code path).
-
-This is why it is macOS-only and immune to any change that isn't to this
-exact scan/rebuild interaction: `docs/history/ac-24-f3-implementation.md`
-already investigated (without macOS access) whether a *second, uninvited*
-`_rebuild_ui()` call could interleave here, concluded no such path exists
-given the existing reentrancy guards, and flagged this exact test as
-possibly fixed "by a different, more general mechanism" by that round's
-`<Configure>`-binding-timing fix — explicitly unconfirmed. G#30's four
-recurrences (including three *after* that fix had already landed) confirm
-that theory did not hold, and point at the mechanism above instead: not an
-extra rebuild, but the rebuild's own, entirely legitimate, second
-`_poll_games()` scan.
+Given all of the above, the fix belongs in the test, not in
+`afk_clicker.py`, and does not touch `HotkeyWatcher`'s debounce/re-arm logic.
 
 ## Changes by file
-- `tests/test_ui.py` —
-  `QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`:
-  monkeypatches `app.detect_running` to a deterministic
-  `lambda profiles: target` for the duration of the test (restored in a
-  `finally`, matching the existing convention already used by
-  `PollGamesScanDoesNotHoldSelfWhileBlocked.test_scan_only_holds_profiles_not_self_during_detect_running`
-  a few classes above it in the same file). Added a comment recording the
-  race and why the fix is safe. No other test in the file touches
-  `detect_running`'s mocking convention differently.
+
+- `tests/test_chords_slow.py` — `Firing.test_holding_does_not_repeat`
+  rewritten to wait for an independent `kb.Listener` to go quiet (200ms of no
+  press/release activity, capped at a 3s timeout per wait) between each
+  synthetic action, instead of a fixed `time.sleep(0.5)`/`time.sleep(0.4)`.
+  This gives both copies of one action (the immediate in-process one and the
+  delayed real-round-trip one) a chance to land before the next action is
+  sent, closing the race described above. Added a `try`/`finally` around the
+  action sequence so the extra probe listener and the watcher's own listener
+  are always stopped, matching the existing `finally` in `fires()` earlier in
+  the same file. No other test in the file was touched.
 
 ## Key decisions / tradeoffs
-- **Why stub the result to equal `target`, not to something fast-but-empty:**
-  the goal is to make the assertion's outcome independent of *which* scan
-  wins the race, not to make one side win reliably (which would just trade
-  one flake for another, or for a fast, deterministic wrong answer). If
-  `_rebuild_ui()`'s own second scan's `_mark_running` call lands before the
-  assertion, it now lands the *same* value the test already queued, so the
-  observed `self.ui._seen_running` is identical either way. Critically, this
-  does not weaken what the test guards: a genuinely dropped queue entry (the
-  old `_ui_queue`-swap bug) still produces a visibly different
-  `_seen_running` (whatever it was before this test ran, per `old_seen`) and
-  still fails the assertion exactly as before.
-- **Why not add a `pump_until`/wait instead:** the suggested direction in
-  the ticket raised this, but it does not fit here after tracing the actual
-  dependency — there is no `root.update()` between the queue-put and the
-  drain for anything to be waited *for*; the second scan's result is not
-  something this test should ever want to wait for landing, since it is
-  real, non-deterministic OS data this test has no business depending on
-  either way. Waiting for it would just turn an intermittent flake into a
-  reliable failure (or a reliable pass that depends on real window state on
-  the runner, which is worse, not better).
-- **Why not touch `afk_clicker.py`:** `_rebuild_ui()` re-triggering
-  `_poll_games()` on every rebuild is correct, intended production behavior
-  (a rebuild — e.g. an Appearance change — should re-check what's currently
-  running, same as construction does). The bug is entirely in this one
-  test's exposure to that real scan, not in the production code path.
-- **Scope of the monkeypatch:** the whole test body, restored in `finally`,
-  not narrowed to just the `_rebuild_ui()` call — this also covers the
-  thread `_poll_games()` starts, which can still be running (and calling
-  `detect_running`) after `_rebuild_ui()` itself has returned.
+
+- **Fixed the test's synchronization instead of raising `DEBOUNCE_S`.**
+  Confirmed (see "Root cause") that the double-delivery this races against
+  cannot happen from a real keyboard in the shipped app, so widening
+  production debounce would be tuning real behavior around a test-only
+  condition — the opposite of what the ticket asked for if this turned out
+  to be a product bug, and not applicable since it isn't one.
+- **Wait for quiet on an independent listener, not for raw per-key delivery
+  counts to reach an expected number.** Tried first: wait until each key
+  transition had been observed twice (matching the documented "delivered
+  exactly twice" behavior) before proceeding. This measurably improved the
+  failure rate but did not eliminate it — under sustained heavy load, the
+  listener thread can be starved long enough that X11's own detectable
+  autorepeat fires a large burst of extra, legitimate press-only events for
+  a still-held key (confirmed directly: bursts of 30+ consecutive raw press
+  events for `f7` with no interleaved release, arriving all at once when a
+  starved thread finally got scheduled), which broke the assumption that
+  "exactly two" is the right count to wait for. Waiting for actual quiet
+  (no events at all for a stretch) absorbs both the ordinary double-delivery
+  and these autorepeat bursts without needing to predict how many raw events
+  a given action will produce.
+- **A second, independent `kb.Listener` drives the wait, not the
+  `HotkeyWatcher` under test.** Keeps the synchronization mechanism entirely
+  outside the code being verified — the test does not need to reach into
+  `HotkeyWatcher`'s internals (no monkeypatching of `_press`/`_release`) to
+  know when it's safe to proceed. This mirrors the file's own existing
+  `fires()`/`pump_until` philosophy in `test_ui.py`: poll observed state with
+  a bounded timeout instead of sleeping a duration and hoping.
+- **Bounded every wait (`timeout=3.0`) and let it fall through rather than
+  fail.** Matches `test_ui.py`'s own `pump_until` convention ("returns
+  without failing if the predicate never becomes true, so the caller's own
+  assertion still reports the regression") — if quiescence genuinely never
+  arrives, `self.assertEqual(len(hits), 1)` still catches a real problem.
 
 ## Deviations from spec
-None. The ticket explicitly left "which of the suggested directions
-actually fits" open pending verification, and asked for the real dependency
-to be traced rather than assumed — this is exactly what the root-cause
-section above does, and the fix follows from that tracing rather than from
-applying `pump_until` by default.
 
-## Known limitations / what is inference vs. established
-- **Established (from local reproduction on Linux/Xvfb, this session):**
-  the code path traced above — `_rebuild_ui()` → `_build_ui()`'s tail →
-  `_drain_ui()` then unconditional `_poll_games()` → a real,
-  never-mocked `detect_running()` call on a new background thread whose
-  result lands via `self._ui(self._mark_running, ...)` — exists exactly as
-  described, and is exercised by every run of this test, on every platform.
-  The fix removes that real scan deterministically and the full suite
-  (293 tests, Linux/Xvfb) still passes, including the GC regression guard
-  (`GcAutomaticCollectionStaysDisabled`) and `tearDownModule`'s
-  off-main-thread error count.
-- **Inference, not established (this box has never reproduced the failure,
-  and cannot generate a real macOS `osascript` scan to confirm the exact
-  race window):** that this specific second-scan race, rather than some
-  other macOS-Tk-build-specific quirk in `update_idletasks()` (raised as an
-  open possibility in `docs/history/ac-24-f3-implementation.md` but never
-  confirmed either way), is the actual mechanism. It is the strongest
-  candidate that survives elimination against the established, linear code
-  path — no other route was found by which the *original* queued value
-  could be lost between the queue-put and the drain — and it is the only
-  candidate consistent with the failure being macOS-only (a real subprocess
-  scan on a shared, often-loaded CI runner is a materially different
-  timing profile than Linux's in-process Xlib walk) and with three of the
-  four recurrences changing no code that could plausibly matter otherwise.
-  If G#30 recurs after this fix on a future CI run, that would falsify this
-  root cause and point at the `update_idletasks()` alternative instead —
-  worth flagging explicitly rather than treating this fix as certain.
+None. The ticket's own instructions anticipated exactly this outcome
+("if it turns out to be a product bug... report it plainly and stop" /
+implicitly, the reverse: fix the test if it's a test bug) and asked for the
+before/after rate either way; both are below.
+
+## Known limitations
+
+- The fix cannot give an absolute guarantee under arbitrarily severe host
+  starvation — if the listener thread is starved for longer than the 3s
+  timeout on `settle()`, the test proceeds anyway and could still race. This
+  was not observed in ~90 combined measurement runs (see below), including
+  under the same heavily loaded box the diagnosis was done on, and 3s is
+  already generous relative to the worst delay actually measured (~2s, once).
+- The underlying pynput double-delivery behavior itself is unchanged (by
+  design — it lives in a third-party library and is harmless in production,
+  see "Root cause"); this fix only changes how the test *waits* around it.
+
+## Measurements
+
+All runs on this box (`uptime` showing a sustained load average of
+~38-44 on 10 cores from unrelated long-running jobs throughout), via the
+real test runner, not a standalone script:
+
+```
+DISPLAY=:98 AFK_SLOW_TESTS=1 <venv-python> -m unittest \
+    tests.test_chords_slow.Firing.test_holding_does_not_repeat
+```
+run in a loop.
+
+- **Before** (unmodified `tests/test_chords_slow.py`, current `main`
+  85dd1e6): 2/20 failures in one back-to-back batch (10%), all
+  `AssertionError: 2 != 1`. Exploratory instrumented runs earlier in this
+  session (a standalone script replicating the same sequence, not part of
+  the committed diff) saw materially higher rates on the same box — up to
+  7/20 (35%) — consistent with the ticket's own 33-50% baseline; the exact
+  rate visibly depends on how busy the box's other jobs are at the moment,
+  which is why two back-to-back measurements here differ.
+- **After** (this fix): 0/20, then a second back-to-back batch of 0/20 —
+  40/40 passing. An exploratory version of the same technique (before it was
+  written into the actual test file) was also run for 60 back-to-back
+  iterations with 0 failures.
+- Full `tests.test_chords_slow` class (all 5 methods, `AFK_SLOW_TESTS=1`):
+  `Ran 5 tests in 67.643s — OK`.
+- Full fast suite (`python -m unittest discover -s tests -t .`, no
+  `AFK_SLOW_TESTS`): `Ran 292 tests in 85.958s — OK (skipped=5)` — no
+  regressions from this change (it only touches one slow-suite test method).
 
 ## How to verify locally
-```
-cd /home/dev/projects/.worktrees/afk-clicker/ac-30
-Xvfb :50 -screen 0 1600x1000x24 &     # or any free display
-export DISPLAY=:50
-<venv>/bin/python -m unittest tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild -v
-<venv>/bin/python -m unittest discover -s tests -t . -v   # full suite
-```
-Run in this session: both commands above, from this worktree, against
-`/tmp/claude-1000/.../scratchpad/venv/bin/python` on `DISPLAY=:50`.
-`QueuedNonResyncedUpdatesSurviveARebuild` — both tests `ok`. Full suite —
-`Ran 293 tests ... OK (skipped=5)`, identical to a `git stash` run of the
-same suite against the pre-fix file (confirming no regression and that the
-one pre-existing, unrelated `invalid command name "..._drain_ui"` Tcl
-teardown warning already present on `test_error_and_stopped_updates_survive_a_rebuild`
-predates this change). **What only macOS CI can confirm:** whether the
-actual G#30/GH#53 flake stops recurring — this fix cannot be verified
-against the real failure from this (Linux-only) box.
-
-## Round 2 (PR #58 review) — the stub's value collision, and why
-
-**The finding, confirmed:** Round 1's fix stubbed `detect_running` to return
-`target` (`{"minecraft"}`) — the exact same set this test manually queues.
-The review reintroduced the historical bug this test exists to catch (the
-`_ui_queue` swap back at `_rebuild_ui()`, dropping the manually-queued
-`_mark_running(target)` call before it can drain) and ran the test 3 times.
-It passed all 3. I reproduced this myself, in a scratchpad copy, before
-changing anything: same sabotage, same 3/3 pass.
-
-**Root cause of the collision:** `_build_ui()`'s tail still unconditionally
-calls `self._poll_games()` after its own `_drain_ui()`, same as before —
-Round 1 only ever stubbed *what that second scan returns*, not whether it
-runs. With the sabotage in place, the manual queue-put is dropped by the
-swap, but the second scan's own `self._ui(self._mark_running, ...)` call is
-not — it lands on the fresh, post-swap queue and gets drained by this test's
-own trailing `_drain_ui()` call. Because Round 1 stubbed `detect_running` to
-return the same value the test queues, that second scan's (illegitimate)
-landing is indistinguishable from the manual one's (correct) landing —
-`self._seen_running` ends up `{"minecraft"}` either way, so the assertion
-cannot tell a genuinely dropped entry from a forged stand-in.
-
-**Why the review's literal suggested value doesn't work either — checked,
-not assumed:** the review proposed stubbing to a value distinguishable from
-`target` (e.g. `old_seen`). I tried this first, in a scratchpad copy, before
-picking a different fix: `app.detect_running = lambda profiles: old_seen`.
-Run against the *unmodified, correct* code (no sabotage), this failed 5/5 —
-not flaky, reliably wrong. Cause: `threading.Thread.start()` does not return
-until the new thread signals (via an internal `Event`) that it has actually
-begun running, which in CPython's GIL scheduling hands the new thread a
-window to run first. With `detect_running` stubbed to an instant lambda
-(no real Xlib/`osascript` call to block on and yield the GIL back), the
-second scan's thread reliably finishes and puts its `_mark_running(old_seen)`
-call onto the queue *before* this test's own `self.ui._drain_ui()` line
-executes — every run, not merely as a race. So any distinguishable stub
-value makes the second scan reliably overwrite the correctly-landed `target`
-with something else, failing the test on entirely correct code. This is the
-opposite failure mode from the one under review (a false failure instead of
-a false pass), but it is just as disqualifying, so I did not implement the
-literal suggestion.
-
-**The actual fix:** disable `_poll_games()` itself for the duration of the
-test (`self.ui._poll_games = lambda: None`, restored in `finally`), instead
-of stubbing what it would return. This removes the confound outright — no
-second scan, real or stubbed, ever starts during this test, so the only
-`_mark_running` call that can possibly land is the one this test queues
-itself. A genuinely dropped entry now has nothing to hide behind, because
-there is nothing else in flight to produce a coincidentally-matching (or
-coincidentally-different) result.
-
-**My own sabotage run, against this fix:** in a fresh scratchpad copy of
-this worktree, reintroduced the exact same `_ui_queue = queue.SimpleQueue()`
-swap at `_rebuild_ui()` (`afk_clicker.py:2224` in that copy, same spot as
-the original bug), and ran
-`test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands` 3
-times:
 
 ```
-AssertionError: Items in the second set but not the first:
-'minecraft' : a queued _mark_running() scan result should survive a
-rebuild, not be silently dropped by the old _ui_queue swap
-FAILED (failures=1)
+cd /home/dev/projects/.worktrees/afk-clicker/ac-32
+PYBIN=<venv-python with pynput>
+
+# the fixed test, once
+DISPLAY=:98 AFK_SLOW_TESTS=1 "$PYBIN" -m unittest \
+    tests.test_chords_slow.Firing.test_holding_does_not_repeat -v
+
+# repeat to confirm the flake is gone (adjust the display/loop count as needed)
+for i in $(seq 1 20); do
+  DISPLAY=:98 AFK_SLOW_TESTS=1 "$PYBIN" -m unittest \
+      tests.test_chords_slow.Firing.test_holding_does_not_repeat || echo "FAIL $i"
+done
+
+# full slow suite
+DISPLAY=:98 AFK_SLOW_TESTS=1 "$PYBIN" -m unittest tests.test_chords_slow -v
+
+# full fast suite (no AFK_SLOW_TESTS)
+DISPLAY=:98 "$PYBIN" -m unittest discover -s tests -t .
 ```
 
-All 3 runs failed, identically. Restored `afk_clicker.py` via
-`git checkout --` in that scratchpad copy immediately after, confirmed
-`git diff` was clean there, and deleted the scratchpad copy — the real
-worktree's `afk_clicker.py` was never touched by any sabotage run.
+Use a display nothing else is using, and do not run two of these
+Xvfb-driving processes against the same display concurrently.
 
-**Non-fragility, re-confirmed:** ran
-`QueuedNonResyncedUpdatesSurviveARebuild` (both tests) 5 times back-to-back
-against the real, unmodified worktree — `OK` every time — then the full
-suite once — `Ran 293 tests ... OK (skipped=5)`.
+## Round 2 (review response)
 
-**Comment correction:** the test's own inline comment previously claimed
-"whichever scan's result lands first, the observed `self._seen_running` is
-identical" as the safety property — true of the stubbed-value approach, but
-that was exactly the property masking the sabotage. Replaced with a comment
-recording this round's finding directly (see `tests/test_ui.py`, the
-"Round 2 (G#30 PR review)" paragraph) — the property this test now
-guarantees is "no second scan runs at all", not "both scans agree".
+### Why the first attempt went blind
 
-### Changes by file (Round 2)
-- `tests/test_ui.py` — `test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`:
-  replaced the `detect_running` stub with `self.ui._poll_games = lambda:
-  None` for the duration of the test body, restored in `finally`. Comment
-  rewritten to describe the actual mechanism and this round's finding
-  instead of the Round 1 claim it falsified.
+PR #57's fix (waiting for an independent listener to go quiet between
+actions, `quiet=0.2`) eliminated the original flake but, measured directly by
+review, made the test unable to detect its own target regression: sabotaging
+`HotkeyWatcher._press` (`self.armed = False` -> `self.armed = True`, so the
+watcher never re-arms) still passed 10/10, because `quiet=0.2` sits inside
+`HotkeyWatcher.DEBOUNCE_S` (0.25s) -- every action landed inside the previous
+action's own debounce window, so debounce alone explained the passing
+result, independent of whether re-arm was intact.
 
-### How to verify locally (Round 2)
+The obvious-looking fix -- widen the quiet window past `DEBOUNCE_S`, so
+debounce can no longer paper over a broken re-arm -- was tried first and
+**itself introduced a real, reproducible flake on unmodified, correct code**:
+0/20 at `quiet=0.2`, but 3/20 and then 7/20 (different runs, same box) at
+`quiet=DEBOUNCE_S+0.15=0.4`. Instrumented both `HotkeyWatcher._press`/
+`_release` and the probe listener to see why (script not committed): once
+the gap between actions exceeds `DEBOUNCE_S`, debounce no longer absorbs
+pynput's second, asynchronous copy of a transition if it happens to land
+late -- and its lag is not reliably bounded by any wait short enough to keep
+the test fast. One captured sequence: the delayed real-round-trip copy of
+the test's own "auto-repeat" press for `f7` (sent at t=0.431s) didn't arrive
+until t=0.833s -- *after* the real `release(f7)` had already re-armed the
+watcher (because `f6` was still logically held) -- re-completing the chord
+and firing a second time, entirely legitimately, on code with no bug in it.
+Widening the quiet window trades "debounce silently masks the sabotage" for
+"an unrelated async race silently fails the correct code" -- neither
+satisfies both properties the review asked for at once.
+
+### What changed
+
+Re-read where the two copies of a transition actually come from
+(`pynput/keyboard/_xorg.py:271-272`, `pynput/_util/__init__.py`'s
+`NotifierMixin._emit`): the *first* copy is not asynchronous at all --
+`Controller._handle()` calls `self._emit(...)` synchronously, in the calling
+thread, before `press()`/`release()` returns, and `_emit` calls every
+registered listener's `on_press`/`on_release` directly. So `hits` already
+reflects `HotkeyWatcher`'s reaction to a press the moment the `Controller`
+call that sent it returns -- no waiting needed to observe that part at all.
+Only pynput's *second*, genuinely asynchronous copy (delivered later, on the
+listener's own background thread) has unbounded lag, and it's that copy the
+old `settle()` was trying and failing to wait out.
+
+Rewrote the test to stop waiting for that second copy entirely instead of
+trying to out-wait it:
+
+- Press f6, press f7 -- fires synchronously; assert `hits == 1` immediately.
+- A single deterministic `time.sleep(HotkeyWatcher.DEBOUNCE_S + 0.15)` --
+  wall-clock, not listener-observed, so it's exact and requires no listener
+  at all. `DEBOUNCE_S` is compared against `time.monotonic()` inside
+  `_press`, so a plain sleep clears it deterministically.
+- Press f7 again (still held, simulating auto-repeat) -- if `self.armed`
+  wasn't correctly cleared after the first fire, this now exercises that
+  path for real (debounce has genuinely elapsed); assert `hits == 1` again,
+  synchronously, right after the call.
+- Only then release f7 and f6, in `finally`, for cleanup -- after both
+  assertions, so nothing about their outcome depends on what happens next.
+
+This is airtight against the async second copy specifically because armed
+never flips back to `True` before either assertion runs (nothing releases
+before then): with `armed` correctly `False`, any number of extra matching
+press events -- in whatever order, arriving on whatever thread, whenever
+pynput's asynchronous channel eventually delivers them -- change nothing.
+The property under test (holding does not repeat) no longer depends on
+racing anything.
+
+Removed the second, independent probe `Listener` entirely (no longer
+needed) -- which also resolves the review's non-blocking §8 concern about
+this test doubling its exposure to pynput's asynchronous `Listener.stop()`,
+as a side effect rather than a deliberate fix.
+
+### Sabotage result
+
+Re-applied the review's exact sabotage (`afk_clicker.py:541`,
+`self.armed = False` -> `self.armed = True`, `DEBOUNCE_S` untouched):
+
 ```
-cd /home/dev/projects/.worktrees/afk-clicker/ac-30
-export DISPLAY=:150   # or any free Xvfb display
-<venv>/bin/python -m unittest tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild -v
-<venv>/bin/python -m unittest discover -s tests -t .
-
-# Sabotage (in a throwaway copy, never the real worktree):
-cp -r . /tmp/scratch-copy && cd /tmp/scratch-copy
-sed -i 's/self\._timers = {}\n/self._timers = {}\n            self._ui_queue = queue.SimpleQueue()  # SABOTAGE\n/' afk_clicker.py   # or edit by hand at _rebuild_ui()'s destroy-loop, matching afk_clicker.py:2218-2222
-<venv>/bin/python -m unittest tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands -v   # FAILs
-git checkout -- afk_clicker.py   # restore, then delete the copy
+15/15 runs: FAILED (failures=1)
 ```
-Run in this session: exactly this (5x non-sabotaged, 3x sabotaged, full
-suite once) — see the round-2 section above for the actual output.
+
+Reverted immediately after; `git diff --stat afk_clicker.py` shows no
+changes, `git status --porcelain` shows only `tests/test_chords_slow.py`
+modified.
+
+### Re-measured flake rate
+
+All runs via the real test runner (`python -m unittest
+tests.test_chords_slow.Firing.test_holding_does_not_repeat`), unmodified
+code:
+
+- Baseline load (`uptime` load average ~2-12 on 10 cores throughout,
+  ambient host activity, not induced): **0/20** failures.
+- Under induced load (8 extra CPU-bound `python3 -c "while True: pass"`
+  processes pegging the box -- `top` showed 90.9% user CPU, 10 running
+  tasks -- for the duration of the batch, then killed): **0/20** failures.
+- Full `tests.test_chords_slow` (all 5 methods): `Ran 5 tests in 64.653s --
+  OK`.
+- Full fast suite (`python -m unittest discover -s tests -t .`): `Ran 292
+  tests in 62.621s -- OK (skipped=5)`.
+
+Both numbers requested by the review: **0/20 clean, 15/15 catching the
+sabotage** -- a strict improvement over the round-1 rewrite (which was
+10/10 blind to the same sabotage) and over the pre-PR fixed-sleep version
+(33-50% flaky per the original ticket).
+
+### Deviations from spec (round 2)
+
+None from the ticket. One from my own round-1 approach: the review's
+suggested remedy ("raise `settle()`'s quiet threshold above `DEBOUNCE_S`")
+was tried first, exactly as suggested, and measured to introduce a new,
+reproducible flake of its own (see "Why the first attempt went blind"
+above) -- so the actual fix abandons quiescence-waiting for this test's
+assertion entirely rather than tuning its threshold, once it was clear the
+async copy's lag isn't reliably bounded by any threshold short enough to
+keep the test fast. Recorded here rather than silently substituted, since
+it diverges from the review's literal suggested fix (though not from what
+it asked for: both properties, together).

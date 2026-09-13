@@ -78,21 +78,68 @@ class Firing(unittest.TestCase):
                     self.assertEqual(self.fires(hk, set(), list(permutation)), 1)
 
     def test_holding_does_not_repeat(self):
+        """
+        A fixed sleep between each synthetic action used to assume the
+        watcher had seen everything about the previous action by the time
+        it elapsed. It hadn't, reliably: waiting for an independent
+        listener to go quiet between actions instead didn't hold up either
+        -- widening that quiet gap past DEBOUNCE_S (needed so a broken
+        re-arm isn't masked by debounce, see below) just as reliably let a
+        *different* stray, delayed duplicate land after a later action and
+        re-fire on unmodified, correct code (confirmed directly, repeatably,
+        via instrumented runs). Chasing pynput's second, asynchronous copy
+        of each transition (delivered on the listener's own background
+        thread -- see the module docstring) with a bounded wait is not
+        actually bounded; its lag is not reliably capped by any timeout
+        short enough to keep this test fast.
+
+        The fix is to stop waiting for that copy at all. pynput's *first*
+        copy of a transition is delivered synchronously, in-process, before
+        Controller.press()/release() returns: Controller._handle()
+        (pynput/keyboard/_xorg.py) calls self._emit(...) right after
+        talking to the X server, and NotifierMixin._emit()
+        (pynput/_util/__init__.py) calls each registered Listener's
+        on_press/on_release directly, in the calling thread. So `hits`
+        already reflects HotkeyWatcher's reaction to a press by the time
+        the call that sent it returns -- no waiting needed to observe it.
+
+        The only genuinely time-dependent thing being tested is that a
+        second matching press, sent while the chord is still held, doesn't
+        re-fire -- and that only exercises the code path this test exists
+        to catch (self.armed cleared after firing, not just debounce
+        suppressing a too-soon repeat) if the gap since the first fire
+        exceeds DEBOUNCE_S. DEBOUNCE_S is compared against
+        time.monotonic(), not against anything a listener has observed, so
+        a plain deterministic sleep is enough to guarantee that -- no
+        listener involved, nothing to race.
+
+        Never releasing before either assertion means armed cannot flip
+        back True out of turn, so the delayed, asynchronous second copy of
+        any of these presses is harmless whenever it eventually turns up:
+        with armed already False, extra matching press events change
+        nothing, in any order, on any thread.
+        """
         hk = hotkey(set(), [kb.Key.f6, kb.Key.f7])
         hits = []
         watcher = app.HotkeyWatcher(hk, lambda: hits.append(1))
         watcher.start()
         controller = kb.Controller()
-        controller.press(kb.Key.f6)
-        controller.press(kb.Key.f7)
-        time.sleep(0.5)
-        controller.press(kb.Key.f7)          # auto-repeat
-        time.sleep(0.5)
-        controller.release(kb.Key.f7)
-        controller.release(kb.Key.f6)
-        time.sleep(0.4)
-        watcher.stop()
-        self.assertEqual(len(hits), 1)
+        try:
+            controller.press(kb.Key.f6)
+            controller.press(kb.Key.f7)          # fires synchronously
+            self.assertEqual(len(hits), 1)
+
+            # Deterministic wall-clock wait, not a listener wait: clears
+            # DEBOUNCE_S so the next press exercises re-arm-on-fire rather
+            # than being swallowed by debounce regardless of it.
+            time.sleep(app.HotkeyWatcher.DEBOUNCE_S + 0.15)
+
+            controller.press(kb.Key.f7)          # still held -- auto-repeat
+            self.assertEqual(len(hits), 1)
+        finally:
+            controller.release(kb.Key.f7)
+            controller.release(kb.Key.f6)
+            watcher.stop()
 
     def test_debounce_collapses_a_burst_but_not_deliberate_presses(self):
         hk = hotkey(set(), [kb.Key.f6, kb.Key.f7])
