@@ -3723,22 +3723,34 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
         # _rebuilding/_rebuild_after_id guards already rule out a second,
         # reentrant _rebuild_ui() call interleaving here.
         #
-        # Stubbing detect_running to return this test's own target removes
-        # the only real-world, non-deterministic input in play without
-        # touching what the test actually guards: whichever scan's result
-        # lands first, the observed self._seen_running is identical, so a
-        # genuinely dropped queue entry (the old _ui_queue swap bug this
-        # test exists to catch) still fails the assertion below exactly as
-        # before -- only the incidental, unrelated real OS scan's ability to
-        # race the assertion is removed.
+        # Round 2 (G#30 PR review): an earlier version of this fix stubbed
+        # detect_running to return this test's own target instead of
+        # disabling _poll_games() below. That collapsed the race rather than
+        # closing it: threading.Thread.start() does not return until the new
+        # thread has signalled it has begun (an internal Event), which in
+        # practice hands the child the GIL first -- so with detect_running
+        # made instant (no real Xlib/osascript call to block on and yield
+        # the GIL), the second scan's own self._ui(self._mark_running, ...)
+        # call reliably lands before this test's own _drain_ui() below, every
+        # time, not merely "if it wins a race". Stubbing it to the SAME value
+        # this test queues made that reliable second landing invisible --
+        # sabotage (reintroducing the historical _ui_queue swap at
+        # _rebuild_ui(), so the manually-queued call below is genuinely
+        # dropped) still passed 3/3, because the second scan's forged
+        # "minecraft" landed in its place and the assertion cannot tell the
+        # two apart. Disabling _poll_games() for the duration of this test
+        # instead removes the confound entirely -- no second scan, real or
+        # stubbed, ever starts, so nothing but this test's own queued call
+        # can land, and a genuinely dropped entry has nothing left to hide
+        # behind.
         old_seen = self.ui._seen_running   # already set by setUp()'s settle()
         target = {"minecraft"}
         self.assertNotEqual(old_seen, target,
                             "test needs a genuinely different value to prove "
                             "the queued call actually landed, not that "
                             "_seen_running just happened to already match")
-        original_detect_running = app.detect_running
-        app.detect_running = lambda profiles: target
+        original_poll_games = self.ui._poll_games
+        self.ui._poll_games = lambda: None
         try:
             self.ui._ui(self.ui._mark_running, target)
             self.ui._rebuild_ui()
@@ -3748,7 +3760,7 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
                 "a queued _mark_running() scan result should survive a "
                 "rebuild, not be silently dropped by the old _ui_queue swap")
         finally:
-            app.detect_running = original_detect_running
+            self.ui._poll_games = original_poll_games
 
 
 class QueuedStatusSurvivesARebuild(UITestCase):
