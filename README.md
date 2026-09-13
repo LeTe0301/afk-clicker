@@ -1,4 +1,4 @@
-# AFK Farm Clicker
+# Clickwork
 
 Autoclicker mit Spielerkennung und eigenen Einstellungen pro Spiel. Für
 Minecraft mit Essenspause, weil Hard die einzige Schwierigkeit ist, auf der
@@ -16,9 +16,9 @@ starten. Kein Python nötig.
 
 | System | Datei |
 |---|---|
-| Windows 10/11 | `AFK-Farm-Clicker-windows-x64.zip` |
-| Linux (glibc 2.35+, X11) | `AFK-Farm-Clicker-linux-x86_64.tar.gz` |
-| macOS (Apple Silicon) | `AFK-Farm-Clicker-macos-arm64.zip` |
+| Windows 10/11 | `Clickwork-windows-x64.zip` |
+| Linux (glibc 2.35+, X11) | `Clickwork-linux-x86_64.tar.gz` |
+| macOS (Apple Silicon) | `Clickwork-macos-arm64.zip` |
 
 Ab dann aktualisiert sich das Programm selbst: **Settings → Updates →
 Check for updates**. Findet es ein neueres Release, lädt es das passende

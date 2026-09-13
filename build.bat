@@ -1,6 +1,7 @@
 @echo off
 REM ===================================================================
-REM  Builds AFK Farm Clicker into a standalone Windows program.
+REM  Builds the Clickwork Windows program (packaged internally as
+REM  "AFK Farm Clicker" -- see docs/history/ac-33-implementation.md).
 REM  Put this next to afk_clicker.py and double-click it. Once.
 REM  Afterwards you start dist\AFK Farm Clicker\AFK Farm Clicker.exe
 REM  and never touch Python or PyCharm again.
@@ -55,6 +56,9 @@ REM
 REM You almost certainly do not need to run this at all -- the Releases page
 REM has a prebuilt .exe. This is only for building from source.
 
+REM --name stays "AFK Farm Clicker", not "Clickwork": renaming it would break
+REM the swap script already on disk in every installed copy (see
+REM docs/history/ac-33-implementation.md).
 py -m PyInstaller --noconfirm --clean ^
     --name "AFK Farm Clicker" ^
     --windowed ^

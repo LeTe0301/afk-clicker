@@ -32,9 +32,9 @@ class VersionCompare(unittest.TestCase):
 @needs_display
 class AssetSelection(unittest.TestCase):
     RELEASE = {"assets": [
-        {"name": "AFK-Farm-Clicker-windows-x64.zip", "browser_download_url": "w"},
-        {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "l"},
-        {"name": "AFK-Farm-Clicker-macos-arm64.zip", "browser_download_url": "m"},
+        {"name": "Clickwork-windows-x64.zip", "browser_download_url": "w"},
+        {"name": "Clickwork-linux-x86_64.tar.gz", "browser_download_url": "l"},
+        {"name": "Clickwork-macos-arm64.zip", "browser_download_url": "m"},
     ]}
 
     def test_picks_the_asset_matching_this_platform(self):
@@ -48,7 +48,7 @@ class AssetSelection(unittest.TestCase):
     def test_a_release_without_our_platform_yields_none(self):
         others = {"win32": "linux-x86_64.tar.gz"}.get(app.sys.platform, "windows-x64.zip")
         self.assertIsNone(app.pick_asset(
-            {"assets": [{"name": "AFK-Farm-Clicker-" + others,
+            {"assets": [{"name": "Clickwork-" + others,
                          "browser_download_url": "x"}]}))
 
     def test_empty_and_missing(self):
@@ -106,7 +106,7 @@ class Checksums(unittest.TestCase):
         return {"assets": [{"name": n, "browser_download_url": "x"} for n in names]}
 
     def test_picks_the_checksum_asset(self):
-        rel = self._release(["AFK-Farm-Clicker-windows-x64.zip", "SHA256SUMS"])
+        rel = self._release(["Clickwork-windows-x64.zip", "SHA256SUMS"])
         self.assertEqual(app.pick_checksums(rel)["name"], "SHA256SUMS")
 
     def test_a_release_without_checksums(self):
@@ -172,7 +172,7 @@ class StagingSafety(unittest.TestCase):
         # already keeps the category intact -- unlike the unlisted-archive
         # message before its fix.
         base = tempfile.mkdtemp()
-        real_path = os.path.join(base, "AFK-Farm-Clicker-macos-arm64.zip")
+        real_path = os.path.join(base, "Clickwork-macos-arm64.zip")
         with zipfile.ZipFile(real_path, "w") as zf:
             zf.writestr("AFK Farm Clicker/marker.txt", "hello")
         asset = self._asset(real_path)
@@ -189,11 +189,11 @@ class StagingSafety(unittest.TestCase):
     def test_the_unlisted_message_survives_status_line_truncation(self):
         # _install_worker shows str(exc)[:40] (afk_clicker.py:2069), and a real
         # release asset is named like the release workflow does it --
-        # "AFK-Farm-Clicker-windows-x64.zip", not "pkg-windows-x64.zip". At that
+        # "Clickwork-windows-x64.zip", not "pkg-windows-x64.zip". At that
         # length the reason is pushed past character 40 and the user sees only
         # "<name> is not ", with no word telling them it is a checksum problem.
         base = tempfile.mkdtemp()
-        real_path = os.path.join(base, "AFK-Farm-Clicker-windows-x64.zip")
+        real_path = os.path.join(base, "Clickwork-windows-x64.zip")
         with zipfile.ZipFile(real_path, "w") as zf:
             zf.writestr("AFK Farm Clicker/marker.txt", "hello")
         asset = self._asset(real_path)
