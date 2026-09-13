@@ -59,12 +59,16 @@ REM has a prebuilt .exe. This is only for building from source.
 REM --name stays "AFK Farm Clicker", not "Clickwork": renaming it would break
 REM the swap script already on disk in every installed copy (see
 REM docs/history/ac-33-implementation.md).
+REM --add-data/--icon: kept in sync with release.yml's Windows build step.
+REM PyInstaller's --add-data separator is ";" on Windows, ":" on POSIX.
 py -m PyInstaller --noconfirm --clean ^
     --name "AFK Farm Clicker" ^
     --windowed ^
     --noupx ^
     --hidden-import pynput.mouse._win32 ^
     --hidden-import pynput.keyboard._win32 ^
+    --add-data "assets;assets" ^
+    --icon assets\icon.ico ^
     afk_clicker.py
 
 if errorlevel 1 (

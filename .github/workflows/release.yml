@@ -130,7 +130,15 @@ jobs:
       # installed copy, which relaunches this exact path (see
       # docs/history/ac-33-implementation.md). Do not "fix" this without
       # reading that.
-      - name: Build
+      #
+      # Split per OS (rather than one shared step) because --icon and
+      # --add-data's path separator both differ per platform: PyInstaller
+      # wants ";" on Windows and ":" on POSIX, and Windows gets icon.ico
+      # while macOS gets icon.icns; Linux has no --icon equivalent at all.
+      # Each `run: >` block below is a folded scalar (no "#" comments
+      # inside it), same as the shared step this replaces.
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
         run: >
           pyinstaller --noconfirm --clean
           --name "AFK Farm Clicker"
@@ -142,6 +150,41 @@ jobs:
           --hidden-import pynput.mouse._xorg
           --hidden-import pynput.keyboard._darwin
           --hidden-import pynput.mouse._darwin
+          --add-data "assets;assets"
+          --icon assets\icon.ico
+          afk_clicker.py
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: >
+          pyinstaller --noconfirm --clean
+          --name "AFK Farm Clicker"
+          --windowed
+          --noupx
+          --hidden-import pynput.keyboard._win32
+          --hidden-import pynput.mouse._win32
+          --hidden-import pynput.keyboard._xorg
+          --hidden-import pynput.mouse._xorg
+          --hidden-import pynput.keyboard._darwin
+          --hidden-import pynput.mouse._darwin
+          --add-data "assets:assets"
+          afk_clicker.py
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: >
+          pyinstaller --noconfirm --clean
+          --name "AFK Farm Clicker"
+          --windowed
+          --noupx
+          --hidden-import pynput.keyboard._win32
+          --hidden-import pynput.mouse._win32
+          --hidden-import pynput.keyboard._xorg
+          --hidden-import pynput.mouse._xorg
+          --hidden-import pynput.keyboard._darwin
+          --hidden-import pynput.mouse._darwin
+          --add-data "assets:assets"
+          --icon assets/icon.icns
           afk_clicker.py
 
       # --selftest touches every lazily-resolved backend. Without it a missing
