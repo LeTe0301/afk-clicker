@@ -78,20 +78,55 @@ class Firing(unittest.TestCase):
                     self.assertEqual(self.fires(hk, set(), list(permutation)), 1)
 
     def test_holding_does_not_repeat(self):
+        """
+        A fixed sleep between each synthetic action assumes the watcher has
+        seen everything about the previous action by the time it elapses.
+        It hasn't, reliably: a Controller sharing this process with a
+        Listener notifies it twice per key transition (see module
+        docstring) -- once synchronously, once via the real X round trip --
+        and under load the second copy can lag past a 0.5s sleep, landing
+        after the *next* action instead of before it. A stray, delayed
+        "press f7" arriving just after "release f7" (while f6 is still
+        down) re-completes the chord and fires it again, which looks like
+        the debounce/re-arm logic is broken when it is actually a race in
+        how the test drives it. Waiting for an independent listener to go
+        quiet between actions, instead of sleeping a fixed duration, lets
+        both copies of one action land before the next one is sent.
+        """
         hk = hotkey(set(), [kb.Key.f6, kb.Key.f7])
         hits = []
         watcher = app.HotkeyWatcher(hk, lambda: hits.append(1))
+
+        quiet_since = [time.monotonic()]
+
+        def mark(_key):
+            quiet_since[0] = time.monotonic()
+
+        probe = kb.Listener(on_press=mark, on_release=mark)
+        probe.start()
+        probe.wait()
+
+        def settle(quiet=0.2, timeout=3.0):
+            deadline = time.monotonic() + timeout
+            while (time.monotonic() - quiet_since[0] < quiet
+                   and time.monotonic() < deadline):
+                time.sleep(0.02)
+
         watcher.start()
         controller = kb.Controller()
-        controller.press(kb.Key.f6)
-        controller.press(kb.Key.f7)
-        time.sleep(0.5)
-        controller.press(kb.Key.f7)          # auto-repeat
-        time.sleep(0.5)
-        controller.release(kb.Key.f7)
-        controller.release(kb.Key.f6)
-        time.sleep(0.4)
-        watcher.stop()
+        try:
+            controller.press(kb.Key.f6)
+            controller.press(kb.Key.f7)
+            settle()
+            controller.press(kb.Key.f7)      # auto-repeat
+            settle()
+            controller.release(kb.Key.f7)
+            settle()
+            controller.release(kb.Key.f6)
+            settle()
+        finally:
+            probe.stop()
+            watcher.stop()
         self.assertEqual(len(hits), 1)
 
     def test_debounce_collapses_a_burst_but_not_deliberate_presses(self):
