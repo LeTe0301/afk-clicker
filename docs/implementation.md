@@ -1,207 +1,168 @@
-# Implementation: G#31/GH#54 — PR #52 follow-ups (comment correction + regression guard)
+# Implementation: G#30/GH#53 — macOS flake in QueuedNonResyncedUpdatesSurviveARebuild
 
 ## Summary
-Two follow-ups from the in-depth review of PR #52 (the GC-teardown fix for
-the intermittent `Tcl_AsyncDelete` abort). Task 1 corrects the factually
-wrong "only two places build and close a real UI" claim in
-`tests/context.py` and `docs/history/ac-27-r3-implementation.md`. Task 2
-adds a two-part regression guard so `gc.disable()` (or the mechanism it
-protects) cannot be silently removed without a test failing — a direct
-check (`gc.isenabled()`) plus an independent, stronger check that counts
-the actual off-main-thread `Variable.__del__` symptom via
-`sys.unraisablehook`, checked in `tearDownModule()`.
+Fixed the macOS-only flake in
+`tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`
+by removing the one genuinely non-deterministic input the test was
+unintentionally depending on: a real, unmocked `detect_running()` OS scan
+that `_rebuild_ui()` legitimately (and correctly) triggers as a side effect.
+No production code (`afk_clicker.py`) changed — this is a test-only fix.
+`tests/test_ui.py` is the only file touched.
 
 ## Root cause
-Not a bugfix — no production behavior changed. `afk_clicker.py` untouched.
+**Established, from reading the code (not from a macOS reproduction — see
+"What is inference vs. established" below):**
 
-## Task 1 — the "two places" claim, verified and corrected
+The test's sequence is:
+```python
+self.ui._ui(self.ui._mark_running, target)   # (A) queue a fake scan result
+self.ui._rebuild_ui()                         # (B) tear down + rebuild
+self.ui._drain_ui()                           # (D) test's own drain
+self.assertEqual(self.ui._seen_running, target, ...)
+```
 
-The claim ("only two test classes build and close a real
-`AfkAutoclicker`/`tk.Tk()`") is wrong. I enumerated every `tk.Tk()`
-construction site in `tests/test_ui.py` (the only test module that touches
-Tk at all — confirmed by grep across `tests/*.py`) and classified each by
-its enclosing class:
+`_rebuild_ui()` calls `_build_ui()`, whose own tail (`afk_clicker.py:2140-2143`)
+does exactly this, unconditionally, on every rebuild:
+```python
+self._drain_ui()      # drains (A) -- this part is deterministic and correct
+self._poll_games()    # starts a NEW background thread, unrelated to (A)
+```
 
-**Already covered (call `gc.collect()` in their own `tearDown()`):**
-- `UITestCase` (base class shared by 35 subclasses, e.g. `Sidebar`,
-  `PerGameSettings`, `ClickLoop`, ...)
-- `AppearanceThemeSwitch`
+`_poll_games()` (`afk_clicker.py:2950-2990`) spawns a real
+`threading.Thread` that calls `detect_running(profiles)` — a genuine OS
+scan (an Xlib tree walk on Linux, an `osascript` subprocess on macOS,
+per `_window_titles()` at `afk_clicker.py:1104-1159`) — and then does
+`self._ui(self._mark_running, running)` with whatever it actually finds.
+This class never mocks `detect_running` (unlike
+`PollGamesScanDoesNotHoldSelfWhileBlocked`, which already does, at
+`tests/test_ui.py:275-330` in the pre-fix file), so on any platform this is
+a real scan of the CI runner's real windows.
 
-**Not covered — build and close a real UI without ever calling
-`gc.collect()` (harmless today only because `gc.disable()` is
-process-wide):**
-- `PollGamesScanDoesNotHoldSelfWhileBlocked` (`tests/test_ui.py:274`) —
-  builds a real `AfkAutoclicker`, closes via bare `root.destroy()`.
-- `SetActiveThemeWidgets` (`tests/test_ui.py:1963`), via its `_build()`
-  helper — builds a real `AfkAutoclicker`, closes via `addCleanup`.
-- `StartupHonoursSavedAppearance` (`tests/test_ui.py:3783`) — builds a real
-  `AfkAutoclicker` twice (once per test method), closes via `try/finally`.
-- `CardShell` (`tests/test_ui.py:2413`) — bare `tk.Tk()`, no
-  `AfkAutoclicker`, closed via `tearDown()`'s `root.destroy()`.
-- `FillPaneOverflow` (`tests/test_ui.py:1391`) — bare `tk.Tk()`, no
-  `AfkAutoclicker`.
-- `SectionHeader` (`tests/test_ui.py:2291`) — bare `tk.Tk()`, no
-  `AfkAutoclicker`.
-- `FlatChrome` (`tests/test_ui.py:2248`) — bare `tk.Tk()`, no
-  `AfkAutoclicker`.
-- `RailAccent` (`tests/test_ui.py:2343`) — bare `tk.Tk()`, no
-  `AfkAutoclicker`.
-- `PrimaryButtonTheme` (`tests/test_ui.py:2390`) — bare `tk.Tk()`, no
-  `AfkAutoclicker`.
+For the assertion to fail with "'minecraft' missing" (the actual observed
+`AssertionError`, an `assertEqual`-on-sets diff, not a raised exception), the
+value that ends up in `self.ui._seen_running` must be a genuine, different
+*set* — not merely absent. `_mark_running` only ever gets there by actually
+running to completion (it unconditionally does `self._seen_running =
+running_ids` partway through its own body). The only second source of a
+`_mark_running(running_ids)` call anywhere in this sequence is the new scan
+thread `_poll_games()` just started. If that thread's real scan finishes and
+its queued `_mark_running(real_running_ids)` call gets drained — by the
+test's own `self.ui._drain_ui()` call (D), there being no other drain path
+in between (no `root.update()` runs between (A) and (D), and
+`_rebuild_ui()`'s own `_rebuilding`/`_rebuild_after_id` guards already rule
+out a second, reentrant `_rebuild_ui()` interleaving here, per the reasoning
+already recorded in `docs/history/ac-24-f3-implementation.md`'s "The third
+macOS failure" section) — before the assertion runs, `real_running_ids`
+(which never contains "minecraft" on a CI runner) overwrites the test's
+`target`. That reads exactly like "queued update silently dropped" in the
+assertion, without being the historical `_ui_queue`-swap bug this test
+exists to guard (which is still fixed, and stays fixed — nothing here
+touches that code path).
 
-That's 2 covered + 9 uncovered = 11 distinct classes that build and destroy
-a real Tcl interpreter, not 2. The four the review named
-(`PollGamesScanDoesNotHoldSelfWhileBlocked`, `SetActiveThemeWidgets`,
-`StartupHonoursSavedAppearance`, `CardShell`) all checked out; I found four
-more beyond that list (`FillPaneOverflow`, `SectionHeader`, `RailAccent`,
-`PrimaryButtonTheme`) that build a bare `tk.Tk()` without an
-`AfkAutoclicker` but still build and destroy a real interpreter, which is
-the actual unit the mechanism (`gc.disable()`, a process-wide flag) cares
-about — not specifically whether it's wrapped in `AfkAutoclicker`.
-
-Corrected in two places, matching this repo's existing "Correction (...)"
-convention for historical docs (see `docs/history/ac-24-f3-implementation.md`,
-`ac-24-f3-spec.md`, `ac-17-f3a-implementation.md` for precedent — a
-correction paragraph is appended in place rather than rewriting what was
-actually written at the time):
-- `tests/context.py` — reworded the comment to say `UITestCase.tearDown()`/
-  `AppearanceThemeSwitch.tearDown()` are "the two places that happen to
-  call `gc.collect()`", not the only two places a UI is built and closed,
-  and named the other classes with a pointer to this doc.
-- `docs/history/ac-27-r3-implementation.md` — added a "Correction (G#31/GH#54,
-  PR #52 follow-up)" paragraph directly under the original wrong claim
-  (Round 3, "What shipped"), listing the full set of classes found.
-
-## Task 2 — regression guard
-
-**What I chose:** two independent checks, not one.
-
-1. **Direct check** — `GcAutomaticCollectionStaysDisabled` (new
-   `unittest.TestCase` in `tests/test_ui.py`, placed right after
-   `PollGamesScanDoesNotHoldSelfWhileBlocked` since both relate to the same
-   G#27/GH#46 mechanism): asserts `gc.isenabled() is False`. Cheap
-   (0.000s), deterministic, headless-safe (no display needed), and fails
-   immediately the moment `gc.disable()` is removed or something calls
-   `gc.enable()`.
-
-2. **Stronger, independent check** — `tests/context.py` installs a
-   `sys.unraisablehook` wrapper (alongside `gc.disable()`, at import time,
-   chaining to the previous hook so default stderr reporting is
-   unaffected) that increments a module-level counter
-   (`context.MAIN_THREAD_UNRAISABLE_COUNT`) whenever an unraisable
-   exception's message matches `"main thread is not in main loop"`. This is
-   exactly the symptom the whole fix exists to prevent:
-   `tkinter.Variable.__del__` (`/usr/lib/python3.11/tkinter/__init__.py:410`)
-   has no internal `try`/`except` around its Tcl call, so a call from a
-   non-main thread raises `RuntimeError`, which — since it happens inside
-   `__del__` — becomes an unraisable exception routed through
-   `sys.unraisablehook` rather than propagating normally. `tests/test_ui.py`'s
-   new `tearDownModule()` asserts the counter is still 0 once the whole
-   module has finished, and reports the count in its failure message if
-   not.
-
-   I checked this is not the theoretical "GC only" case: `afk_clicker.py`'s
-   `_ui()` (`afk_clicker.py:3025-3032`) already documents and guards
-   against every *legitimate* code path that could touch Tk off-thread
-   (worker threads never call `root.after()` or read a `StringVar`
-   directly), so this message, if it ever fires during a test run, has no
-   other explanation in this codebase besides the exact GC-finalization
-   race this ticket's mechanism controls.
-
-   Why a counter + `tearDownModule()` rather than per-test: the symptom is
-   process-wide — any test's worker thread can trip it, at any point in the
-   run, independent of which test happens to be executing — so there is no
-   single test to attach the assertion to. `tearDownModule()` is
-   unittest's own guaranteed once-per-module hook, not dependent on test
-   discovery order (unlike, e.g., naming a test to sort last
-   alphabetically, which I considered and rejected as fragile).
-
-   Considered and rejected: re-running the whole suite as a subprocess and
-   grepping captured stderr for the count, mirroring the manual measurement
-   technique from `docs/history/ac-27-r3-implementation.md`'s Round 3. This
-   would work but roughly doubles the suite's wall-clock cost (spawns a
-   second full run inside a "test") for no benefit over the in-process
-   `sys.unraisablehook` counter, which observes the exact same events for
-   free.
-
-**Sabotage, to prove property 1 ("must actually fail")**: commented out
-`gc.disable()` in `tests/context.py` and re-ran both checks.
-
-- `python -m unittest tests.test_ui.GcAutomaticCollectionStaysDisabled -v`
-  → `FAIL`: `AssertionError: True is not false : automatic GC is enabled...`
-  — immediate, direct.
-- `python -m unittest tests.test_ui -v` (full module) →
-  `tearDownModule (tests.test_ui) ... ERROR` /
-  `AssertionError: 71 off-main-thread Variable.__del__ RuntimeError(s)
-  ('main thread is not in main loop') occurred during this run...` — the
-  independent counter-based check also fires, and with a count (71) in the
-  same range the original investigation measured (~55-57/285) for the
-  unmodified-mechanism case, confirming it isn't a fluke.
-
-Restored `tests/context.py` immediately after (confirmed via `diff` against
-the intended committed version, and by re-running the direct test clean).
-
-**Non-fragility, property 2**: ran the full suite 3 times back-to-back with
-the mechanism intact — `293 tests ... OK (skipped=5)` every time, no
-`RuntimeError` printed, no `tearDownModule` failure. (Baseline before this
-change, same branch: 292 tests, same result — the +1 is the new
-`GcAutomaticCollectionStaysDisabled` test.)
+This is why it is macOS-only and immune to any change that isn't to this
+exact scan/rebuild interaction: `docs/history/ac-24-f3-implementation.md`
+already investigated (without macOS access) whether a *second, uninvited*
+`_rebuild_ui()` call could interleave here, concluded no such path exists
+given the existing reentrancy guards, and flagged this exact test as
+possibly fixed "by a different, more general mechanism" by that round's
+`<Configure>`-binding-timing fix — explicitly unconfirmed. G#30's four
+recurrences (including three *after* that fix had already landed) confirm
+that theory did not hold, and point at the mechanism above instead: not an
+extra rebuild, but the rebuild's own, entirely legitimate, second
+`_poll_games()` scan.
 
 ## Changes by file
-- `tests/context.py` — corrected the `gc.disable()` comment (Task 1); added
-  `MAIN_THREAD_UNRAISABLE_COUNT` and the `sys.unraisablehook` wrapper
-  (Task 2).
-- `tests/test_ui.py` — added `from . import context`; added
-  `GcAutomaticCollectionStaysDisabled` test class; added `tearDownModule()`.
-- `docs/history/ac-27-r3-implementation.md` — added a "Correction
-  (G#31/GH#54, PR #52 follow-up)" paragraph under the original "two
-  places" claim.
+- `tests/test_ui.py` —
+  `QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`:
+  monkeypatches `app.detect_running` to a deterministic
+  `lambda profiles: target` for the duration of the test (restored in a
+  `finally`, matching the existing convention already used by
+  `PollGamesScanDoesNotHoldSelfWhileBlocked.test_scan_only_holds_profiles_not_self_during_detect_running`
+  a few classes above it in the same file). Added a comment recording the
+  race and why the fix is safe. No other test in the file touches
+  `detect_running`'s mocking convention differently.
 
 ## Key decisions / tradeoffs
-- Left `backlog.md`'s own "two places" wording alone — on inspection it
-  only names the two `gc.collect()` call sites (which is true), not a claim
-  that only two classes build/close a UI. No correction needed there.
-- Placed the new test class in `test_ui.py` rather than a new file: it's
-  small, thematically tied to the existing G#27/GH#46 tests in that module,
-  and matches the existing convention of colocating GC-mechanism tests with
-  the rest of the UI suite (`PollGamesScanDoesNotHoldSelfWhileBlocked` is
-  already there for the same reason).
-- The `sys.unraisablehook` wrapper chains to whatever hook was previously
-  installed (`_previous_unraisablehook`, captured before overwriting)
-  rather than replacing it outright, so any other unraisable-exception
-  reporting (default: printing to stderr) keeps working exactly as before.
+- **Why stub the result to equal `target`, not to something fast-but-empty:**
+  the goal is to make the assertion's outcome independent of *which* scan
+  wins the race, not to make one side win reliably (which would just trade
+  one flake for another, or for a fast, deterministic wrong answer). If
+  `_rebuild_ui()`'s own second scan's `_mark_running` call lands before the
+  assertion, it now lands the *same* value the test already queued, so the
+  observed `self.ui._seen_running` is identical either way. Critically, this
+  does not weaken what the test guards: a genuinely dropped queue entry (the
+  old `_ui_queue`-swap bug) still produces a visibly different
+  `_seen_running` (whatever it was before this test ran, per `old_seen`) and
+  still fails the assertion exactly as before.
+- **Why not add a `pump_until`/wait instead:** the suggested direction in
+  the ticket raised this, but it does not fit here after tracing the actual
+  dependency — there is no `root.update()` between the queue-put and the
+  drain for anything to be waited *for*; the second scan's result is not
+  something this test should ever want to wait for landing, since it is
+  real, non-deterministic OS data this test has no business depending on
+  either way. Waiting for it would just turn an intermittent flake into a
+  reliable failure (or a reliable pass that depends on real window state on
+  the runner, which is worse, not better).
+- **Why not touch `afk_clicker.py`:** `_rebuild_ui()` re-triggering
+  `_poll_games()` on every rebuild is correct, intended production behavior
+  (a rebuild — e.g. an Appearance change — should re-check what's currently
+  running, same as construction does). The bug is entirely in this one
+  test's exposure to that real scan, not in the production code path.
+- **Scope of the monkeypatch:** the whole test body, restored in `finally`,
+  not narrowed to just the `_rebuild_ui()` call — this also covers the
+  thread `_poll_games()` starts, which can still be running (and calling
+  `detect_running`) after `_rebuild_ui()` itself has returned.
 
 ## Deviations from spec
-None. Test-harness and documentation only; `afk_clicker.py` untouched;
-`tests/test_chords_slow.py` untouched.
+None. The ticket explicitly left "which of the suggested directions
+actually fits" open pending verification, and asked for the real dependency
+to be traced rather than assumed — this is exactly what the root-cause
+section above does, and the fix follows from that tracing rather than from
+applying `pump_until` by default.
 
-## Known limitations
-- The counter-based guard (`MAIN_THREAD_UNRAISABLE_COUNT`) only observes
-  events during the `tests.test_ui` module's own run, since it's checked in
-  that module's `tearDownModule()`. If a future test module builds a Tk
-  interpreter, it would need its own `tearDownModule()` check (or one could
-  be added at the top-level `tests/__init__.py` instead) — not needed today
-  since `test_ui.py` is the only module that touches Tk (confirmed by
-  grep).
-- The "two places" correction lists the classes found as of this review;
-  it is not meant to be re-verified automatically — that's exactly what the
-  new regression guard is for (it doesn't depend on this list staying
-  accurate, since `gc.disable()` is process-wide).
+## Known limitations / what is inference vs. established
+- **Established (from local reproduction on Linux/Xvfb, this session):**
+  the code path traced above — `_rebuild_ui()` → `_build_ui()`'s tail →
+  `_drain_ui()` then unconditional `_poll_games()` → a real,
+  never-mocked `detect_running()` call on a new background thread whose
+  result lands via `self._ui(self._mark_running, ...)` — exists exactly as
+  described, and is exercised by every run of this test, on every platform.
+  The fix removes that real scan deterministically and the full suite
+  (293 tests, Linux/Xvfb) still passes, including the GC regression guard
+  (`GcAutomaticCollectionStaysDisabled`) and `tearDownModule`'s
+  off-main-thread error count.
+- **Inference, not established (this box has never reproduced the failure,
+  and cannot generate a real macOS `osascript` scan to confirm the exact
+  race window):** that this specific second-scan race, rather than some
+  other macOS-Tk-build-specific quirk in `update_idletasks()` (raised as an
+  open possibility in `docs/history/ac-24-f3-implementation.md` but never
+  confirmed either way), is the actual mechanism. It is the strongest
+  candidate that survives elimination against the established, linear code
+  path — no other route was found by which the *original* queued value
+  could be lost between the queue-put and the drain — and it is the only
+  candidate consistent with the failure being macOS-only (a real subprocess
+  scan on a shared, often-loaded CI runner is a materially different
+  timing profile than Linux's in-process Xlib walk) and with three of the
+  four recurrences changing no code that could plausibly matter otherwise.
+  If G#30 recurs after this fix on a future CI run, that would falsify this
+  root cause and point at the `update_idletasks()` alternative instead —
+  worth flagging explicitly rather than treating this fix as certain.
 
 ## How to verify locally
 ```
-cd /home/dev/projects/.worktrees/afk-clicker/ac-31
-VENV=<venv-python>   # e.g. the scratchpad venv with pynput installed
-DISPLAY=:99 $VENV -m unittest discover -s tests -t .
-# Expect: Ran 293 tests ... OK (skipped=5), no "RuntimeError: main thread
-# is not in main loop" printed.
-
-# Direct guard only:
-DISPLAY=:99 $VENV -m unittest tests.test_ui.GcAutomaticCollectionStaysDisabled -v
-
-# Sabotage (proves the guard actually fails):
-sed -i 's/^gc\.disable()$/# gc.disable()/' tests/context.py
-DISPLAY=:99 $VENV -m unittest tests.test_ui.GcAutomaticCollectionStaysDisabled -v   # FAILs
-DISPLAY=:99 $VENV -m unittest tests.test_ui -v 2>&1 | tail -20                      # tearDownModule ERRORs, count > 0
-git checkout -- tests/context.py   # restore
+cd /home/dev/projects/.worktrees/afk-clicker/ac-30
+Xvfb :50 -screen 0 1600x1000x24 &     # or any free display
+export DISPLAY=:50
+<venv>/bin/python -m unittest tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild -v
+<venv>/bin/python -m unittest discover -s tests -t . -v   # full suite
 ```
+Run in this session: both commands above, from this worktree, against
+`/tmp/claude-1000/.../scratchpad/venv/bin/python` on `DISPLAY=:50`.
+`QueuedNonResyncedUpdatesSurviveARebuild` — both tests `ok`. Full suite —
+`Ran 293 tests ... OK (skipped=5)`, identical to a `git stash` run of the
+same suite against the pre-fix file (confirming no regression and that the
+one pre-existing, unrelated `invalid command name "..._drain_ui"` Tcl
+teardown warning already present on `test_error_and_stopped_updates_survive_a_rebuild`
+predates this change). **What only macOS CI can confirm:** whether the
+actual G#30/GH#53 flake stops recurring — this fix cannot be verified
+against the real failure from this (Linux-only) box.
