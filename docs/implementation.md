@@ -189,3 +189,123 @@ DISPLAY=:98 "$PYBIN" -m unittest discover -s tests -t .
 
 Use a display nothing else is using, and do not run two of these
 Xvfb-driving processes against the same display concurrently.
+
+## Round 2 (review response)
+
+### Why the first attempt went blind
+
+PR #57's fix (waiting for an independent listener to go quiet between
+actions, `quiet=0.2`) eliminated the original flake but, measured directly by
+review, made the test unable to detect its own target regression: sabotaging
+`HotkeyWatcher._press` (`self.armed = False` -> `self.armed = True`, so the
+watcher never re-arms) still passed 10/10, because `quiet=0.2` sits inside
+`HotkeyWatcher.DEBOUNCE_S` (0.25s) -- every action landed inside the previous
+action's own debounce window, so debounce alone explained the passing
+result, independent of whether re-arm was intact.
+
+The obvious-looking fix -- widen the quiet window past `DEBOUNCE_S`, so
+debounce can no longer paper over a broken re-arm -- was tried first and
+**itself introduced a real, reproducible flake on unmodified, correct code**:
+0/20 at `quiet=0.2`, but 3/20 and then 7/20 (different runs, same box) at
+`quiet=DEBOUNCE_S+0.15=0.4`. Instrumented both `HotkeyWatcher._press`/
+`_release` and the probe listener to see why (script not committed): once
+the gap between actions exceeds `DEBOUNCE_S`, debounce no longer absorbs
+pynput's second, asynchronous copy of a transition if it happens to land
+late -- and its lag is not reliably bounded by any wait short enough to keep
+the test fast. One captured sequence: the delayed real-round-trip copy of
+the test's own "auto-repeat" press for `f7` (sent at t=0.431s) didn't arrive
+until t=0.833s -- *after* the real `release(f7)` had already re-armed the
+watcher (because `f6` was still logically held) -- re-completing the chord
+and firing a second time, entirely legitimately, on code with no bug in it.
+Widening the quiet window trades "debounce silently masks the sabotage" for
+"an unrelated async race silently fails the correct code" -- neither
+satisfies both properties the review asked for at once.
+
+### What changed
+
+Re-read where the two copies of a transition actually come from
+(`pynput/keyboard/_xorg.py:271-272`, `pynput/_util/__init__.py`'s
+`NotifierMixin._emit`): the *first* copy is not asynchronous at all --
+`Controller._handle()` calls `self._emit(...)` synchronously, in the calling
+thread, before `press()`/`release()` returns, and `_emit` calls every
+registered listener's `on_press`/`on_release` directly. So `hits` already
+reflects `HotkeyWatcher`'s reaction to a press the moment the `Controller`
+call that sent it returns -- no waiting needed to observe that part at all.
+Only pynput's *second*, genuinely asynchronous copy (delivered later, on the
+listener's own background thread) has unbounded lag, and it's that copy the
+old `settle()` was trying and failing to wait out.
+
+Rewrote the test to stop waiting for that second copy entirely instead of
+trying to out-wait it:
+
+- Press f6, press f7 -- fires synchronously; assert `hits == 1` immediately.
+- A single deterministic `time.sleep(HotkeyWatcher.DEBOUNCE_S + 0.15)` --
+  wall-clock, not listener-observed, so it's exact and requires no listener
+  at all. `DEBOUNCE_S` is compared against `time.monotonic()` inside
+  `_press`, so a plain sleep clears it deterministically.
+- Press f7 again (still held, simulating auto-repeat) -- if `self.armed`
+  wasn't correctly cleared after the first fire, this now exercises that
+  path for real (debounce has genuinely elapsed); assert `hits == 1` again,
+  synchronously, right after the call.
+- Only then release f7 and f6, in `finally`, for cleanup -- after both
+  assertions, so nothing about their outcome depends on what happens next.
+
+This is airtight against the async second copy specifically because armed
+never flips back to `True` before either assertion runs (nothing releases
+before then): with `armed` correctly `False`, any number of extra matching
+press events -- in whatever order, arriving on whatever thread, whenever
+pynput's asynchronous channel eventually delivers them -- change nothing.
+The property under test (holding does not repeat) no longer depends on
+racing anything.
+
+Removed the second, independent probe `Listener` entirely (no longer
+needed) -- which also resolves the review's non-blocking §8 concern about
+this test doubling its exposure to pynput's asynchronous `Listener.stop()`,
+as a side effect rather than a deliberate fix.
+
+### Sabotage result
+
+Re-applied the review's exact sabotage (`afk_clicker.py:541`,
+`self.armed = False` -> `self.armed = True`, `DEBOUNCE_S` untouched):
+
+```
+15/15 runs: FAILED (failures=1)
+```
+
+Reverted immediately after; `git diff --stat afk_clicker.py` shows no
+changes, `git status --porcelain` shows only `tests/test_chords_slow.py`
+modified.
+
+### Re-measured flake rate
+
+All runs via the real test runner (`python -m unittest
+tests.test_chords_slow.Firing.test_holding_does_not_repeat`), unmodified
+code:
+
+- Baseline load (`uptime` load average ~2-12 on 10 cores throughout,
+  ambient host activity, not induced): **0/20** failures.
+- Under induced load (8 extra CPU-bound `python3 -c "while True: pass"`
+  processes pegging the box -- `top` showed 90.9% user CPU, 10 running
+  tasks -- for the duration of the batch, then killed): **0/20** failures.
+- Full `tests.test_chords_slow` (all 5 methods): `Ran 5 tests in 64.653s --
+  OK`.
+- Full fast suite (`python -m unittest discover -s tests -t .`): `Ran 292
+  tests in 62.621s -- OK (skipped=5)`.
+
+Both numbers requested by the review: **0/20 clean, 15/15 catching the
+sabotage** -- a strict improvement over the round-1 rewrite (which was
+10/10 blind to the same sabotage) and over the pre-PR fixed-sleep version
+(33-50% flaky per the original ticket).
+
+### Deviations from spec (round 2)
+
+None from the ticket. One from my own round-1 approach: the review's
+suggested remedy ("raise `settle()`'s quiet threshold above `DEBOUNCE_S`")
+was tried first, exactly as suggested, and measured to introduce a new,
+reproducible flake of its own (see "Why the first attempt went blind"
+above) -- so the actual fix abandons quiescence-waiting for this test's
+assertion entirely rather than tuning its threshold, once it was clear the
+async copy's lag isn't reliably bounded by any threshold short enough to
+keep the test fast. Recorded here rather than silently substituted, since
+it diverges from the review's literal suggested fix (though not from what
+it asked for: both properties, together).

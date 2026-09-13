@@ -79,55 +79,67 @@ class Firing(unittest.TestCase):
 
     def test_holding_does_not_repeat(self):
         """
-        A fixed sleep between each synthetic action assumes the watcher has
-        seen everything about the previous action by the time it elapses.
-        It hasn't, reliably: a Controller sharing this process with a
-        Listener notifies it twice per key transition (see module
-        docstring) -- once synchronously, once via the real X round trip --
-        and under load the second copy can lag past a 0.5s sleep, landing
-        after the *next* action instead of before it. A stray, delayed
-        "press f7" arriving just after "release f7" (while f6 is still
-        down) re-completes the chord and fires it again, which looks like
-        the debounce/re-arm logic is broken when it is actually a race in
-        how the test drives it. Waiting for an independent listener to go
-        quiet between actions, instead of sleeping a fixed duration, lets
-        both copies of one action land before the next one is sent.
+        A fixed sleep between each synthetic action used to assume the
+        watcher had seen everything about the previous action by the time
+        it elapsed. It hadn't, reliably: waiting for an independent
+        listener to go quiet between actions instead didn't hold up either
+        -- widening that quiet gap past DEBOUNCE_S (needed so a broken
+        re-arm isn't masked by debounce, see below) just as reliably let a
+        *different* stray, delayed duplicate land after a later action and
+        re-fire on unmodified, correct code (confirmed directly, repeatably,
+        via instrumented runs). Chasing pynput's second, asynchronous copy
+        of each transition (delivered on the listener's own background
+        thread -- see the module docstring) with a bounded wait is not
+        actually bounded; its lag is not reliably capped by any timeout
+        short enough to keep this test fast.
+
+        The fix is to stop waiting for that copy at all. pynput's *first*
+        copy of a transition is delivered synchronously, in-process, before
+        Controller.press()/release() returns: Controller._handle()
+        (pynput/keyboard/_xorg.py) calls self._emit(...) right after
+        talking to the X server, and NotifierMixin._emit()
+        (pynput/_util/__init__.py) calls each registered Listener's
+        on_press/on_release directly, in the calling thread. So `hits`
+        already reflects HotkeyWatcher's reaction to a press by the time
+        the call that sent it returns -- no waiting needed to observe it.
+
+        The only genuinely time-dependent thing being tested is that a
+        second matching press, sent while the chord is still held, doesn't
+        re-fire -- and that only exercises the code path this test exists
+        to catch (self.armed cleared after firing, not just debounce
+        suppressing a too-soon repeat) if the gap since the first fire
+        exceeds DEBOUNCE_S. DEBOUNCE_S is compared against
+        time.monotonic(), not against anything a listener has observed, so
+        a plain deterministic sleep is enough to guarantee that -- no
+        listener involved, nothing to race.
+
+        Never releasing before either assertion means armed cannot flip
+        back True out of turn, so the delayed, asynchronous second copy of
+        any of these presses is harmless whenever it eventually turns up:
+        with armed already False, extra matching press events change
+        nothing, in any order, on any thread.
         """
         hk = hotkey(set(), [kb.Key.f6, kb.Key.f7])
         hits = []
         watcher = app.HotkeyWatcher(hk, lambda: hits.append(1))
-
-        quiet_since = [time.monotonic()]
-
-        def mark(_key):
-            quiet_since[0] = time.monotonic()
-
-        probe = kb.Listener(on_press=mark, on_release=mark)
-        probe.start()
-        probe.wait()
-
-        def settle(quiet=0.2, timeout=3.0):
-            deadline = time.monotonic() + timeout
-            while (time.monotonic() - quiet_since[0] < quiet
-                   and time.monotonic() < deadline):
-                time.sleep(0.02)
-
         watcher.start()
         controller = kb.Controller()
         try:
             controller.press(kb.Key.f6)
-            controller.press(kb.Key.f7)
-            settle()
-            controller.press(kb.Key.f7)      # auto-repeat
-            settle()
-            controller.release(kb.Key.f7)
-            settle()
-            controller.release(kb.Key.f6)
-            settle()
+            controller.press(kb.Key.f7)          # fires synchronously
+            self.assertEqual(len(hits), 1)
+
+            # Deterministic wall-clock wait, not a listener wait: clears
+            # DEBOUNCE_S so the next press exercises re-arm-on-fire rather
+            # than being swallowed by debounce regardless of it.
+            time.sleep(app.HotkeyWatcher.DEBOUNCE_S + 0.15)
+
+            controller.press(kb.Key.f7)          # still held -- auto-repeat
+            self.assertEqual(len(hits), 1)
         finally:
-            probe.stop()
+            controller.release(kb.Key.f7)
+            controller.release(kb.Key.f6)
             watcher.stop()
-        self.assertEqual(len(hits), 1)
 
     def test_debounce_collapses_a_burst_but_not_deliberate_presses(self):
         hk = hotkey(set(), [kb.Key.f6, kb.Key.f7])
