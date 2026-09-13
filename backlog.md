@@ -25,6 +25,26 @@ end-to-end pass clean on `main` at `0d6e784`. Report: `handoff/story-17-e2e.md`.
 ## Open
 
 Bugs and residue:
+- [ ] **Windows: in-app Install closes the app and never comes back** (Leo,
+      2026-09-13, 0.3.1 → 0.5.0). What he saw: at 100% the window closes, a black
+      console window flashes and closes, the files are not replaced, and a
+      double-click still starts 0.3.1. **Running the leftover
+      `%TEMP%\apply-update.cmd` by hand from an interactive `cmd` then updated to
+      0.5.0 correctly**, so the script's contents (tasklist wait, robocopy /MIR,
+      start) are fine. The failure is in how `_quit_for_update()` launches it:
+      `subprocess.Popen(["cmd", "/c", script], creationflags=DETACHED_PROCESS |
+      CREATE_NEW_PROCESS_GROUP)`, right before `on_close()`. Linux 0.3.1 → 0.5.0 via
+      the real frozen builds works end to end (verified under Xvfb). This code is
+      identical in 0.3.1, 0.5.0 and `main`, so **every Windows user on an existing
+      build hits this until they install a fixed build by hand**. Suspects, none
+      confirmed yet: a console-less `cmd` giving its console children (`tasklist`,
+      `find`, `timeout`, `robocopy`) each a new console, which explains the flash;
+      `timeout` refusing to run without console input; the process tree being torn
+      down with the parent. Next step: reproduce on the `windows-latest` CI runner
+      with a frozen build, and log each script step to a file. Also: the script
+      lands in `%TEMP%` itself, because `write_swap_script()` takes
+      `dirname(dirname(staged))` and the Windows zip isn't flattened. Needs a Gitea
+      ticket.
 - [x] **`Segmented` never calls `trace_remove`**, so a destroyed widget's trace stays
       registered on its variable. Found during story #24's end-to-end pass: writing to
       `appearance_var`/`ui_scale_var` after closing Settings (without reopening) hits
@@ -219,6 +239,19 @@ Two follow-ups from its review are below.
 - [ ] G#12 / GH#14 — Calibration suite for the review agent. Rebase its branch first.
 
 Housekeeping:
+- [ ] **Clean up the remote branches** (Leo, 2026-09-13, from GitHub's branch list):
+  - `feature/ac-33/rename-app-to-clickwork`: merged in PR #61 (0 ahead), delete it.
+  - `release/0.5.0`: 2 commits ahead of `main` (`9f995bb` "Release 0.5.0", which
+    carries the `__version__` bump, and `ebd2c0d`, a CI re-run). **Merge it back
+    into `main` first.** `main` still says `0.3.1`, and the next release branch's
+    version-match step compares against `__version__`. Tag `v0.5.0` preserves the
+    release, so the branch can go once merged.
+  - `feature/ac-12/review-calibration-suite` (2 ahead, 109 behind, CI 2/3 red) and
+    `feature/ac-13/story-macros-tab` (2 ahead, 109 behind, CI 2/3 red): both need a
+    rebase onto `main` before anything else. ac-13 was branched off ac-12 and
+    contains its `2bdf55f`, so rebase ac-12 first, or drop that commit from ac-13.
+    Find out which CI leg fails after the rebase, not before. Most of 109 commits
+    of drift is story #24's layout work.
 - [ ] **A flake "fix" tends to work by blinding the test — sabotage-verify every
       one.** Three cases in two days, each caught only by deliberately breaking the
       product and checking the test still failed: a settling loop added to a *test*
