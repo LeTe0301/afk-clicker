@@ -33,14 +33,48 @@ if ROOT not in sys.path:
 # an explicit gc.collect() only to UITestCase.tearDown() (still the
 # main/test-running thread) left the RuntimeError count unchanged at
 # ~55/run, because most occurrences happen before any tearDown() call, not
-# after one. Disabling automatic collection here and collecting explicitly,
-# only from tearDown() (see UITestCase.tearDown()), keeps every collection
-# on the thread that actually owns the interpreter -- confirmed to collapse
-# the count to 0/285 across repeated full-suite runs. Scoped to the test
-# suite only: the production app never creates more than one Tk() per
+# after one. Disabling automatic collection here and collecting explicitly
+# in UITestCase.tearDown() and AppearanceThemeSwitch.tearDown() -- the two
+# places that happen to call gc.collect() -- keeps every collection that
+# does happen on the thread that actually owns the interpreter, confirmed
+# to collapse the count to 0/285 across repeated full-suite runs.
+# Several *other* test classes in test_ui.py also build and close a real
+# tk.Tk()/AfkAutoclicker without ever calling gc.collect() themselves (e.g.
+# CardShell, SetActiveThemeWidgets, StartupHonoursSavedAppearance,
+# PollGamesScanDoesNotHoldSelfWhileBlocked -- see G#31's review of this
+# ticket for the fuller list) -- that is fine and does not need fixing:
+# gc.disable() below is process-wide, so the fix's safety never depended on
+# which class leaks or how many places explicitly collect. Scoped to the
+# test suite only: the production app never creates more than one Tk() per
 # process, so this leak pattern does not occur there, and disabling the
 # app's own GC was never proposed or needed.
 gc.disable()
+
+# G#31/GH#54: guard against the above being silently undone (removing
+# gc.disable(), re-enabling collection, or adding a new UI-building test
+# class without a teardown collect). Without this, the abort would just
+# start happening again -- intermittently, on CI only, which is exactly
+# what made it take five attempts to characterise the first time (see
+# docs/history/ac-27-r3-implementation.md). GcAutomaticCollectionStaysDisabled
+# in test_ui.py checks the direct case (gc.isenabled()). This counter backs
+# a second, independent check (test_ui.py's tearDownModule()): it tallies
+# every unraisable exception whose message matches the exact symptom this
+# fix exists to prevent, process-wide, for the life of the suite -- so a
+# regression is caught even if something re-enables collection without
+# touching the isenabled() flag checked above (e.g. a stray gc.enable()
+# call inside a test).
+MAIN_THREAD_UNRAISABLE_COUNT = 0
+_previous_unraisablehook = sys.unraisablehook
+
+
+def _count_main_thread_unraisable(unraisable):
+    global MAIN_THREAD_UNRAISABLE_COUNT
+    if "main thread is not in main loop" in str(unraisable.exc_value):
+        MAIN_THREAD_UNRAISABLE_COUNT += 1
+    _previous_unraisablehook(unraisable)
+
+
+sys.unraisablehook = _count_main_thread_unraisable
 
 # Only X11 needs DISPLAY. Windows and macOS have a window server either way,
 # and treating them as headless would skip the entire suite there.

@@ -434,12 +434,32 @@ touched:
   process, so nothing is ever finalised except where this suite
   deliberately triggers it.
 - `tests/test_ui.py` — `UITestCase.tearDown()` and
-  `AppearanceThemeSwitch.tearDown()` (the two places that build and close
-  a real `AfkAutoclicker`/`tk.Tk()`) each call `gc.collect()` immediately
-  after `self.ui.on_close()`. This is now the *only* place collection
-  happens, and it always runs on the main/test-running thread — the exact
-  thread `_tkinter` requires for a Tcl call that isn't dispatched through
-  a (never-entered, in this suite) `mainloop()`.
+  `AppearanceThemeSwitch.tearDown()` (the two places that happen to call
+  `gc.collect()`) each do so immediately after `self.ui.on_close()`. This
+  is the *only* place collection happens, and it always runs on the
+  main/test-running thread — the exact thread `_tkinter` requires for a
+  Tcl call that isn't dispatched through a (never-entered, in this suite)
+  `mainloop()`.
+
+**Correction (G#31/GH#54, PR #52 follow-up).** The line above originally
+called `UITestCase`/`AppearanceThemeSwitch` "the two places that build and
+close a real `AfkAutoclicker`/`tk.Tk()`" — that's wrong; they are the two
+places that call `gc.collect()`, not the only two places a real UI gets
+built and closed. At least four more test classes do that without ever
+calling `gc.collect()` themselves: `PollGamesScanDoesNotHoldSelfWhileBlocked`,
+`SetActiveThemeWidgets` (via its `_build()` helper),
+`StartupHonoursSavedAppearance`, and `CardShell`, plus `FillPaneOverflow`,
+`SectionHeader`, `RailAccent`, and `PrimaryButtonTheme` (these last four
+build a bare `tk.Tk()` without an `AfkAutoclicker`, but still build and
+destroy a real Tcl interpreter). This was always harmless — `gc.disable()`
+turns off automatic collection process-wide, so the fix's safety never
+depended on which class leaks or how many places explicitly collect — but
+the original wording was a trap for whoever added the next UI-building test
+class and reasoned from it. See `tests/context.py`'s corrected comment for
+the same correction in the code itself, and its new
+`MAIN_THREAD_UNRAISABLE_COUNT` guard (checked by
+`test_ui.py`'s `tearDownModule()`) for a regression check that does not
+depend on this list staying accurate or exhaustive.
 
 **Final measurement, with both changes in place.** 5 back-to-back
 full-suite runs:
