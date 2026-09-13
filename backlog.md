@@ -198,6 +198,23 @@ Two follow-ups from its review are below.
       undocumented invariant rather than a guaranteed one, and the coalescing
       machinery it belongs to is new (PR #49 round 5). Worth either cancelling it
       for symmetry or writing down why it does not need cancelling.
+- [ ] **Pane content should sit directly under its tab bar, not in the middle of the
+      page** (Leo, 2026-09-13, from screenshots of 0.5.0 on Windows, maximised). The
+      Hotkey tab's Record/Apply card, the Clicking tab's cards and Settings →
+      Appearance all float mid-page with a large empty band between the tabs and the
+      first card. The content should start right below the tab it belongs to. This
+      reverses story #24 feature 4's deliberate vertical centering (`FILL_TOP_SHARE =
+      0.5`, `_request_pane_fill`/`_run_pane_fill` spacer frames). Treat it as a design
+      change, not a bug, and check the window height floor (`WINDOW_MIN_H`) still
+      holds with top alignment. The Macros tab branch (G#13, below) builds its
+      settings on the same centered panes, so it needs the same change.
+- [ ] **UI scale should follow the window size** (Leo, 2026-09-13). Today it's a
+      fixed Settings choice (90/100/115/130%). Leo wants it to scale with the window.
+      Open design questions for the spec: replace the manual choice or make it an
+      "Auto" option next to it, what the reference size is, whether it steps or
+      scales continuously, and how it interacts with `WINDOW_MIN_H`, the rail
+      collapse threshold and the per-rebuild cost of `_rebuild_ui()` during a drag
+      resize.
 - [ ] G#13 / GH#15 — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
 - [ ] G#12 / GH#14 — Calibration suite for the review agent. Rebase its branch first.
 
