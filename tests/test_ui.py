@@ -680,7 +680,7 @@ class InstallWorker(UITestCase):
             self.ui._show_settings()
             self.root.update()
             release = {"assets": [
-                {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
+                {"name": "Clickwork-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
             self.ui._pending = ("v9.9.9", release["assets"][0], release)
             self.ui._install_worker()
             self._drain()
@@ -712,7 +712,7 @@ class InstallWorker(UITestCase):
             self.root.update()
             release = {"assets": [
                 {"name": "SHA256SUMS", "browser_download_url": "x"},
-                {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
+                {"name": "Clickwork-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
             self.ui._pending = ("v9.9.9", release["assets"][1], release)
             self.ui._install_worker()
             self._drain()
@@ -3035,7 +3035,7 @@ class SettingsUpdates(UITestCase):
                 self.assertEqual(self.ui.version_label.cget("fg"), idle_fg)
 
         checksum_not_listed = (
-            "checksum: not in SHA256SUMS: AFK-Farm-Clicker-linux-x86_64.tar.gz"[:40])
+            "checksum: not in SHA256SUMS: Clickwork-linux-x86_64.tar.gz"[:40])
         checksum_mismatch = (
             "checksum mismatch: expected abcdef123456…, got 987654fedcba…"[:40])
         coloured = [
@@ -3166,7 +3166,7 @@ class SettingsUpdates(UITestCase):
         self.root.update()
         release = {"assets": [
             {"name": "SHA256SUMS", "browser_download_url": "x"},
-            {"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
+            {"name": "Clickwork-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
         self.ui._pending = ("v9.9.9", release["assets"][1], release)
         self.ui._offer_update("v9.9.9")
         self.assertEqual(self.ui.update_button.command, self.ui.install_update)
@@ -3219,7 +3219,7 @@ class SettingsUpdates(UITestCase):
         self.assertFalse(self.ui._settings_open)
         self.assertFalse(hasattr(self.ui, "update_button"))
         release = {"tag_name": "v9.9.9",
-                  "assets": [{"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz"}]}
+                  "assets": [{"name": "Clickwork-linux-x86_64.tar.gz"}]}
         original_latest, original_is_newer, original_pick = \
             app.latest_release, app.is_newer, app.pick_asset
         app.latest_release = lambda timeout=10: release
@@ -3242,7 +3242,7 @@ class SettingsUpdates(UITestCase):
         self.ui._show_settings()
         self.root.update()
         release = {"tag_name": "v9.9.9",
-                  "assets": [{"name": "AFK-Farm-Clicker-linux-x86_64.tar.gz"}]}
+                  "assets": [{"name": "Clickwork-linux-x86_64.tar.gz"}]}
         original_latest, original_is_newer, original_pick = \
             app.latest_release, app.is_newer, app.pick_asset
         app.latest_release = lambda timeout=10: release

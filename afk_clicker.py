@@ -603,7 +603,7 @@ def latest_release(timeout=10):
     request = urllib.request.Request(
         f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30",
         headers={"Accept": "application/vnd.github+json",
-                 "User-Agent": f"AFKFarmClicker/{__version__}"})
+                 "User-Agent": f"Clickwork/{__version__}"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             releases = json.load(response)
@@ -667,7 +667,7 @@ def fetch_checksums(asset, timeout=30):
     """
     request = urllib.request.Request(
         asset["browser_download_url"],
-        headers={"User-Agent": f"AFKFarmClicker/{__version__}"})
+        headers={"User-Agent": f"Clickwork/{__version__}"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         text = response.read().decode("utf-8", "replace")
     sums = {}
@@ -738,11 +738,11 @@ def download_and_stage(asset, checksums, on_progress=None):
     default of None here would let a future caller skip verification just by
     forgetting the keyword -- the one thing this function exists to enforce.
     """
-    workdir = tempfile.mkdtemp(prefix="afkclicker-update-")
+    workdir = tempfile.mkdtemp(prefix="clickwork-update-")
     archive = os.path.join(workdir, asset["name"])
     request = urllib.request.Request(
         asset["browser_download_url"],
-        headers={"User-Agent": f"AFKFarmClicker/{__version__}"})
+        headers={"User-Agent": f"Clickwork/{__version__}"})
     with urllib.request.urlopen(request, timeout=60) as response, \
             open(archive, "wb") as out:
         total = int(response.headers.get("Content-Length") or 0)
@@ -768,9 +768,9 @@ def download_and_stage(asset, checksums, on_progress=None):
     if expected is None:
         # The fixed words must come first: the status line keeps only the
         # first 40 characters (afk_clicker.py:_install_worker), and a real
-        # asset name ("AFK-Farm-Clicker-linux-x86_64.tar.gz") is long
-        # enough on its own to push "not listed in SHA256SUMS" past that
-        # budget if it leads the message instead of trailing it.
+        # asset name ("Clickwork-linux-x86_64.tar.gz") is long enough on
+        # its own to push "not listed in SHA256SUMS" past that budget if
+        # it leads the message instead of trailing it.
         raise ChecksumError(
             f"checksum: not in {CHECKSUM_ASSET}: {asset['name']}")
     actual = file_digest(archive)
@@ -816,7 +816,7 @@ def write_swap_script(staged, target, relaunch):
     # up to "/" and the script would be written to the filesystem root.
     workdir = os.path.dirname(os.path.dirname(os.path.abspath(staged)))
     if not workdir or os.path.dirname(workdir) == workdir or not os.access(workdir, os.W_OK):
-        workdir = tempfile.mkdtemp(prefix="afkclicker-update-")
+        workdir = tempfile.mkdtemp(prefix="clickwork-update-")
     if sys.platform == "win32":
         path = os.path.join(workdir, "apply-update.cmd")
         script = f'''@echo off
@@ -1769,7 +1769,7 @@ class AfkAutoclicker:
         # _apply_appearance()/_build_settings().
         self._os_theme = os_theme
 
-        root.title("AFK Farm Clicker")
+        root.title("Clickwork")
         root.resizable(True, True)
         # Both panes still turn off geometry propagation to hold their tuned
         # widths, so nothing tells the window how tall to start -- without an
@@ -2033,7 +2033,7 @@ class AfkAutoclicker:
         header = tk.Frame(self.root, bg=CARD, height=int(52 * s))
         header.pack(fill="x")
         header.pack_propagate(False)
-        tk.Label(header, text="AFK Farm Clicker", bg=CARD, fg=INK,
+        tk.Label(header, text="Clickwork", bg=CARD, fg=INK,
                  font=("Segoe UI", int(12 * s), "bold")).pack(side="left",
                                                               padx=int(16 * s))
         self.status = StatusPill(header, s, width=250, height=36)

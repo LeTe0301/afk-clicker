@@ -107,13 +107,13 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            asset: AFK-Farm-Clicker-windows-x64.zip
+            asset: Clickwork-windows-x64.zip
           # Not ubuntu-latest: PyInstaller links the build host's glibc, so a
           # binary built on the newest Ubuntu refuses to start on older ones.
           - os: ubuntu-22.04
-            asset: AFK-Farm-Clicker-linux-x86_64.tar.gz
+            asset: Clickwork-linux-x86_64.tar.gz
           - os: macos-latest
-            asset: AFK-Farm-Clicker-macos-arm64.zip
+            asset: Clickwork-macos-arm64.zip
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -125,6 +125,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install "pyinstaller==6.11.1" "pynput==1.7.7"
 
+      # --name is deliberately not "Clickwork": renaming the packaged
+      # executable would break the swap script already on disk in every
+      # installed copy, which relaunches this exact path (see
+      # docs/history/ac-33-implementation.md). Do not "fix" this without
+      # reading that.
       - name: Build
         run: >
           pyinstaller --noconfirm --clean
@@ -221,9 +226,9 @@ jobs:
 
             | System | File |
             |---|---|
-            | Windows 10/11 | `AFK-Farm-Clicker-windows-x64.zip` |
-            | Linux (glibc 2.35+, X11) | `AFK-Farm-Clicker-linux-x86_64.tar.gz` |
-            | macOS (Apple Silicon) | `AFK-Farm-Clicker-macos-arm64.zip` |
+            | Windows 10/11 | `Clickwork-windows-x64.zip` |
+            | Linux (glibc 2.35+, X11) | `Clickwork-linux-x86_64.tar.gz` |
+            | macOS (Apple Silicon) | `Clickwork-macos-arm64.zip` |
 
             **Windows** — Defender may flag it. False positive, and normal here:
             a global keyboard hook plus synthetic mouse clicks is exactly the
