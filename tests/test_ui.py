@@ -3700,19 +3700,55 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
                     "be silently dropped by the old _ui_queue swap")
 
     def test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands(self):
+        # G#30/GH#53 (macOS-only flake): _build_ui()'s own tail -- reached
+        # from inside the _rebuild_ui() call below -- unconditionally starts
+        # a brand new _poll_games() scan of its own, on a real background
+        # thread, same as construction did for setUp()'s settle(). That scan
+        # is genuinely real here (detect_running is never mocked in this
+        # class): a Xlib tree walk on Linux, an `osascript` subprocess on
+        # macOS. If that second, uninvited scan's own self._ui(self.
+        # _mark_running, ...) call lands -- via this test's own trailing
+        # _drain_ui() below, there being no other drain path between the two
+        # -- before the assertion runs, it overwrites self._seen_running
+        # with whatever real windows happen to be open on the CI runner,
+        # which never includes "minecraft". That is a real race, not a
+        # dropped queue entry: _seen_running does get set, just to the
+        # second scan's real result instead of this test's queued one,
+        # which reads identically to "queued update silently dropped" in
+        # the assertion below (a plain set difference) without actually
+        # being that historical bug. Nothing in the linear code path between
+        # the queue-put and the drain gives the *original* queued value
+        # anywhere else to be lost -- no root.update() runs in between for
+        # a stray timer to be serviced through, and _rebuild_ui()'s own
+        # _rebuilding/_rebuild_after_id guards already rule out a second,
+        # reentrant _rebuild_ui() call interleaving here.
+        #
+        # Stubbing detect_running to return this test's own target removes
+        # the only real-world, non-deterministic input in play without
+        # touching what the test actually guards: whichever scan's result
+        # lands first, the observed self._seen_running is identical, so a
+        # genuinely dropped queue entry (the old _ui_queue swap bug this
+        # test exists to catch) still fails the assertion below exactly as
+        # before -- only the incidental, unrelated real OS scan's ability to
+        # race the assertion is removed.
         old_seen = self.ui._seen_running   # already set by setUp()'s settle()
         target = {"minecraft"}
         self.assertNotEqual(old_seen, target,
                             "test needs a genuinely different value to prove "
                             "the queued call actually landed, not that "
                             "_seen_running just happened to already match")
-        self.ui._ui(self.ui._mark_running, target)
-        self.ui._rebuild_ui()
-        self.ui._drain_ui()
-        self.assertEqual(
-            self.ui._seen_running, target,
-            "a queued _mark_running() scan result should survive a rebuild, "
-            "not be silently dropped by the old _ui_queue swap")
+        original_detect_running = app.detect_running
+        app.detect_running = lambda profiles: target
+        try:
+            self.ui._ui(self.ui._mark_running, target)
+            self.ui._rebuild_ui()
+            self.ui._drain_ui()
+            self.assertEqual(
+                self.ui._seen_running, target,
+                "a queued _mark_running() scan result should survive a "
+                "rebuild, not be silently dropped by the old _ui_queue swap")
+        finally:
+            app.detect_running = original_detect_running
 
 
 class QueuedStatusSurvivesARebuild(UITestCase):
