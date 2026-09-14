@@ -521,9 +521,20 @@ class SwapScriptWindowsCmdText(unittest.TestCase):
 
     def test_done_is_written_after_the_copy_exit_code(self):
         copy_index = self.body.index("copy exit code")
-        done_index = self.body.index("echo done")
+        done_index = self.body.index("done", copy_index)
         self.assertGreater(done_index, copy_index,
                           "done must be logged after the copy step, not before it")
+
+    def test_every_log_line_carries_a_timestamp(self):
+        # docs/spec.md's "Shipped update log": "a timestamp and a step
+        # name" per line. %DATE% %TIME% is ordinary parse-time expansion
+        # (not delayed expansion -- see write_swap_script's own comment),
+        # so every "echo ... >> %LOG%"/"> %LOG% echo ..." line must carry it.
+        log_lines = [line for line in self.body.splitlines()
+                    if "echo" in line and '"%LOG%"' in line]
+        self.assertTrue(log_lines, "no log-writing lines found in the script")
+        for line in log_lines:
+            self.assertIn("%DATE% %TIME%", line, f"missing timestamp: {line!r}")
 
     def test_relaunch_is_attempted_even_if_the_copy_fails(self):
         # start "" "{relaunch}" must not sit inside the same conditional that
@@ -614,7 +625,28 @@ class SwapScriptLogLifecycle(unittest.TestCase):
         log = open(log_path, encoding="utf-8").read()
         self.assertIn("copy exit code 0", log)
         lines = [line for line in log.splitlines() if line.strip()]
-        self.assertEqual(lines[-1].strip(), "done", log)
+        self.assertTrue(lines[-1].strip().endswith("done"), log)
+
+    def test_every_line_is_timestamped(self):
+        # docs/spec.md's "Shipped update log": "a timestamp and a step
+        # name" per line -- sabotage-verified in docs/implementation.md's
+        # Round 3 section by stripping the prefix from one line and
+        # confirming this goes red.
+        workdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        staged, target, relaunch, marker = self._fixture(workdir)
+        log_path = os.path.join(workdir, "update.log")
+
+        script = self._write_script_in_subprocess(staged, target, relaunch, log_path)
+        self._run(script)
+
+        log = open(log_path, encoding="utf-8").read()
+        lines = [line for line in log.splitlines() if line.strip()]
+        self.assertTrue(lines, "the log is empty")
+        timestamp = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} ")
+        for line in lines:
+            self.assertRegex(line, timestamp,
+                            f"line missing a YYYY-MM-DD HH:MM:SS prefix: {line!r}")
 
     def test_a_failing_copy_records_a_nonzero_exit_code_and_never_writes_done(self):
         workdir = tempfile.mkdtemp()
@@ -648,7 +680,7 @@ class SwapScriptLogLifecycle(unittest.TestCase):
 
         self.assertEqual(len(second_run_lines), len(first_run_lines),
                         "the log grew between runs -- looks appended, not truncated")
-        start_lines = [line for line in second_run_lines if line.startswith("start pid=")]
+        start_lines = [line for line in second_run_lines if "start pid=" in line]
         self.assertEqual(len(start_lines), 1, second_run_lines)
 
 
@@ -776,10 +808,15 @@ except Exception:
         """
         staged/target/relaunch laid out the way download_and_stage and
         install_root hand them to write_swap_script in production. `target`
-        and `relaunch` each sit under a directory with a space in the name
-        (real installs land in "Program Files") to guard the existing
-        `start "" "{relaunch}"` quoting from a regression, not just test the
-        happy path.
+        and `relaunch` each sit under a directory with a space *and* a
+        realistic set of cmd-meaningful characters -- "(", ")", "&", "^",
+        "!" (the shape of "C:\\Program Files (x86)\\..." and "Tom & Jerry"
+        -- Round 3, PR #65 review: CI so far only proved a plain space
+        survives the existing `start "" "{relaunch}"` quoting). `%` is
+        deliberately left out: it already breaks the pre-existing
+        robocopy/start lines (cmd expands `%...%` sequences inside the
+        interpolated script text) -- a limitation that predates this fix,
+        documented but not solved in docs/implementation.md.
         """
         staged = os.path.join(workdir, "staged")
         os.makedirs(os.path.join(staged, "sub"))
@@ -788,18 +825,28 @@ except Exception:
         with open(os.path.join(staged, "sub", "nested.txt"), "w", encoding="utf-8") as fh:
             fh.write("nested")
 
-        target = os.path.join(workdir, "target dir")
+        target = os.path.join(workdir, "target (x86) & co^!")
         os.makedirs(target)
         with open(os.path.join(target, "old.txt"), "w", encoding="utf-8") as fh:
             fh.write("old")
 
-        relaunch_dir = os.path.join(workdir, "relaunch dir")
+        relaunch_dir = os.path.join(workdir, "relaunch (x86) & co^!")
         os.makedirs(relaunch_dir)
         marker = os.path.join(workdir, "relaunched.marker")
         relaunch = os.path.join(relaunch_dir, "relaunch.cmd")
         with open(relaunch, "w", encoding="utf-8") as fh:
             fh.write(f'@echo off\necho relaunched> "{marker}"\n')
         return staged, target, relaunch, marker
+
+    def _log_path_in(self, workdir):
+        """
+        A settings directory carrying the same category of cmd-meaningful
+        characters as _fixture_in's target/relaunch dirs (Round 3, PR #65
+        review) -- nothing stops a real Windows username from containing
+        them, and the log path is interpolated into the script the same
+        way target/relaunch are.
+        """
+        return os.path.join(workdir, "settings (x86) & co^!", "update.log")
 
     def _spawn_launcher(self, cfg, workdir, timeout):
         """
@@ -888,7 +935,7 @@ class WindowsLaunchReproduction(_SwapScriptLauncher, unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
         (self.staged, self.target, self.relaunch,
          self.marker) = self._fixture_in(self.workdir)
-        self.log_path = os.path.join(self.workdir, "update.log")
+        self.log_path = self._log_path_in(self.workdir)
 
     def tearDown(self):
         self._kill_stragglers()
@@ -932,7 +979,7 @@ class WindowsLaunchReproduction(_SwapScriptLauncher, unittest.TestCase):
         log = self._log_or()
         self.assertIn("copy exit code", log, log)
         non_empty = [line for line in log.splitlines() if line.strip()]
-        self.assertTrue(non_empty and non_empty[-1].strip() == "done", log)
+        self.assertTrue(non_empty and non_empty[-1].strip().endswith("done"), log)
 
     def test_wait_loop_paces_polls_instead_of_busy_spinning(self):
         # The acceptance case above can't prove pacing: its own pid (the
@@ -1009,7 +1056,7 @@ class WindowsFixSuspectDiagnostics(_SwapScriptLauncher, unittest.TestCase):
         workdir = tempfile.mkdtemp(prefix="afk-repro-diag-")
         self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
         staged, target, relaunch, marker = self._fixture_in(workdir)
-        log_path = os.path.join(workdir, "update.log")
+        log_path = self._log_path_in(workdir)
         cfg = {"staged": staged, "target": target, "relaunch": relaunch,
                "log_path": log_path, "creationflags": self.OLD_CREATIONFLAGS,
                "stdio_mode": "none", "keep_alive_seconds": 0}

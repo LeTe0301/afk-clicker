@@ -851,14 +851,15 @@ def write_swap_script(staged, target, relaunch, log_path):
     platform deleting the code you are executing is asking for trouble.
 
     Also writes a step log to log_path, truncated fresh on every run (G#35/
-    GH#63's "shipped update log" goal): a timestamped line for the wait
-    finishing, the copy step's exit code, the relaunch attempt, and a final
-    "done" line so a future launch of the app can tell an update died
-    part-way (no "done") from one that finished. log_path is a required
-    argument rather than something this function computes, so a caller
-    always controls where it lands -- the real caller uses the settings
-    directory (stable, findable at next launch); tests use a temp path so
-    they never touch the real one. Its directory is created if missing.
+    GH#63's "shipped update log" goal): a timestamped line for the start of
+    the run, the wait finishing, the copy step's exit code, the relaunch
+    attempt, and a final "done" line so a future launch of the app can tell
+    an update died part-way (no "done") from one that finished. log_path is
+    a required argument rather than something this function computes, so a
+    caller always controls where it lands -- the real caller uses the
+    settings directory (stable, findable at next launch); tests use a temp
+    path so they never touch the real one. Its directory is created if
+    missing.
     """
     pid = os.getpid()
     # Two levels up from the staged tree is the temp working directory that
@@ -878,9 +879,19 @@ def write_swap_script(staged, target, relaunch, log_path):
         # sleep left in the loop that turns the wait into a tight busy-loop
         # of tasklist calls. `ping -n 2 127.0.0.1 >nul` is the conventional
         # console-free ~1s delay and needs nothing from stdin.
+        #
+        # %DATE% %TIME% is not delayed expansion -- it is the normal
+        # parse-time substitution every %VAR% here already gets. The one
+        # line inside a ( ... ) block (the final `done`) is therefore
+        # stamped at the moment that whole if-block is parsed, a
+        # negligible instant before it executes -- accurate enough for a
+        # human-read log, and not worth enabling delayed expansion for
+        # (that would make a literal `!` in a path -- Program Files paths
+        # never have one, but the fixture below now covers it -- behave
+        # differently).
         script = f'''@echo off
 set "LOG={log_path}"
-> "%LOG%" echo start pid={pid} staged="{staged}" target="{target}" relaunch="{relaunch}"
+> "%LOG%" echo %DATE% %TIME% start pid={pid} staged="{staged}" target="{target}" relaunch="{relaunch}"
 set COUNT=0
 :wait
 tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
@@ -889,14 +900,14 @@ if not errorlevel 1 (
   ping -n 2 127.0.0.1 >nul
   goto wait
 )
->> "%LOG%" echo wait finished after %COUNT% iterations
+>> "%LOG%" echo %DATE% %TIME% wait finished after %COUNT% iterations
 robocopy "{staged}" "{target}" /MIR /NFL /NDL /NJH /NJS /NC /NS >nul
 set RC=%ERRORLEVEL%
->> "%LOG%" echo copy exit code %RC%
+>> "%LOG%" echo %DATE% %TIME% copy exit code %RC%
 start "" "{relaunch}"
->> "%LOG%" echo relaunch attempted
+>> "%LOG%" echo %DATE% %TIME% relaunch attempted
 if %RC% LSS 8 (
-  >> "%LOG%" echo done
+  >> "%LOG%" echo %DATE% %TIME% done
 )
 '''
     else:
@@ -904,22 +915,22 @@ if %RC% LSS 8 (
         script = f'''#!/bin/sh
 LOG="{log_path}"
 : > "$LOG"
-echo "start pid={pid} staged={staged} target={target} relaunch={relaunch}" >> "$LOG"
+echo "$(date '+%Y-%m-%d %H:%M:%S') start pid={pid} staged={staged} target={target} relaunch={relaunch}" >> "$LOG"
 COUNT=0
 while kill -0 {pid} 2>/dev/null; do
   COUNT=$((COUNT + 1))
   sleep 1
 done
-echo "wait finished after $COUNT iterations" >> "$LOG"
+echo "$(date '+%Y-%m-%d %H:%M:%S') wait finished after $COUNT iterations" >> "$LOG"
 rm -rf "{target}."*  2>/dev/null
 find "{target}" -mindepth 1 -delete 2>/dev/null
 cp -a "{staged}/." "{target}/"
 RC=$?
-echo "copy exit code $RC" >> "$LOG"
+echo "$(date '+%Y-%m-%d %H:%M:%S') copy exit code $RC" >> "$LOG"
 "{relaunch}" &
-echo "relaunch attempted" >> "$LOG"
+echo "$(date '+%Y-%m-%d %H:%M:%S') relaunch attempted" >> "$LOG"
 if [ "$RC" -eq 0 ]; then
-  echo "done" >> "$LOG"
+  echo "$(date '+%Y-%m-%d %H:%M:%S') done" >> "$LOG"
 fi
 '''
     with open(path, "w", encoding="utf-8") as fh:

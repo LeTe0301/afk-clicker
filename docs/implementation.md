@@ -310,9 +310,15 @@ test suite (Windows / macOS)" step's log for `tests.test_updater`. Look for:
 - **Lifecycle:** truncated at the top of every run (`> "%LOG%"` / `: >
   "$LOG"`), never appended — one log per update attempt. Verified by
   `SwapScriptLogLifecycle.test_a_second_update_truncates_the_log_rather_than_appending`.
-- **Content, both `.cmd` and `.sh`, same step names:** `start pid=… staged=…
-  target=… relaunch=…`, `wait finished after N iterations`, `copy exit code
-  N`, `relaunch attempted`, and — only on success — `done`.
+- **Content, both `.cmd` and `.sh`, same step names, each line timestamped**
+  (corrected in Round 3 — see below; earlier text here and the
+  `write_swap_script` docstring claimed a timestamp that the first version
+  of this fix did not actually write): `<timestamp> start pid=… staged=…
+  target=… relaunch=…`, `<timestamp> wait finished after N iterations`,
+  `<timestamp> copy exit code N`, `<timestamp> relaunch attempted`, and —
+  only on success — `<timestamp> done`. `.cmd` uses `%DATE% %TIME%`
+  (locale-formatted, fine for a human-read log); `.sh` uses
+  `$(date '+%Y-%m-%d %H:%M:%S')` (POSIX, fixed format).
 - **Robocopy ≥ 8 / `cp -a` non-zero = failure → no `done`, but relaunch is
   still attempted unconditionally.** Decision: relaunching the *old* build
   (whatever's left at `target`, which may be untouched or only partially
@@ -472,6 +478,98 @@ b3e841d) vs. what is still only provable there
   and whether the manual 0.6.0 upgrade check itself (no visible console,
   fully replaced install folder, relaunched instance reports the new
   version) holds outside the reproduction's own launcher shape.
+
+## Round 3 (independent PR review on PR #65, held pre-merge)
+
+CI was green everywhere (head ccf501f) and the independent review posted
+MERGE, but flagged two concerns before the coordinator would let the merge
+through. Both addressed without touching CI-confirmed behaviour otherwise.
+
+### 1. Timestamps were missing from `update.log`
+`docs/spec.md`'s "Shipped update log" goal requires "a timestamp and a step
+name" per line; the shipped `write_swap_script` wrote no timestamp on
+either platform, and its own docstring wrongly claimed "a timestamped
+line" (now corrected — see "Content, both `.cmd` and `.sh`..." above).
+Fixed by prefixing every log line:
+- `.cmd`: `%DATE% %TIME%` — ordinary parse-time expansion (not delayed
+  expansion; delayed expansion was deliberately not enabled, since it would
+  make a literal `!` in a path — now present in the acceptance fixture, see
+  below — behave differently). The one line inside a `( ... )` block (the
+  final `done`, gated on `%RC% LSS 8`) is stamped at the moment that whole
+  if-block is parsed, a negligible instant before it actually executes —
+  noted as a comment in `write_swap_script`, not treated as a problem.
+- `.sh`: `$(date '+%Y-%m-%d %H:%M:%S')` — POSIX, fixed format, no locale
+  dependency (unlike `%DATE%`, which is why the wait-loop pacing test still
+  deliberately does not parse timestamps for its proof — see that section
+  above, unchanged).
+- Test updates: added
+  `SwapScriptLogLifecycle.test_every_line_is_timestamped` (every non-empty
+  line in a real, executed `.sh` run matches `^\d{4}-\d{2}-\d{2}
+  \d{2}:\d{2}:\d{2} `) and
+  `SwapScriptWindowsCmdText.test_every_log_line_carries_a_timestamp` (every
+  `echo` line targeting `"%LOG%"` contains `%DATE% %TIME%`). Three existing
+  assertions that anchored on exact line content had to loosen from
+  equality to `.endswith(...)`/substring, now that a timestamp always
+  precedes the step text: `SwapScriptLogLifecycle.test_successful_update_
+  ends_with_done_and_records_the_exit_code` (`lines[-1].strip() == "done"` →
+  `.endswith("done")`), `WindowsLaunchReproduction.test_production_launch_
+  replaces_the_install_and_relaunches`'s own `done` check (same change),
+  and `SwapScriptLogLifecycle.test_a_second_update_truncates_the_log_
+  rather_than_appending`'s `start pid=` line count (`line.startswith(...)`
+  → `"start pid=" in line`, since the line now starts with a timestamp, not
+  `start`). `copy exit code`/`wait finished after N iterations` substring
+  and regex searches were already not anchored to line start, so those
+  needed no change. Sabotage-verified: stripped the timestamp from the
+  `.sh`'s `copy exit code` line → `test_every_line_is_timestamped` failed
+  with `Regex didn't match ... 'copy exit code 0'`, reverted; stripped
+  `%DATE% %TIME%` from the `.cmd`'s `copy exit code` line →
+  `test_every_log_line_carries_a_timestamp` failed with `'%DATE% %TIME%'
+  not found in ...`, reverted.
+
+### 2. Special characters in paths, only proven on real Windows for spaces
+so far. `_SwapScriptLauncher._fixture_in` (the Windows acceptance/
+diagnostics fixture) previously used `target dir`/`relaunch dir` — a space
+only. Real Windows paths realistically also carry `(`, `)`, `&`, `^`, `!`
+(`C:\Program Files (x86)\...`, `Tom & Jerry`). Changed the fixture to
+`target (x86) & co^!` / `relaunch (x86) & co^!` (keeping the space), and
+added `_log_path_in(workdir)` so the log's own settings directory
+(`settings (x86) & co^!`) carries the same characters — the log path is
+interpolated into the script exactly the way `target`/`relaunch` are, so it
+carries the same quoting risk. `%` was deliberately left out of the
+fixture, per the coordinator's instruction: a `%` anywhere in
+`staged`/`target`/`relaunch`/`log_path` already breaks the pre-existing
+`robocopy`/`start` lines (`cmd` expands `%...%` sequences inside the
+interpolated script text) — a limitation that predates this fix entirely
+and is already recorded, not solved, under "Known, pre-existing, not
+expanded" above; this round doesn't change that note, it just avoids
+introducing a fixture that would exercise it. The `relaunch.cmd` fixture's
+own body only ever references the marker path (which has no special
+characters), so nothing in the fixture itself needed changing beyond the
+directory names — this is deliberately proving *production's* quoting, not
+routing around it. This has been pushed for the next CI run; the outcome
+(pass or a real quoting bug surfaced by these characters) is not yet known
+in this session — if CI shows a failure here, that's genuine evidence for
+a follow-up fix to `write_swap_script`'s interpolation, not to the test.
+
+### Verification (Round 3, this session)
+- `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean.
+- Full suite: `DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests
+  -t .` → `Ran 312 tests ... OK (skipped=8)` (up from Round 2's 310 — the 2
+  new timestamp tests; skip count unchanged since both new tests run
+  locally on Linux under Xvfb).
+- Both sabotages above were actually applied to `afk_clicker.py`, run,
+  observed red with the exact `AssertionError` text quoted, then reverted
+  to the original text before moving on; `git diff afk_clicker.py` at the
+  end of this session carries no sabotage.
+- The special-character fixture change (concern 2) has no local test to
+  sabotage-verify against — it only executes on `windows-latest` CI, same
+  as the rest of the Windows-only classes; it was checked by reading
+  (correct `os.path.join` usage, no shell-quoting done on the Python side
+  that could mask what `write_swap_script`'s own `.cmd`-side quoting does)
+  and by confirming the full local suite still passes with the changed
+  fixture paths (Linux doesn't exercise the Windows-only classes, so this
+  only proves the change didn't break Python-level path handling, not the
+  `.cmd` quoting itself — that's CI's job, per "What only CI can confirm").
 
 ## Verification (this session)
 - `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean.
