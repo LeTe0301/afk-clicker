@@ -98,7 +98,12 @@ Bugs and residue:
       §3 assumption that `_dpi_s >= 1.0` was simply wrong about macOS. Decide whether
       to add the `fs(base, s)` floor across the ~20 font call sites, drop 90 % on
       low-DPI displays, or accept it. Only verifiable via CI — no real Mac here (G#4).
-- [x] **`QueuedNonResyncedUpdatesSurviveARebuild...still_lands` macOS flake — fixed
+- [ ] **RECURRED 2026-09-14** on PR #65's macOS leg (run 34906199873, commit
+      `9aa7e81`, a diff touching only `tests/test_updater.py` and docs), same
+      assertion: `'minecraft'` missing after a rebuild. So the `_poll_games` stub
+      below does not close every path; something else still races the queued
+      result on macOS. Reopen G#30 / GH#53 or file a new ticket. The original entry:
+      **`QueuedNonResyncedUpdatesSurviveARebuild...still_lands` macOS flake — fixed
       2026-09-13** (G#30 / GH#53, PR #58, `22815c9`). Failed four times, always on
       macOS, always passing on re-run — twice on diffs containing no executable code
       at all. Cause: `_rebuild_ui()`'s tail unconditionally restarts `_poll_games()`,

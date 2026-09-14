@@ -546,10 +546,9 @@ introducing a fixture that would exercise it. The `relaunch.cmd` fixture's
 own body only ever references the marker path (which has no special
 characters), so nothing in the fixture itself needed changing beyond the
 directory names — this is deliberately proving *production's* quoting, not
-routing around it. This has been pushed for the next CI run; the outcome
-(pass or a real quoting bug surfaced by these characters) is not yet known
-in this session — if CI shows a failure here, that's genuine evidence for
-a follow-up fix to `write_swap_script`'s interpolation, not to the test.
+routing around it. Round 3's CI run then failed only on the relaunch; Round 4 below traces
+that to the `.cmd` fixture, and run 34906199873 shows production handles
+these characters.
 
 ### Verification (Round 3, this session)
 - `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean.
@@ -676,8 +675,15 @@ the coordinator's instruction was to prove it on CI first.
   | succeeds | succeeds | Production handles both; Round 3's actual failure was specific to the old `.cmd` fixture, not to special characters as such. |
   | succeeds | fails | A real production bug with special characters in the relaunch path specifically. |
   | fails | (either) | The `.exe` probe mechanism itself (copy + `PYTHONHOME`/`PYTHONSTARTUP`) is broken; the acceptance case's result is not meaningful until the probe is fixed. |
-  **[Outcome pending the next CI run — coordinator to report back and this
-  table to be filled in with the actual result.]**
+  **Outcome (windows-latest, run 34906199873, commit 9aa7e81): row 1.**
+  Acceptance case with the `.exe` in `relaunch (x86) & co^!` passed, as did
+  the pacing test; the plain-dir `.exe` probe diagnostic printed
+  `succeeded=True`; the `.cmd` relaunch in the special-char dir printed
+  `succeeded=False` with a complete update.log (`copy exit code 3` … `done`).
+  So production handles `(`, `)`, `&`, `^`, `!` and spaces in the target,
+  relaunch and log paths, and Round 3's red was the `.cmd` fixture going
+  through `start`'s `cmd /K`, not the product. The old-flags diagnostic
+  again logged only the `start` line.
 
 ### What this round could not verify locally
 This box is Linux; `sys.base_prefix` here has no `python.exe`, `python3.dll`,
@@ -692,7 +698,15 @@ copied `python.exe` actually reaches an interactive prompt and reads
 `PYTHONSTARTUP` under `start`'s new console, and whether the hypothesis
 above is actually what Round 3 hit (as opposed to something else about the
 `.cmd` fixture), are both open until the next `windows-latest` CI run.
-**[Room for the next CI outcome — coordinator to report back.]**
+Both are now answered by run 34906199873 (see the outcome under the table
+above): the probe chain works on `windows-latest`, and the hypothesis held.
+
+The same run's **macOS leg failed** on
+`tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`
+(`'minecraft'` missing after a rebuild). That is the G#30 flake PR #58 was
+meant to have fixed; this commit touched only `tests/test_updater.py` and
+this doc, so it is unrelated to this PR and recorded in `backlog.md` as a
+recurrence rather than fixed here.
 
 ### Verification (Round 4, this session)
 - `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean (no
