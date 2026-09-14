@@ -54,8 +54,10 @@ Bugs and residue:
       down with the parent. Next step: reproduce on the `windows-latest` CI runner
       with a frozen build, and log each script step to a file. Also: the script
       lands in `%TEMP%` itself, because `write_swap_script()` takes
-      `dirname(dirname(staged))` and the Windows zip isn't flattened. Needs a Gitea
-      ticket.
+      `dirname(dirname(staged))` and the Windows zip isn't flattened. **G#35 / GH#63**,
+      in progress on `hotfix/ac-35/windows-install-never-updates` (2026-09-14). Leo
+      also wants the shipped script to keep a step log (`update.log` in the settings
+      dir); the in-app "send us the log" prompt is split out as G#36 / GH#64.
 - [x] **`Segmented` never calls `trace_remove`**, so a destroyed widget's trace stays
       registered on its variable. Found during story #24's end-to-end pass: writing to
       `appearance_var`/`ui_scale_var` after closing Settings (without reopening) hits
@@ -89,6 +91,7 @@ Bugs and residue:
 - [ ] G#10 / GH#12 — Review residue: roadmap line, startup ordering, test hygiene, stale counts.
 - [ ] G#18 / GH#22 — Review residue from PR #21. The `bind_all` comment is done; still missing: a test that a Button click drops a field's focus.
 - [ ] G#21 / GH#32 — Review residue from the updater PRs: a hex check in `fetch_checksums`, the zip comment, the superseded-worker race test, and `Store.save` swallowing `OSError`.
+- [ ] G#36 / GH#64 — Ask the person to send `update.log` (prefilled GitHub issue) when an in-app update didn't finish. Follow-up to G#35, which ships the log; needs a design pass.
 - [ ] G#4 / GH#6 — The click interval measures 25–40 % slow on the macOS CI runner. Needs a real Mac.
 - [ ] G#23 / GH#35 — macOS reports `_dpi_s` ~0.75, so the 90 % UI-scale step renders
       5 pt labels (6 pt at 100 %, which already ships). Not a regression; the spec's

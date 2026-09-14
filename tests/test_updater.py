@@ -1,8 +1,12 @@
 """Version resolution, asset selection, staging and the swap script."""
 import json
 import os
+import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
+import time
 import hashlib
 import pathlib
 import unittest
@@ -10,6 +14,12 @@ import urllib.request
 import zipfile
 
 from .context import app, needs_display
+
+# tests/context.py puts this on sys.path for the in-process suite; the
+# Windows launch reproduction below needs it again inside a *separate*
+# interpreter (see WindowsLaunchReproduction._LAUNCHER), which does not
+# inherit that path-insert.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @needs_display
@@ -448,6 +458,339 @@ class SwapScript(unittest.TestCase):
         else:
             self.assertIn("-mindepth 1 -delete", body,
                           "the old installation is never cleared")
+
+
+class _SwapScriptLauncher:
+    """
+    Shared fixture/launch machinery for the two Windows-only test classes
+    below. Deliberately *not* a unittest.TestCase subclass: both
+    WindowsLaunchReproduction and WindowsFixSuspectDiagnostics need this
+    setup, but unittest discovers every test_* method on every TestCase
+    subclass, so inheriting one from the other would silently re-run the
+    acceptance case as part of the "never fails the suite" diagnostics class.
+
+    G#35/GH#63: `_quit_for_update`'s Windows branch (afk_clicker.py:2979-2986)
+    launches `apply-update.cmd` and the app then exits right away -- and on a
+    real machine the swap script never finishes. `SwapScript` above only
+    checks what write_swap_script *writes*; nothing exercised how
+    `_quit_for_update` actually *launches* it, which is exactly the gap that
+    let this ship.
+
+    Reproducing suspect 3 (the process tree not surviving its parent exiting)
+    requires the *caller* of write_swap_script to actually be a separate OS
+    process that exits -- calling write_swap_script in-process would make
+    os.getpid() the test runner's own pid, and the test runner does not exit
+    after Popen() returns. So this spawns a short-lived "launcher" subprocess
+    (a `python -c` script) that stands in for on_close(): it calls the real
+    write_swap_script, launches the result exactly as _quit_for_update does,
+    then exits immediately.
+    """
+
+    # Mirrors _quit_for_update's exact Windows launch line (afk_clicker.py
+    # :2982-2983) as a named constant, so the acceptance case below cannot
+    # silently drift from what production actually passes to Popen.
+    PRODUCTION_CREATIONFLAGS = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    CREATE_NO_WINDOW = 0x08000000
+
+    # Runs in a fresh interpreter (a `python -c` subprocess), so it cannot
+    # see this test module's locals -- everything it needs crosses the
+    # process boundary as an environment variable instead of being
+    # string-formatted into the source below, which would turn a staged path
+    # containing a quote or backslash into a syntax error or, worse, an
+    # injection. AFK_TEST_ERROR_LOG travels as its own env var rather than a
+    # key inside the JSON cfg so that even a cfg parse failure still lands
+    # somewhere readable.
+    _LAUNCHER = """
+import os, sys, traceback
+
+error_log = os.environ["AFK_TEST_ERROR_LOG"]
+try:
+    import json, subprocess, time
+
+    sys.path.insert(0, os.environ["AFK_TEST_ROOT"])
+    import afk_clicker as app
+
+    cfg = json.loads(os.environ["AFK_TEST_CFG"])
+    script = app.write_swap_script(cfg["staged"], cfg["target"], cfg["relaunch"])
+
+    kwargs = {"creationflags": cfg["creationflags"]}
+    log = None
+    if cfg["stdio_mode"] == "devnull":
+        kwargs["stdin"] = subprocess.DEVNULL
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
+    elif cfg["stdio_mode"] == "captured":
+        # Diagnostic only (WindowsFixSuspectDiagnostics) -- captures what,
+        # if anything, the console commands print. Never used by the
+        # acceptance case: giving cmd.exe usable stdio handles when
+        # production gives it none is plausibly the very thing that changes
+        # the outcome (suspects 1/2 are about console/handle availability),
+        # so the acceptance case cannot carry this without risking a false
+        # green on buggy code.
+        log = open(cfg["cmd_log"], "w", encoding="utf-8")
+        kwargs["stdout"] = log
+        kwargs["stderr"] = log
+    # stdio_mode == "none": no stdio kwargs at all -- the exact line
+    # _quit_for_update runs (afk_clicker.py:2982-2983).
+
+    subprocess.Popen(["cmd", "/c", script], **kwargs)
+    if log is not None:
+        log.close()
+
+    # Stands in for on_close() tearing the real app down right after Popen()
+    # returns. A launcher that stayed alive for the rest of the test would
+    # never put suspect 3 (the process tree dying with its parent) under
+    # test at all.
+    if cfg["keep_alive_seconds"]:
+        time.sleep(cfg["keep_alive_seconds"])
+except Exception:
+    # No print(): this interpreter is often pythonw.exe (see
+    # _gui_interpreter), chosen specifically because it -- like the frozen
+    # --windowed app -- has no console and cannot be assumed to have a
+    # working stdout/stderr to print to. A crash has to reach disk some
+    # other way to be visible at all.
+    with open(error_log, "w", encoding="utf-8") as fh:
+        fh.write(traceback.format_exc())
+"""
+
+    def _gui_interpreter(self):
+        # pythonw.exe -- GUI subsystem, no console -- sits next to python.exe
+        # in a normal CPython install. The real app is a PyInstaller
+        # `--windowed` build with the same no-console shape; python.exe
+        # (a console-subsystem process) would hand cmd.exe a real inherited
+        # console that production's launch never provides, which is exactly
+        # what this reproduction cannot afford to get wrong. Falls back to
+        # sys.executable for an install that does not ship pythonw.exe (e.g.
+        # some embeddable distributions).
+        candidate = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        return candidate if os.path.isfile(candidate) else sys.executable
+
+    def _kill_stragglers(self):
+        # Best-effort cleanup, not an assertion: the acceptance case's whole
+        # premise is that the process tree may *still be alive* past the
+        # poll timeout (that is the bug). A straggling robocopy/cmd would
+        # otherwise hold a lock on a temp dir past this test's own
+        # shutil.rmtree cleanup and confuse whatever test runs next. Every
+        # workdir either class creates shares the "afk-repro" prefix, so
+        # matching on it (rather than on one specific workdir) catches both.
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process | "
+                 "Where-Object { $_.CommandLine -like '*afk-repro*' } | "
+                 "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                 "-ErrorAction SilentlyContinue }"],
+                timeout=15, capture_output=True, text=True)
+        except Exception as exc:
+            print(f"[tearDown] straggler cleanup failed (non-fatal): {exc}")
+
+    def _fixture_in(self, workdir):
+        """
+        staged/target/relaunch laid out the way download_and_stage and
+        install_root hand them to write_swap_script in production. `target`
+        and `relaunch` each sit under a directory with a space in the name
+        (real installs land in "Program Files") to guard the existing
+        `start "" "{relaunch}"` quoting from a regression, not just test the
+        happy path.
+        """
+        staged = os.path.join(workdir, "staged")
+        os.makedirs(os.path.join(staged, "sub"))
+        with open(os.path.join(staged, "new.txt"), "w", encoding="utf-8") as fh:
+            fh.write("new")
+        with open(os.path.join(staged, "sub", "nested.txt"), "w", encoding="utf-8") as fh:
+            fh.write("nested")
+
+        target = os.path.join(workdir, "target dir")
+        os.makedirs(target)
+        with open(os.path.join(target, "old.txt"), "w", encoding="utf-8") as fh:
+            fh.write("old")
+
+        relaunch_dir = os.path.join(workdir, "relaunch dir")
+        os.makedirs(relaunch_dir)
+        marker = os.path.join(workdir, "relaunched.marker")
+        relaunch = os.path.join(relaunch_dir, "relaunch.cmd")
+        with open(relaunch, "w", encoding="utf-8") as fh:
+            fh.write(f'@echo off\necho relaunched> "{marker}"\n')
+        return staged, target, relaunch, marker
+
+    def _spawn_launcher(self, cfg, workdir, timeout):
+        """
+        Returns (completed_process, interpreter, launcher_output, error_output).
+
+        subprocess.run(..., capture_output=True) was the first draft here --
+        that uses pipes, and a pipe handle the grandchild cmd.exe ends up
+        inheriting would make subprocess.run() itself block until cmd exits
+        (masking the "parent exits immediately" premise this whole
+        reproduction depends on), while also handing cmd.exe usable std
+        handles production never gives it. The real app is a windowed
+        PyInstaller exe with no console and no std pipes at all, so this
+        starves stdin and redirects stdout/stderr to a real file instead.
+        """
+        interpreter = self._gui_interpreter()
+        launcher_log = os.path.join(workdir, "launcher-output.log")
+        error_log = os.path.join(workdir, "launcher-error.log")
+        env = dict(os.environ)
+        env["AFK_TEST_ROOT"] = ROOT
+        env["AFK_TEST_ERROR_LOG"] = error_log
+        env["AFK_TEST_CFG"] = json.dumps(cfg)
+        with open(launcher_log, "w", encoding="utf-8") as out:
+            proc = subprocess.run([interpreter, "-c", self._LAUNCHER],
+                                  env=env, stdin=subprocess.DEVNULL,
+                                  stdout=out, stderr=out, timeout=timeout)
+        return (proc, interpreter, self._read_or(launcher_log),
+                self._read_or(error_log))
+
+    def _read_or(self, path, default=""):
+        if path and os.path.exists(path):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        return default
+
+    def _poll_until(self, predicate, timeout, interval=0.5):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(interval)
+        return predicate()
+
+    def _mirrored(self, target):
+        return (os.path.isfile(os.path.join(target, "new.txt"))
+                and os.path.isfile(os.path.join(target, "sub", "nested.txt"))
+                and not os.path.exists(os.path.join(target, "old.txt")))
+
+    def _diagnostics(self, interpreter, launcher_output, error_output):
+        # This is the actual point of phase A: on a timeout, say *why*, not
+        # just that it timed out -- that is what turns a red run into
+        # evidence for one of the three suspects in docs/spec.md. No cmd.exe
+        # output to show here -- the acceptance case never captures it (see
+        # _LAUNCHER's comment on stdio_mode "none"); that capture only
+        # happens in WindowsFixSuspectDiagnostics's own "captured_stdio"
+        # variant.
+        lines = [
+            f"launcher interpreter: {interpreter}",
+            f"target mirrored: {self._mirrored(self.target)}",
+            f"relaunch marker present: {os.path.exists(self.marker)}",
+        ]
+        try:
+            tasklist = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq cmd.exe"],
+                capture_output=True, text=True, timeout=10)
+            lines.append(f"tasklist cmd.exe (rc={tasklist.returncode}):\n"
+                        f"{tasklist.stdout}{tasklist.stderr}")
+        except Exception as exc:
+            lines.append(f"tasklist failed: {exc}")
+        lines.append(f"launcher stdout/stderr: {launcher_output!r}"
+                    if launcher_output else "launcher stdout/stderr: (empty)")
+        lines.append(f"launcher crash traceback: {error_output}" if error_output
+                    else "launcher crash traceback: (none -- the launcher's "
+                        "own try/except never fired)")
+        return "\n".join(lines)
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows launch reproduction")
+class WindowsLaunchReproduction(_SwapScriptLauncher, unittest.TestCase):
+    """
+    The acceptance case: G#35/GH#63's repro/red-green criterion. Must fail
+    on today's `_quit_for_update` and pass once its Windows branch is fixed.
+
+    No @needs_display: this exercises subprocess/write_swap_script, not Tk,
+    and Windows always has a window server in CI regardless of DISPLAY.
+    """
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp(prefix="afk-repro-")
+        self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
+        (self.staged, self.target, self.relaunch,
+         self.marker) = self._fixture_in(self.workdir)
+
+    def tearDown(self):
+        self._kill_stragglers()
+
+    def test_production_launch_replaces_the_install_and_relaunches(self):
+        # _quit_for_update's exact command, creationflags, and stdio (none
+        # at all -- see _LAUNCHER's stdio_mode "none" branch), the launcher
+        # exiting immediately. No other kwargs: this must be byte-identical
+        # to afk_clicker.py:2982-2983, or a captured-stdio artefact could
+        # turn this green on unfixed code (see _LAUNCHER's "captured" comment).
+        cfg = {"staged": self.staged, "target": self.target,
+               "relaunch": self.relaunch, "cmd_log": None,
+               "creationflags": self.PRODUCTION_CREATIONFLAGS,
+               "stdio_mode": "none", "keep_alive_seconds": 0}
+        proc, interpreter, launcher_output, error_output = self._spawn_launcher(
+            cfg, self.workdir, timeout=60)
+        self.assertEqual(
+            proc.returncode, 0,
+            f"the launcher subprocess ({interpreter}) exited "
+            f"{proc.returncode} before it could even reach Popen(): "
+            f"{launcher_output!r}")
+        self.assertEqual(
+            error_output, "",
+            f"the launcher ({interpreter}) raised inside its own "
+            f"try/except: {error_output}")
+
+        ok = self._poll_until(
+            lambda: self._mirrored(self.target) and os.path.exists(self.marker),
+            timeout=45)
+        self.assertTrue(
+            ok, self._diagnostics(interpreter, launcher_output, error_output))
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows launch reproduction")
+class WindowsFixSuspectDiagnostics(_SwapScriptLauncher, unittest.TestCase):
+    """
+    Not the acceptance case above -- these isolate which of the three named
+    suspects (docs/spec.md "Proposed approach" #1) is the real one, and only
+    ever report their outcome. They must never fail the suite, on either
+    today's code or the fixed code: their job is to be read by a human from
+    the CI log, not to gate the build a second time.
+    """
+
+    def tearDown(self):
+        self._kill_stragglers()
+
+    def test_diagnostic_variants(self):
+        variants = [
+            # Suspect 1/2: a real (hidden) console instead of none at all,
+            # so cmd/tasklist/timeout/robocopy never need to allocate their
+            # own -- the standard shape for "run a console command with no
+            # visible window".
+            ("create_no_window+devnull_stdio", self.CREATE_NO_WINDOW, "devnull"),
+            # What the acceptance case cannot carry (see its own comment):
+            # production's exact flags, but with cmd.exe's stdout/stderr
+            # captured to a file, to see what -- if anything -- tasklist/
+            # timeout/robocopy actually print.
+            ("production_flags+captured_stdio", self.PRODUCTION_CREATIONFLAGS, "captured"),
+            # Suspect 3: production's exact flags and stdio, but the
+            # launcher (this test's stand-in for the app process) stays
+            # alive for a few seconds instead of exiting immediately after
+            # Popen().
+            ("production_flags+parent_stays_alive", self.PRODUCTION_CREATIONFLAGS, "none"),
+        ]
+        for name, flags, stdio_mode in variants:
+            keep_alive = 5 if name == "production_flags+parent_stays_alive" else 0
+            with self.subTest(variant=name):
+                workdir = tempfile.mkdtemp(prefix="afk-repro-diag-")
+                self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+                staged, target, relaunch, marker = self._fixture_in(workdir)
+                cmd_log = (os.path.join(workdir, "cmd-output.log")
+                          if stdio_mode == "captured" else None)
+                cfg = {"staged": staged, "target": target, "relaunch": relaunch,
+                       "creationflags": flags, "stdio_mode": stdio_mode,
+                       "cmd_log": cmd_log, "keep_alive_seconds": keep_alive}
+                proc, interpreter, launcher_output, error_output = self._spawn_launcher(
+                    cfg, workdir, timeout=60 + keep_alive)
+                ok = self._poll_until(
+                    lambda: self._mirrored(target) and os.path.exists(marker),
+                    timeout=45)
+                cmd_output = (self._read_or(cmd_log) if cmd_log
+                             else "(not captured in this variant)")
+                # print(), not assert: informational only, see class docstring.
+                print(f"[diagnostic:{name}] interpreter={interpreter} "
+                      f"succeeded={ok} launcher_rc={proc.returncode} "
+                      f"launcher_output={launcher_output!r} "
+                      f"launcher_error={error_output!r} "
+                      f"cmd_output={cmd_output!r}")
 
 
 @needs_display
