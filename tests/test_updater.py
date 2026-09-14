@@ -1,4 +1,5 @@
 """Version resolution, asset selection, staging and the swap script."""
+import glob
 import json
 import os
 import re
@@ -793,6 +794,13 @@ except Exception:
         # shutil.rmtree cleanup and confuse whatever test runs next. Every
         # workdir either class creates shares the "afk-repro" prefix, so
         # matching on it (rather than on one specific workdir) catches both.
+        #
+        # Round 4: this also already covers a straggling relaunch.exe (the
+        # copied python.exe stuck at an interactive prompt if PYTHONSTARTUP
+        # somehow never ran) without needing its own image-name match --
+        # `start "" "<full path>"` puts that full path, which always lives
+        # under this test's own "afk-repro*" workdir, straight into the
+        # resulting process's own CommandLine.
         try:
             subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
@@ -806,17 +814,31 @@ except Exception:
 
     def _fixture_in(self, workdir):
         """
-        staged/target/relaunch laid out the way download_and_stage and
-        install_root hand them to write_swap_script in production. `target`
-        and `relaunch` each sit under a directory with a space *and* a
-        realistic set of cmd-meaningful characters -- "(", ")", "&", "^",
-        "!" (the shape of "C:\\Program Files (x86)\\..." and "Tom & Jerry"
-        -- Round 3, PR #65 review: CI so far only proved a plain space
-        survives the existing `start "" "{relaunch}"` quoting). `%` is
+        staged/target laid out the way download_and_stage and install_root
+        hand them to write_swap_script in production. `target` sits under a
+        directory with a space *and* a realistic set of cmd-meaningful
+        characters -- "(", ")", "&", "^", "!" (the shape of "C:\\Program
+        Files (x86)\\..." and "Tom & Jerry" -- Round 3, PR #65 review: CI so
+        far only proved a plain space survives the existing quoting). `%` is
         deliberately left out: it already breaks the pre-existing
         robocopy/start lines (cmd expands `%...%` sequences inside the
         interpolated script text) -- a limitation that predates this fix,
         documented but not solved in docs/implementation.md.
+
+        Round 4 (PR #65 review, round 3 CI): does *not* build `relaunch`
+        any more -- see _build_relaunch_exe/_build_relaunch_cmd below.
+        Round 3's CI run mirrored the target fine (`copy exit code 3`,
+        robocopy's own "files copied + extras purged" code) but never wrote
+        the relaunch marker, with two `cmd.exe` left over. Hypothesis: a
+        `.cmd` needs `cmd.exe` to run it at all, and `start "" "<path>"`
+        launching a `.cmd`/`.bat` does so via a *nested* `cmd /c`, whose own
+        quote-stripping rule (strip the outer quotes when the string
+        contains `&()^` between them) can break the path at the `&` --
+        production's actual relaunch target is `sys.executable`, a real
+        `.exe`, which `start` launches directly via CreateProcess with no
+        nested shell to re-parse anything. Returns (staged, target, marker)
+        -- callers build whichever relaunch target they need against the
+        same marker path.
         """
         staged = os.path.join(workdir, "staged")
         os.makedirs(os.path.join(staged, "sub"))
@@ -830,25 +852,91 @@ except Exception:
         with open(os.path.join(target, "old.txt"), "w", encoding="utf-8") as fh:
             fh.write("old")
 
-        relaunch_dir = os.path.join(workdir, "relaunch (x86) & co^!")
-        os.makedirs(relaunch_dir)
         marker = os.path.join(workdir, "relaunched.marker")
+        return staged, target, marker
+
+    def _build_relaunch_exe(self, workdir, dir_name="relaunch (x86) & co^!"):
+        """
+        A real, standalone .exe under a directory with the same
+        cmd-meaningful characters as `target` by default -- standing in for
+        production's actual relaunch target (`sys.executable`), which is
+        always a real .exe, never a `.cmd`. `start` launches an .exe
+        directly via CreateProcess; there is no nested cmd.exe to re-parse
+        the path, which is exactly the axis Round 3's failure and the
+        hypothesis above are about. dir_name is overridable so
+        WindowsFixSuspectDiagnostics can run this exact same probe from a
+        plain directory ("relaunch plain") -- isolating whether a failure
+        is the probe mechanism itself or specifically the special
+        characters (see that diagnostic's own docstring for the
+        interpretation table).
+
+        Built by copying the *running* interpreter's python.exe plus the
+        DLLs it actually needs (globbed, not a fixed list -- the DLL name
+        changes with the Python/VC-runtime version:
+        `python3.dll`/`python3XY.dll`/`vcruntime140[_1].dll`) out of
+        sys.base_prefix, rather than copying the whole install tree --
+        smaller, and this test already has to clean up its own temp dir.
+        The copy alone cannot find the standard library relative to its own
+        (temp) location, so the caller must also set PYTHONHOME to the real
+        sys.base_prefix in whatever environment it hands down the process
+        tree (see WindowsLaunchReproduction's extra_env) -- PYTHONHOME
+        overrides Python's normal "relative to the executable" prefix
+        search, so the copy still finds Lib/DLLs at the real install even
+        though the .exe file itself is a copy sitting somewhere else.
+        """
+        relaunch_dir = os.path.join(workdir, dir_name)
+        os.makedirs(relaunch_dir, exist_ok=True)
+        base = sys.base_prefix
+        relaunch = os.path.join(relaunch_dir, "relaunch.exe")
+        shutil.copy2(os.path.join(base, "python.exe"), relaunch)
+        for pattern in ("python3.dll", "python3[0-9][0-9].dll", "vcruntime140*.dll"):
+            for dll in glob.glob(os.path.join(base, pattern)):
+                shutil.copy2(dll, os.path.join(relaunch_dir, os.path.basename(dll)))
+        return relaunch
+
+    def _startup_script_writing(self, workdir, marker):
+        """
+        A PYTHONSTARTUP script: with no arguments, `start` gives the copied
+        python.exe a new console, so it has no script to run and falls into
+        the interactive prompt -- which is exactly when PYTHONSTARTUP gets
+        read and executed, before the first prompt is shown. Writes the
+        relaunch marker, then exits immediately rather than sitting at a
+        prompt forever waiting for stdin that will never come.
+        """
+        path = os.path.join(workdir, "relaunch_startup.py")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("import os\n"
+                     f"with open({marker!r}, 'w', encoding='utf-8') as fh:\n"
+                     "    fh.write('relaunched')\n"
+                     "os._exit(0)\n")
+        return path
+
+    def _build_relaunch_cmd(self, workdir, marker):
+        """
+        The Round 3 fixture, kept only for WindowsFixSuspectDiagnostics'
+        informational variant -- this is the shape that failed, so keeping
+        it lets CI's log confirm (or rule out) the hypothesis above by
+        showing whether *this* still fails while the .exe (production's
+        actual shape) succeeds.
+        """
+        relaunch_dir = os.path.join(workdir, "relaunch (x86) & co^!")
+        os.makedirs(relaunch_dir, exist_ok=True)
         relaunch = os.path.join(relaunch_dir, "relaunch.cmd")
         with open(relaunch, "w", encoding="utf-8") as fh:
             fh.write(f'@echo off\necho relaunched> "{marker}"\n')
-        return staged, target, relaunch, marker
+        return relaunch
 
     def _log_path_in(self, workdir):
         """
         A settings directory carrying the same category of cmd-meaningful
-        characters as _fixture_in's target/relaunch dirs (Round 3, PR #65
-        review) -- nothing stops a real Windows username from containing
-        them, and the log path is interpolated into the script the same
-        way target/relaunch are.
+        characters as `target`/`relaunch` (Round 3, PR #65 review) --
+        nothing stops a real Windows username from containing them, and the
+        log path is interpolated into the script the same way
+        target/relaunch are.
         """
         return os.path.join(workdir, "settings (x86) & co^!", "update.log")
 
-    def _spawn_launcher(self, cfg, workdir, timeout):
+    def _spawn_launcher(self, cfg, workdir, timeout, extra_env=None):
         """
         Returns (completed_process, interpreter, launcher_output, error_output).
 
@@ -860,11 +948,20 @@ except Exception:
         handles production never gives it. The real app is a windowed
         PyInstaller exe with no console and no std pipes at all, so this
         starves stdin and redirects stdout/stderr to a real file instead.
+
+        extra_env (Round 4): merged in on top of a copy of this process's
+        own environment, so it flows down to every process this launcher's
+        Popen chain spawns -- the launcher itself, then cmd.exe (which
+        inherits it since launch_swap_script's own Popen call passes no
+        env=), then whatever `start "" "{relaunch}"` runs (same
+        inheritance). Used to hand a relaunch .exe built by
+        _build_relaunch_exe its PYTHONHOME/PYTHONSTARTUP.
         """
         interpreter = self._gui_interpreter()
         launcher_log = os.path.join(workdir, "launcher-output.log")
         error_log = os.path.join(workdir, "launcher-error.log")
         env = dict(os.environ)
+        env.update(extra_env or {})
         env["AFK_TEST_ROOT"] = ROOT
         env["AFK_TEST_ERROR_LOG"] = error_log
         env["AFK_TEST_CFG"] = json.dumps(cfg)
@@ -933,8 +1030,15 @@ class WindowsLaunchReproduction(_SwapScriptLauncher, unittest.TestCase):
     def setUp(self):
         self.workdir = tempfile.mkdtemp(prefix="afk-repro-")
         self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
-        (self.staged, self.target, self.relaunch,
-         self.marker) = self._fixture_in(self.workdir)
+        self.staged, self.target, self.marker = self._fixture_in(self.workdir)
+        # Round 4: a real .exe, the same shape as production's actual
+        # relaunch target (sys.executable) -- see _build_relaunch_exe's
+        # docstring for why Round 3's .cmd fixture was not faithful to
+        # production here.
+        self.relaunch = self._build_relaunch_exe(self.workdir)
+        startup_script = self._startup_script_writing(self.workdir, self.marker)
+        self.relaunch_env = {"PYTHONHOME": sys.base_prefix,
+                             "PYTHONSTARTUP": startup_script}
         self.log_path = self._log_path_in(self.workdir)
 
     def tearDown(self):
@@ -953,7 +1057,7 @@ class WindowsLaunchReproduction(_SwapScriptLauncher, unittest.TestCase):
                "creationflags": None, "stdio_mode": "production",
                "keep_alive_seconds": 0}
         proc, interpreter, launcher_output, error_output = self._spawn_launcher(
-            cfg, self.workdir, timeout=60)
+            cfg, self.workdir, timeout=60, extra_env=self.relaunch_env)
         self.assertEqual(
             proc.returncode, 0,
             f"the launcher subprocess ({interpreter}) exited "
@@ -999,7 +1103,8 @@ class WindowsLaunchReproduction(_SwapScriptLauncher, unittest.TestCase):
                "creationflags": None, "stdio_mode": "production",
                "keep_alive_seconds": keep_alive_seconds}
         proc, interpreter, launcher_output, error_output = self._spawn_launcher(
-            cfg, self.workdir, timeout=60 + keep_alive_seconds)
+            cfg, self.workdir, timeout=60 + keep_alive_seconds,
+            extra_env=self.relaunch_env)
         self.assertEqual(proc.returncode, 0, launcher_output)
         self.assertEqual(error_output, "", error_output)
 
@@ -1055,7 +1160,8 @@ class WindowsFixSuspectDiagnostics(_SwapScriptLauncher, unittest.TestCase):
         # step (tasklist/find/ping/robocopy) is the one actually stuck.
         workdir = tempfile.mkdtemp(prefix="afk-repro-diag-")
         self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
-        staged, target, relaunch, marker = self._fixture_in(workdir)
+        staged, target, marker = self._fixture_in(workdir)
+        relaunch = self._build_relaunch_cmd(workdir, marker)
         log_path = self._log_path_in(workdir)
         cfg = {"staged": staged, "target": target, "relaunch": relaunch,
                "log_path": log_path, "creationflags": self.OLD_CREATIONFLAGS,
@@ -1070,6 +1176,99 @@ class WindowsFixSuspectDiagnostics(_SwapScriptLauncher, unittest.TestCase):
         # this must never fail the suite on either the old or the fixed code.
         print(f"[diagnostic:old_creationflags+no_stdio] interpreter={interpreter} "
               f"succeeded={ok} launcher_rc={proc.returncode} "
+              f"launcher_output={launcher_output!r} "
+              f"launcher_error={error_output!r}\nupdate.log:\n{log}")
+
+    def test_cmd_relaunch_in_special_char_dir_for_the_record(self):
+        """
+        Round 4, PR #65 review: informational only, never asserts. Round 3's
+        actual CI failure was a `.cmd` relaunch target sitting in a
+        `&()^!`-bearing directory -- mirrored fine, `done` written, but no
+        relaunch marker and two leftover cmd.exe. The acceptance case above
+        no longer uses a `.cmd` relaunch at all (see _build_relaunch_exe's
+        docstring for why), so this keeps that exact shape under test, under
+        the *fixed* launch flags (production shape, not the old
+        creationflags above) -- direct evidence for or against the
+        hypothesis that `start "" "<path.cmd>"` needs a nested `cmd /c` to
+        run a batch file, and that nested shell's own quote-stripping (strip
+        the outer quotes when the string contains `&()^` between them)
+        breaks on the `&`.
+        """
+        workdir = tempfile.mkdtemp(prefix="afk-repro-diag-")
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        staged, target, marker = self._fixture_in(workdir)
+        relaunch = self._build_relaunch_cmd(workdir, marker)
+        log_path = self._log_path_in(workdir)
+        cfg = {"staged": staged, "target": target, "relaunch": relaunch,
+               "log_path": log_path, "creationflags": None,
+               "stdio_mode": "production", "keep_alive_seconds": 0}
+        proc, interpreter, launcher_output, error_output = self._spawn_launcher(
+            cfg, workdir, timeout=60)
+        ok = self._poll_until(
+            lambda: self._mirrored(target) and os.path.exists(marker),
+            timeout=45)
+        log = self._read_or(log_path, "(no log written)")
+        # print(), not assert: informational only, see class docstring.
+        print(f"[diagnostic:cmd_relaunch_in_special_char_dir] "
+              f"interpreter={interpreter} succeeded={ok} "
+              f"launcher_rc={proc.returncode} "
+              f"launcher_output={launcher_output!r} "
+              f"launcher_error={error_output!r}\nupdate.log:\n{log}")
+
+    def test_exe_relaunch_probe_from_a_plain_directory_for_the_record(self):
+        """
+        Coordinator addition ahead of the Round 4 push: runs the exact same
+        .exe relaunch probe the acceptance case now uses (copied python.exe
+        + DLLs, PYTHONHOME/PYTHONSTARTUP -- see _build_relaunch_exe) but
+        from a directory with no special characters at all ("relaunch
+        plain"), while keeping `staged`/`target` the same special-char
+        shape _fixture_in already builds (robocopy already proven fine
+        against that in Round 3 -- `copy exit code 3`). This isolates the
+        one variable the acceptance case cannot isolate by itself: whether
+        a failure there is about the .exe probe mechanism, or specifically
+        about special characters in the *relaunch* path.
+
+        Interpretation, recorded in docs/implementation.md's Round 4
+        section once the next CI run reports both results:
+          - this succeeds AND the acceptance case (special-char relaunch
+            dir) also succeeds -> production handles both; Round 3's
+            actual failure was specific to the old .cmd fixture, not to
+            special characters as such.
+          - this succeeds but the acceptance case fails -> a real
+            production bug with special characters in the relaunch path
+            specifically.
+          - this itself fails -> the .exe probe mechanism (the copy +
+            PYTHONHOME/PYTHONSTARTUP chain) is broken, and the acceptance
+            case's result is not meaningful until the probe itself is
+            fixed.
+
+        In its own class (WindowsFixSuspectDiagnostics), not
+        WindowsLaunchReproduction, specifically so it still runs and
+        reports even when the acceptance case fails or errors -- unittest
+        runs every test method in a module independently regardless of
+        another class's outcome, so this needs no special wiring to
+        guarantee that.
+        """
+        workdir = tempfile.mkdtemp(prefix="afk-repro-diag-")
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        staged, target, marker = self._fixture_in(workdir)
+        relaunch = self._build_relaunch_exe(workdir, dir_name="relaunch plain")
+        startup_script = self._startup_script_writing(workdir, marker)
+        extra_env = {"PYTHONHOME": sys.base_prefix, "PYTHONSTARTUP": startup_script}
+        log_path = self._log_path_in(workdir)
+        cfg = {"staged": staged, "target": target, "relaunch": relaunch,
+               "log_path": log_path, "creationflags": None,
+               "stdio_mode": "production", "keep_alive_seconds": 0}
+        proc, interpreter, launcher_output, error_output = self._spawn_launcher(
+            cfg, workdir, timeout=60, extra_env=extra_env)
+        ok = self._poll_until(
+            lambda: self._mirrored(target) and os.path.exists(marker),
+            timeout=45)
+        log = self._read_or(log_path, "(no log written)")
+        # print(), not assert: informational only, see class docstring.
+        print(f"[diagnostic:exe_relaunch_probe_from_plain_dir] "
+              f"interpreter={interpreter} succeeded={ok} "
+              f"launcher_rc={proc.returncode} "
               f"launcher_output={launcher_output!r} "
               f"launcher_error={error_output!r}\nupdate.log:\n{log}")
 

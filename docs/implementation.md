@@ -571,6 +571,146 @@ a follow-up fix to `write_swap_script`'s interpolation, not to the test.
   only proves the change didn't break Python-level path handling, not the
   `.cmd` quoting itself — that's CI's job, per "What only CI can confirm").
 
+## Round 4 (independent PR review, round 3 CI evidence, PR #65 head 2551f9a)
+
+### Round 3 CI evidence (windows-latest, run 34904637357)
+Ubuntu and macOS green. `windows-latest` failed both `WindowsLaunchReproduction`
+tests with the same signature:
+- `target mirrored: True`; `relaunch marker present: False`; two `cmd.exe`
+  still alive after the timeout.
+- Acceptance case's `update.log`: `start pid=5708 staged="...\staged"
+  target="...\target (x86) & co^!" relaunch="...\relaunch (x86) &
+  co^!\relaunch.cmd"` / `wait finished after 0 iterations` / `copy exit code
+  3` / `relaunch attempted` / `done`. Pacing test: 5 iterations in ~5.4s,
+  same `copy exit code 3`, same `done`.
+- Reading that log: timestamps work (Round 3's own fix held), the
+  special-char `start`/echo line survived intact (no corruption visible in
+  the log itself), `robocopy` handled the path fine (exit code 3 = files
+  copied + extras purged, a normal success code, not a failure one), and
+  `done` was written (since `%RC% LSS 8` was true). The *only* step that
+  didn't happen was the relaunch actually producing its marker, alongside
+  two leftover `cmd.exe`.
+
+### Hypothesis (not confirmed by reasoning alone — CI is what confirms it)
+`start "" "<dir>\relaunch.cmd"` cannot run a `.cmd`/`.bat` file by itself
+(CreateProcess needs an actual executable); Windows resolves this by having
+`start` hand it to a nested `cmd /c "<path>"`. That nested `cmd`'s own
+quote-stripping rule — strip the outer quotes on a quoted string if it
+contains `&`, `(`, `)`, `^` between the quotes — can then split the path at
+the `&`, corrupting it before the batch file ever runs; a stray `cmd.exe`
+window left partway through matches what a broken `/C` parse looks like.
+Production's actual relaunch target is `sys.executable`, a real `.exe`, and
+`start` launches a `.exe` directly via CreateProcess with **no** nested
+shell to re-parse anything — so this failure mode is specific to the test
+fixture's choice of a `.cmd` stand-in, not necessarily to production.
+**Explicitly not applied to production code on this hypothesis alone** —
+the coordinator's instruction was to prove it on CI first.
+
+### Fixture fix
+- **`_SwapScriptLauncher._fixture_in`** no longer builds `relaunch` at all
+  — it now returns `(staged, target, marker)`, since the acceptance case and
+  the diagnostics need genuinely different relaunch targets, not just a
+  different suffix.
+- **`_build_relaunch_exe(workdir)`** (new): copies the *running*
+  interpreter's `python.exe` from `sys.base_prefix`, plus whatever DLLs it
+  actually needs (globbed — `python3.dll`, `python3[0-9][0-9].dll`,
+  `vcruntime140*.dll` — the exact name varies by Python/VC-runtime version,
+  so a fixed list would be a guess) into the same special-char directory
+  shape (`relaunch (x86) & co^!`). A bare copy of `python.exe` cannot find
+  its own standard library relative to that temp location, so it also needs
+  `PYTHONHOME` pointed at the real install -- see `extra_env` below.
+- **`extra_env` on `_spawn_launcher`** (new parameter): sets
+  `PYTHONHOME=sys.base_prefix` on the environment handed to the launcher
+  subprocess, which flows down unchanged through `launch_swap_script`'s
+  `Popen` (no `env=` override there) and `start`'s own child, since none of
+  that chain replaces the environment at any hop. `PYTHONHOME` overrides
+  Python's normal "stdlib relative to the executable" search, so the copy
+  still finds `Lib`/`DLLs` at the real install even though the `.exe` file
+  itself lives somewhere else.
+- **`_startup_script_writing(workdir, marker)`** (new): a `PYTHONSTARTUP`
+  script (also carried via `extra_env`). `start "" "<exe>"` with no
+  arguments gives the copied `python.exe` a new console and no script to
+  run, so it falls into the interactive prompt — exactly when
+  `PYTHONSTARTUP` is read, before the first prompt — where it writes the
+  marker and calls `os._exit(0)` immediately rather than sitting at a
+  prompt forever.
+- **`_build_relaunch_cmd(workdir, marker)`** (new, informational only):
+  the exact Round 3 `.cmd` shape, kept for
+  `WindowsFixSuspectDiagnostics.test_cmd_relaunch_in_special_char_dir_for_
+  the_record` — a new, clearly-named, print-only diagnostic that runs that
+  same `.cmd` fixture through the *fixed* launch flags (`stdio_mode:
+  "production"`, not the old creationflags), so CI's log records directly
+  whether the `.cmd`-in-a-special-char-dir shape still fails even once the
+  launch flags are right — the actual evidence for or against the
+  hypothesis above, separate from whatever the acceptance case's new `.exe`
+  fixture reports.
+- `WindowsLaunchReproduction.setUp` and both of its test methods
+  (`test_production_launch_replaces_the_install_and_relaunches`,
+  `test_wait_loop_paces_polls_instead_of_busy_spinning`) now build the
+  `.exe` relaunch and pass `extra_env=self.relaunch_env` to
+  `_spawn_launcher`.
+- `WindowsFixSuspectDiagnostics.test_old_creationflags_still_stall_for_the_
+  record` keeps using `_build_relaunch_cmd` (it's testing the old
+  creationflags stalling in the wait loop, before the relaunch step is ever
+  reached — the choice of relaunch target doesn't matter for what that test
+  is evidence of).
+- `_kill_stragglers` needed no new image-name match: `start "" "<full
+  path>"` always puts that full path — which lives under this test's own
+  `afk-repro*` workdir — into the resulting process's own `CommandLine`, so
+  the existing `*afk-repro*` match already covers a stuck `relaunch.exe`
+  the same way it already covered stray `cmd.exe`. Documented as a comment
+  rather than added as a second, redundant match.
+- **`WindowsFixSuspectDiagnostics.test_exe_relaunch_probe_from_a_plain_
+  directory_for_the_record`** (new, coordinator addition ahead of the
+  push, informational only): the exact same `.exe` probe as the acceptance
+  case — `_build_relaunch_exe` + `_startup_script_writing` +
+  `PYTHONHOME`/`PYTHONSTARTUP` — but from a directory with no special
+  characters at all (`relaunch plain`), while `staged`/`target` keep the
+  same special-char shape `_fixture_in` already builds. This isolates the
+  one thing the acceptance case alone cannot: whether a Windows CI failure
+  of the `.exe` probe is the probe mechanism itself, or specifically the
+  special characters in the *relaunch* path. **Interpretation, to fill in
+  once the next CI run reports both results:**
+  | plain-dir `.exe` probe | special-char `.exe` probe (acceptance case) | Meaning |
+  |---|---|---|
+  | succeeds | succeeds | Production handles both; Round 3's actual failure was specific to the old `.cmd` fixture, not to special characters as such. |
+  | succeeds | fails | A real production bug with special characters in the relaunch path specifically. |
+  | fails | (either) | The `.exe` probe mechanism itself (copy + `PYTHONHOME`/`PYTHONSTARTUP`) is broken; the acceptance case's result is not meaningful until the probe is fixed. |
+  **[Outcome pending the next CI run — coordinator to report back and this
+  table to be filled in with the actual result.]**
+
+### What this round could not verify locally
+This box is Linux; `sys.base_prefix` here has no `python.exe`, `python3.dll`,
+or `vcruntime140*.dll` to copy, so `_build_relaunch_exe`,
+`_startup_script_writing`, and the `PYTHONHOME`/`PYTHONSTARTUP` chain have
+only been checked by reading (CPython's own documented behaviour for both
+env vars, and the fact `ci.yml` runs Windows tests against a plain
+`actions/setup-python` install with no virtualenv, so `sys.base_prefix ==
+sys.prefix` there and setting `PYTHONHOME` to it cannot itself break the
+launcher's or the copy's own initialisation) — never executed. Whether the
+copied `python.exe` actually reaches an interactive prompt and reads
+`PYTHONSTARTUP` under `start`'s new console, and whether the hypothesis
+above is actually what Round 3 hit (as opposed to something else about the
+`.cmd` fixture), are both open until the next `windows-latest` CI run.
+**[Room for the next CI outcome — coordinator to report back.]**
+
+### Verification (Round 4, this session)
+- `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean (no
+  production code changed this round — this is a test-fixture-only round,
+  per the coordinator's instruction not to change production on the
+  hypothesis alone).
+- Full suite: `DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests
+  -t .` → `Ran 314 tests ... OK (skipped=10)` (up from Round 3's 312/8 — two
+  new informational diagnostic tests this round, both Windows-only:
+  `test_cmd_relaunch_in_special_char_dir_for_the_record` and, added just
+  before the push per the coordinator's follow-up,
+  `test_exe_relaunch_probe_from_a_plain_directory_for_the_record`).
+- No sabotage-verification this round: every change is inside the
+  Windows-only fixture/test classes, which cannot execute on this Linux box
+  at all (the classes are skipped, not run-with-a-broken-product) — the
+  same limitation already recorded for the rest of the Windows-only test
+  code in "What only CI can confirm" above.
+
 ## Verification (this session)
 - `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean.
 - `DISPLAY=:99 <venv>/bin/python -m unittest tests.test_updater -v` →
