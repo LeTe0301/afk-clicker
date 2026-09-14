@@ -843,12 +843,22 @@ def download_and_stage(asset, checksums, on_progress=None):
     return staged
 
 
-def write_swap_script(staged, target, relaunch):
+def write_swap_script(staged, target, relaunch, log_path):
     """
     A tiny script that waits for this process to exit, replaces the install
     directory and starts the new build. It has to be an external process: a
     program cannot overwrite its own running executable on Windows, and on any
     platform deleting the code you are executing is asking for trouble.
+
+    Also writes a step log to log_path, truncated fresh on every run (G#35/
+    GH#63's "shipped update log" goal): a timestamped line for the wait
+    finishing, the copy step's exit code, the relaunch attempt, and a final
+    "done" line so a future launch of the app can tell an update died
+    part-way (no "done") from one that finished. log_path is a required
+    argument rather than something this function computes, so a caller
+    always controls where it lands -- the real caller uses the settings
+    directory (stable, findable at next launch); tests use a temp path so
+    they never touch the real one. Its directory is created if missing.
     """
     pid = os.getpid()
     # Two levels up from the staged tree is the temp working directory that
@@ -857,32 +867,94 @@ def write_swap_script(staged, target, relaunch):
     workdir = os.path.dirname(os.path.dirname(os.path.abspath(staged)))
     if not workdir or os.path.dirname(workdir) == workdir or not os.access(workdir, os.W_OK):
         workdir = tempfile.mkdtemp(prefix="clickwork-update-")
+    log_dir = os.path.dirname(os.path.abspath(log_path))
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
     if sys.platform == "win32":
         path = os.path.join(workdir, "apply-update.cmd")
+        # `timeout /t 1 /nobreak` refuses redirected stdin ("ERROR: Input
+        # redirection is not supported") and exits at once when the process
+        # tree has no real console (see launch_swap_script) -- with no
+        # sleep left in the loop that turns the wait into a tight busy-loop
+        # of tasklist calls. `ping -n 2 127.0.0.1 >nul` is the conventional
+        # console-free ~1s delay and needs nothing from stdin.
         script = f'''@echo off
+set "LOG={log_path}"
+> "%LOG%" echo start pid={pid} staged="{staged}" target="{target}" relaunch="{relaunch}"
+set COUNT=0
 :wait
 tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
 if not errorlevel 1 (
-  timeout /t 1 /nobreak >nul
+  set /a COUNT+=1
+  ping -n 2 127.0.0.1 >nul
   goto wait
 )
+>> "%LOG%" echo wait finished after %COUNT% iterations
 robocopy "{staged}" "{target}" /MIR /NFL /NDL /NJH /NJS /NC /NS >nul
+set RC=%ERRORLEVEL%
+>> "%LOG%" echo copy exit code %RC%
 start "" "{relaunch}"
+>> "%LOG%" echo relaunch attempted
+if %RC% LSS 8 (
+  >> "%LOG%" echo done
+)
 '''
     else:
         path = os.path.join(workdir, "apply-update.sh")
         script = f'''#!/bin/sh
-while kill -0 {pid} 2>/dev/null; do sleep 1; done
+LOG="{log_path}"
+: > "$LOG"
+echo "start pid={pid} staged={staged} target={target} relaunch={relaunch}" >> "$LOG"
+COUNT=0
+while kill -0 {pid} 2>/dev/null; do
+  COUNT=$((COUNT + 1))
+  sleep 1
+done
+echo "wait finished after $COUNT iterations" >> "$LOG"
 rm -rf "{target}."*  2>/dev/null
 find "{target}" -mindepth 1 -delete 2>/dev/null
 cp -a "{staged}/." "{target}/"
+RC=$?
+echo "copy exit code $RC" >> "$LOG"
 "{relaunch}" &
+echo "relaunch attempted" >> "$LOG"
+if [ "$RC" -eq 0 ]; then
+  echo "done" >> "$LOG"
+fi
 '''
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(script)
     if sys.platform != "win32":
         os.chmod(path, 0o755)
     return path
+
+
+def launch_swap_script(script):
+    """
+    Launches the swap script written by write_swap_script so it survives
+    this process exiting right after -- write_swap_script's own wait loop
+    depends on that actually happening. Extracted out of _quit_for_update so
+    the Windows acceptance test (tests/test_updater.py) calls this exact
+    function instead of a hand-copied mirror that could silently drift from
+    what production actually runs.
+
+    G#35/GH#63: the previous flags gave cmd.exe no console at all
+    (DETACHED_PROCESS), but cmd.exe runs tasklist/find/ping/robocopy --
+    console-subsystem programs that each need *some* console. With none to
+    inherit and none to allocate (DETACHED_PROCESS forbids that too), the
+    tree stalled rather than completing the update. CREATE_NO_WINDOW instead
+    gives the whole tree a real, hidden console to share -- no visible flash,
+    no console-starved child -- and explicit DEVNULL stdio means no handle is
+    left ambiguous.
+    """
+    if sys.platform == "win32":
+        subprocess.Popen(
+            ["cmd", "/c", script],
+            creationflags=0x08000000 | 0x00000200,  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+    else:
+        subprocess.Popen(["/bin/sh", script], start_new_session=True)
 
 
 # ── per-game settings, on disk ────────────────────────────────────────────
@@ -2965,7 +3037,8 @@ class AfkAutoclicker:
             if not os.access(target, os.W_OK):
                 self._ui(self._set_update_state, "Install folder is read-only", True, BAD)
                 return
-            script = write_swap_script(staged, target, sys.executable)
+            log_path = os.path.join(os.path.dirname(config_path()), "update.log")
+            script = write_swap_script(staged, target, sys.executable, log_path)
         except ChecksumError as exc:
             # Say what happened. "Update failed" for a digest mismatch reads
             # like a network problem and invites a retry.
@@ -2978,11 +3051,7 @@ class AfkAutoclicker:
 
     def _quit_for_update(self, script):
         self._set_update_state("Restarting…", enabled=False)
-        if sys.platform == "win32":
-            subprocess.Popen(["cmd", "/c", script],
-                             creationflags=0x00000008 | 0x00000200)  # DETACHED | NEW_GROUP
-        else:
-            subprocess.Popen(["/bin/sh", script], start_new_session=True)
+        launch_swap_script(script)
         self.on_close()
 
     def _set_update_state(self, text, enabled=True, colour=None):

@@ -1,6 +1,7 @@
 """Version resolution, asset selection, staging and the swap script."""
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -362,7 +363,8 @@ class SwapScript(unittest.TestCase):
         self.staged = os.path.join(workdir, "staged", "AFK Farm Clicker")
         os.makedirs(self.staged)
         self.target = tempfile.mkdtemp()
-        self.script = app.write_swap_script(self.staged, self.target, "/bin/true")
+        self.log_path = os.path.join(workdir, "update.log")
+        self.script = app.write_swap_script(self.staged, self.target, "/bin/true", self.log_path)
 
     def test_written_inside_the_working_directory_not_the_root(self):
         parent = os.path.dirname(os.path.abspath(self.script))
@@ -386,7 +388,8 @@ class SwapScript(unittest.TestCase):
         two_up = os.path.dirname(os.path.dirname(shallow))
         self.assertEqual(two_up, root, "constructed path must sit two below the root")
 
-        script = app.write_swap_script(shallow, self.target, "/bin/true")
+        log_path = os.path.join(tempfile.mkdtemp(), "update.log")
+        script = app.write_swap_script(shallow, self.target, "/bin/true", log_path)
         parent = os.path.dirname(os.path.abspath(script))
         self.assertNotEqual(parent, root,
                             f"swap script landed in the filesystem root: {script}")
@@ -460,6 +463,182 @@ class SwapScript(unittest.TestCase):
                           "the old installation is never cleared")
 
 
+@needs_display
+class SwapScriptWindowsCmdText(unittest.TestCase):
+    """
+    Static checks on the *text* of the generated apply-update.cmd, run on
+    whatever platform the suite executes on -- the Windows-only classes
+    below (WindowsLaunchReproduction/WindowsFixSuspectDiagnostics) can
+    actually run the .cmd for real, but only on windows-latest CI; this
+    class checks what the .cmd contains everywhere, the same way SwapScript
+    above already checks the .sh text on every platform.
+
+    Monkeypatches app.sys.platform and restores it in a cleanup, the same
+    style already used by tests/test_hotkey.py's InputPermission -- this
+    suite deliberately avoids unittest.mock (see tests/test_ui.py:2119-2120).
+    """
+
+    def setUp(self):
+        original_platform = app.sys.platform
+        app.sys.platform = "win32"
+        self.addCleanup(setattr, app.sys, "platform", original_platform)
+
+        workdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        self.staged = os.path.join(workdir, "staged", "AFK Farm Clicker")
+        os.makedirs(self.staged)
+        self.target = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.target, ignore_errors=True)
+        # A settings directory that does not exist yet -- write_swap_script
+        # must create it, the same as it will need to on a machine that has
+        # never shipped an update log before.
+        self.log_path = os.path.join(workdir, "settings", "update.log")
+        self.script = app.write_swap_script(self.staged, self.target,
+                                            "relaunch.exe", self.log_path)
+        with open(self.script, encoding="utf-8") as fh:
+            self.body = fh.read()
+
+    def test_written_as_a_cmd_file(self):
+        self.assertTrue(self.script.endswith(".cmd"), self.script)
+
+    def test_the_log_directory_is_created(self):
+        self.assertTrue(os.path.isdir(os.path.dirname(self.log_path)),
+                        "write_swap_script must create the log's directory")
+
+    def test_the_log_path_is_quoted(self):
+        # A settings path can contain spaces (a Windows username with a
+        # space is common -- "C:\\Users\\First Last\\AppData\\..."); `set
+        # "LOG=value"` is the form that survives that, `set LOG=value` is not.
+        self.assertIn(f'set "LOG={self.log_path}"', self.body)
+
+    def test_no_timeout_left_in_the_wait_loop(self):
+        # `timeout /t 1 /nobreak` refuses redirected stdin and exits at once
+        # with no real console to read from, turning the wait loop into a
+        # busy-loop of tasklist calls -- see write_swap_script's own comment.
+        self.assertNotIn("timeout", self.body.lower())
+        self.assertIn("ping -n 2 127.0.0.1", self.body,
+                      "the console-free ~1s delay must replace timeout")
+
+    def test_done_is_written_after_the_copy_exit_code(self):
+        copy_index = self.body.index("copy exit code")
+        done_index = self.body.index("echo done")
+        self.assertGreater(done_index, copy_index,
+                          "done must be logged after the copy step, not before it")
+
+    def test_relaunch_is_attempted_even_if_the_copy_fails(self):
+        # start "" "{relaunch}" must not sit inside the same conditional that
+        # guards the done line -- a failed mirror should still relaunch the
+        # old build rather than leave the user with nothing (see
+        # docs/implementation.md's "relaunch on failure" decision).
+        relaunch_index = self.body.index('start "" "relaunch.exe"')
+        done_guard_index = self.body.index("if %RC% LSS 8")
+        self.assertLess(relaunch_index, done_guard_index,
+                        "relaunch must not be gated behind the copy succeeding")
+
+
+@needs_display
+class SwapScriptLogLifecycle(unittest.TestCase):
+    """
+    Local (Linux), end-to-end exercise of the shipped update log
+    (docs/spec.md Goals, "Shipped update log") by actually running the
+    generated apply-update.sh against real temp directories.
+
+    write_swap_script always waits on os.getpid() of whichever process
+    calls it. Calling it directly from this test method would make the
+    generated script wait on the test runner's own still-alive pid and hang
+    until the subprocess timeout below. So, the same way the Windows launch
+    reproduction spawns a short-lived process to get a real pid that then
+    exits on its own, write_swap_script is called here from a short-lived
+    `python -c` subprocess -- by the time this test runs the script, that
+    pid has already exited and the wait loop ends at once.
+    """
+
+    def _write_script_in_subprocess(self, staged, target, relaunch, log_path):
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); "
+               "import afk_clicker as app; "
+               "print(app.write_swap_script(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]))")
+        result = subprocess.run(
+            [sys.executable, "-c", code, ROOT, staged, target, relaunch, log_path],
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def _run(self, script):
+        return subprocess.run(["/bin/sh", script], capture_output=True,
+                              text=True, timeout=10)
+
+    def _fixture(self, workdir, stage_missing=False):
+        staged = os.path.join(workdir, "staged")
+        if not stage_missing:
+            os.makedirs(staged)
+            with open(os.path.join(staged, "new.txt"), "w", encoding="utf-8") as fh:
+                fh.write("new")
+        target = os.path.join(workdir, "target")
+        os.makedirs(target)
+        with open(os.path.join(target, "old.txt"), "w", encoding="utf-8") as fh:
+            fh.write("old")
+        relaunch = os.path.join(workdir, "relaunch.sh")
+        marker = os.path.join(workdir, "relaunched.marker")
+        with open(relaunch, "w", encoding="utf-8") as fh:
+            fh.write(f'#!/bin/sh\necho relaunched > "{marker}"\n')
+        os.chmod(relaunch, 0o755)
+        return staged, target, relaunch, marker
+
+    def test_successful_update_ends_with_done_and_records_the_exit_code(self):
+        workdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        staged, target, relaunch, marker = self._fixture(workdir)
+        log_path = os.path.join(workdir, "update.log")
+
+        script = self._write_script_in_subprocess(staged, target, relaunch, log_path)
+        result = self._run(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.assertTrue(os.path.isfile(os.path.join(target, "new.txt")))
+        self.assertFalse(os.path.exists(os.path.join(target, "old.txt")))
+        self.assertTrue(os.path.exists(marker), "the relaunch step never ran")
+
+        log = open(log_path, encoding="utf-8").read()
+        self.assertIn("copy exit code 0", log)
+        lines = [line for line in log.splitlines() if line.strip()]
+        self.assertEqual(lines[-1].strip(), "done", log)
+
+    def test_a_failing_copy_records_a_nonzero_exit_code_and_never_writes_done(self):
+        workdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        # staged is deliberately never created, so `cp -a "{staged}/." ...`
+        # fails with a nonzero exit code.
+        staged, target, relaunch, marker = self._fixture(workdir, stage_missing=True)
+        log_path = os.path.join(workdir, "update.log")
+
+        script = self._write_script_in_subprocess(staged, target, relaunch, log_path)
+        self._run(script)
+
+        log = open(log_path, encoding="utf-8").read()
+        self.assertIn("copy exit code", log)
+        self.assertNotIn("copy exit code 0", log)
+        self.assertFalse(log.strip().endswith("done"), log)
+
+    def test_a_second_update_truncates_the_log_rather_than_appending(self):
+        workdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        staged, target, relaunch, marker = self._fixture(workdir)
+        log_path = os.path.join(workdir, "update.log")
+
+        script = self._write_script_in_subprocess(staged, target, relaunch, log_path)
+        self._run(script)
+        first_run_lines = open(log_path, encoding="utf-8").read().splitlines()
+
+        script = self._write_script_in_subprocess(staged, target, relaunch, log_path)
+        self._run(script)
+        second_run_lines = open(log_path, encoding="utf-8").read().splitlines()
+
+        self.assertEqual(len(second_run_lines), len(first_run_lines),
+                        "the log grew between runs -- looks appended, not truncated")
+        start_lines = [line for line in second_run_lines if line.startswith("start pid=")]
+        self.assertEqual(len(start_lines), 1, second_run_lines)
+
+
 class _SwapScriptLauncher:
     """
     Shared fixture/launch machinery for the two Windows-only test classes
@@ -486,11 +665,15 @@ class _SwapScriptLauncher:
     then exits immediately.
     """
 
-    # Mirrors _quit_for_update's exact Windows launch line (afk_clicker.py
-    # :2982-2983) as a named constant, so the acceptance case below cannot
-    # silently drift from what production actually passes to Popen.
-    PRODUCTION_CREATIONFLAGS = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    CREATE_NO_WINDOW = 0x08000000
+    # OLD_CREATIONFLAGS is what shipped before this fix (afk_clicker.py's
+    # old _quit_for_update, pre G#35/GH#63) -- kept only for
+    # WindowsFixSuspectDiagnostics, which deliberately re-runs the *old*
+    # broken flags through the *new* logging script to show, from the log
+    # itself, exactly which step stalls. The acceptance case below no
+    # longer hand-copies any flags at all: it calls app.launch_swap_script,
+    # so it can never drift from whatever creationflags production actually
+    # uses.
+    OLD_CREATIONFLAGS = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
 
     # Runs in a fresh interpreter (a `python -c` subprocess), so it cannot
     # see this test module's locals -- everything it needs crosses the
@@ -511,31 +694,23 @@ try:
     import afk_clicker as app
 
     cfg = json.loads(os.environ["AFK_TEST_CFG"])
-    script = app.write_swap_script(cfg["staged"], cfg["target"], cfg["relaunch"])
+    script = app.write_swap_script(cfg["staged"], cfg["target"], cfg["relaunch"], cfg["log_path"])
 
-    kwargs = {"creationflags": cfg["creationflags"]}
-    log = None
-    if cfg["stdio_mode"] == "devnull":
-        kwargs["stdin"] = subprocess.DEVNULL
-        kwargs["stdout"] = subprocess.DEVNULL
-        kwargs["stderr"] = subprocess.DEVNULL
-    elif cfg["stdio_mode"] == "captured":
-        # Diagnostic only (WindowsFixSuspectDiagnostics) -- captures what,
-        # if anything, the console commands print. Never used by the
-        # acceptance case: giving cmd.exe usable stdio handles when
-        # production gives it none is plausibly the very thing that changes
-        # the outcome (suspects 1/2 are about console/handle availability),
-        # so the acceptance case cannot carry this without risking a false
-        # green on buggy code.
-        log = open(cfg["cmd_log"], "w", encoding="utf-8")
-        kwargs["stdout"] = log
-        kwargs["stderr"] = log
-    # stdio_mode == "none": no stdio kwargs at all -- the exact line
-    # _quit_for_update runs (afk_clicker.py:2982-2983).
-
-    subprocess.Popen(["cmd", "/c", script], **kwargs)
-    if log is not None:
-        log.close()
+    if cfg["stdio_mode"] == "production":
+        # The acceptance case: the exact call _quit_for_update makes, so
+        # this can never drift from what production actually runs.
+        app.launch_swap_script(script)
+    else:
+        # WindowsFixSuspectDiagnostics only, below -- reproducing the old,
+        # pre-fix launch shape to see where it stalled.
+        kwargs = {"creationflags": cfg["creationflags"]}
+        if cfg["stdio_mode"] == "devnull":
+            kwargs["stdin"] = subprocess.DEVNULL
+            kwargs["stdout"] = subprocess.DEVNULL
+            kwargs["stderr"] = subprocess.DEVNULL
+        # stdio_mode == "none": no stdio kwargs at all -- the exact old,
+        # pre-fix line (no DEVNULL, no CREATE_NO_WINDOW).
+        subprocess.Popen(["cmd", "/c", script], **kwargs)
 
     # Stands in for on_close() tearing the real app down right after Popen()
     # returns. A launcher that stayed alive for the rest of the test would
@@ -660,13 +835,10 @@ except Exception:
                 and not os.path.exists(os.path.join(target, "old.txt")))
 
     def _diagnostics(self, interpreter, launcher_output, error_output):
-        # This is the actual point of phase A: on a timeout, say *why*, not
-        # just that it timed out -- that is what turns a red run into
-        # evidence for one of the three suspects in docs/spec.md. No cmd.exe
-        # output to show here -- the acceptance case never captures it (see
-        # _LAUNCHER's comment on stdio_mode "none"); that capture only
-        # happens in WindowsFixSuspectDiagnostics's own "captured_stdio"
-        # variant.
+        # On a timeout, say *why*, not just that it timed out. The caller
+        # appends update.log's own contents on top of this -- see phase B's
+        # write_swap_script logging -- which is now the strongest evidence
+        # for which step actually stalled.
         lines = [
             f"launcher interpreter: {interpreter}",
             f"target mirrored: {self._mirrored(self.target)}",
@@ -703,20 +875,23 @@ class WindowsLaunchReproduction(_SwapScriptLauncher, unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
         (self.staged, self.target, self.relaunch,
          self.marker) = self._fixture_in(self.workdir)
+        self.log_path = os.path.join(self.workdir, "update.log")
 
     def tearDown(self):
         self._kill_stragglers()
 
+    def _log_or(self, default="(no log written)"):
+        return self._read_or(self.log_path, default)
+
     def test_production_launch_replaces_the_install_and_relaunches(self):
-        # _quit_for_update's exact command, creationflags, and stdio (none
-        # at all -- see _LAUNCHER's stdio_mode "none" branch), the launcher
-        # exiting immediately. No other kwargs: this must be byte-identical
-        # to afk_clicker.py:2982-2983, or a captured-stdio artefact could
-        # turn this green on unfixed code (see _LAUNCHER's "captured" comment).
+        # The launcher calls app.launch_swap_script (stdio_mode "production"
+        # in _LAUNCHER) -- the exact function _quit_for_update calls, not a
+        # hand copy of its flags, so this test can never silently drift from
+        # what production actually runs.
         cfg = {"staged": self.staged, "target": self.target,
-               "relaunch": self.relaunch, "cmd_log": None,
-               "creationflags": self.PRODUCTION_CREATIONFLAGS,
-               "stdio_mode": "none", "keep_alive_seconds": 0}
+               "relaunch": self.relaunch, "log_path": self.log_path,
+               "creationflags": None, "stdio_mode": "production",
+               "keep_alive_seconds": 0}
         proc, interpreter, launcher_output, error_output = self._spawn_launcher(
             cfg, self.workdir, timeout=60)
         self.assertEqual(
@@ -732,65 +907,111 @@ class WindowsLaunchReproduction(_SwapScriptLauncher, unittest.TestCase):
         ok = self._poll_until(
             lambda: self._mirrored(self.target) and os.path.exists(self.marker),
             timeout=45)
+        # update.log is now the best evidence on a timeout -- the console
+        # this used to flash is gone, so a stalled step only shows up here.
         self.assertTrue(
-            ok, self._diagnostics(interpreter, launcher_output, error_output))
+            ok, self._diagnostics(interpreter, launcher_output, error_output)
+            + f"\nupdate.log:\n{self._log_or()}")
+
+        # docs/spec.md's "Shipped update log" acceptance criteria: a
+        # successful update's log records the copy step's exit code and
+        # ends with done.
+        log = self._log_or()
+        self.assertIn("copy exit code", log, log)
+        non_empty = [line for line in log.splitlines() if line.strip()]
+        self.assertTrue(non_empty and non_empty[-1].strip() == "done", log)
+
+    def test_wait_loop_paces_polls_instead_of_busy_spinning(self):
+        # The acceptance case above can't prove pacing: its own pid (the
+        # launcher's) dies within roughly one mainloop iteration of Popen(),
+        # so the wait loop only ever gets to check once. Here the launcher
+        # is told to stay alive for a few seconds (keep_alive_seconds)
+        # before exiting, which keeps the waited-on pid alive long enough
+        # for the loop to actually iterate a handful of times -- if
+        # `timeout` were still in the loop and failing outright under a
+        # console-less cmd (docs/spec.md's suspect 2), there would be no
+        # sleep left at all and the logged iteration count over this many
+        # real seconds would be enormous (a busy loop of tasklist calls),
+        # not roughly one per second.
+        keep_alive_seconds = 5
+        cfg = {"staged": self.staged, "target": self.target,
+               "relaunch": self.relaunch, "log_path": self.log_path,
+               "creationflags": None, "stdio_mode": "production",
+               "keep_alive_seconds": keep_alive_seconds}
+        proc, interpreter, launcher_output, error_output = self._spawn_launcher(
+            cfg, self.workdir, timeout=60 + keep_alive_seconds)
+        self.assertEqual(proc.returncode, 0, launcher_output)
+        self.assertEqual(error_output, "", error_output)
+
+        ok = self._poll_until(
+            lambda: self._mirrored(self.target) and os.path.exists(self.marker),
+            timeout=45)
+        log = self._log_or()
+        self.assertTrue(ok, self._diagnostics(interpreter, launcher_output, error_output)
+                        + f"\nupdate.log:\n{log}")
+
+        match = re.search(r"wait finished after (\d+) iterations", log)
+        self.assertIsNotNone(match, f"no 'wait finished' line in the log:\n{log}")
+        iterations = int(match.group(1))
+        # A generous window either side of "roughly one per second": CI
+        # scheduling jitter and tasklist's own spawn cost mean this is never
+        # exactly keep_alive_seconds, but a genuine busy-loop (no sleep at
+        # all) would produce dozens to hundreds of iterations in the same
+        # span, not something in this neighbourhood.
+        self.assertGreater(iterations, 0, f"loop never iterated:\n{log}")
+        self.assertLess(
+            iterations, keep_alive_seconds * 4,
+            f"{iterations} iterations while the pid was alive for "
+            f"~{keep_alive_seconds}s looks like a busy spin, not a paced "
+            f"poll:\n{log}")
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows launch reproduction")
 class WindowsFixSuspectDiagnostics(_SwapScriptLauncher, unittest.TestCase):
     """
-    Not the acceptance case above -- these isolate which of the three named
-    suspects (docs/spec.md "Proposed approach" #1) is the real one, and only
-    ever report their outcome. They must never fail the suite, on either
-    today's code or the fixed code: their job is to be read by a human from
-    the CI log, not to gate the build a second time.
+    Not the acceptance case above -- informational only, and must never
+    fail the suite on either today's code or the fixed code: their job is
+    to be read by a human from the CI log, confirming/recording which of
+    the three named suspects (docs/spec.md "Proposed approach" #1) was
+    actually the cause, not to gate the build a second time.
     """
 
     def tearDown(self):
         self._kill_stragglers()
 
-    def test_diagnostic_variants(self):
-        variants = [
-            # Suspect 1/2: a real (hidden) console instead of none at all,
-            # so cmd/tasklist/timeout/robocopy never need to allocate their
-            # own -- the standard shape for "run a console command with no
-            # visible window".
-            ("create_no_window+devnull_stdio", self.CREATE_NO_WINDOW, "devnull"),
-            # What the acceptance case cannot carry (see its own comment):
-            # production's exact flags, but with cmd.exe's stdout/stderr
-            # captured to a file, to see what -- if anything -- tasklist/
-            # timeout/robocopy actually print.
-            ("production_flags+captured_stdio", self.PRODUCTION_CREATIONFLAGS, "captured"),
-            # Suspect 3: production's exact flags and stdio, but the
-            # launcher (this test's stand-in for the app process) stays
-            # alive for a few seconds instead of exiting immediately after
-            # Popen().
-            ("production_flags+parent_stays_alive", self.PRODUCTION_CREATIONFLAGS, "none"),
-        ]
-        for name, flags, stdio_mode in variants:
-            keep_alive = 5 if name == "production_flags+parent_stays_alive" else 0
-            with self.subTest(variant=name):
-                workdir = tempfile.mkdtemp(prefix="afk-repro-diag-")
-                self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
-                staged, target, relaunch, marker = self._fixture_in(workdir)
-                cmd_log = (os.path.join(workdir, "cmd-output.log")
-                          if stdio_mode == "captured" else None)
-                cfg = {"staged": staged, "target": target, "relaunch": relaunch,
-                       "creationflags": flags, "stdio_mode": stdio_mode,
-                       "cmd_log": cmd_log, "keep_alive_seconds": keep_alive}
-                proc, interpreter, launcher_output, error_output = self._spawn_launcher(
-                    cfg, workdir, timeout=60 + keep_alive)
-                ok = self._poll_until(
-                    lambda: self._mirrored(target) and os.path.exists(marker),
-                    timeout=45)
-                cmd_output = (self._read_or(cmd_log) if cmd_log
-                             else "(not captured in this variant)")
-                # print(), not assert: informational only, see class docstring.
-                print(f"[diagnostic:{name}] interpreter={interpreter} "
-                      f"succeeded={ok} launcher_rc={proc.returncode} "
-                      f"launcher_output={launcher_output!r} "
-                      f"launcher_error={error_output!r} "
-                      f"cmd_output={cmd_output!r}")
+    def test_old_creationflags_still_stall_for_the_record(self):
+        # Phase A's CI evidence already narrowed this down: production_flags
+        # +captured_stdio came back empty (no "Input redirection is not
+        # supported", ruling suspect 2 out as *the* cause) and
+        # production_flags+parent_stays_alive still failed (ruling suspect 3
+        # out) -- so those two variants no longer teach anything and are not
+        # reproduced here. What is left worth keeping on record: replaying
+        # the *old*, pre-fix creationflags (DETACHED_PROCESS, no stdio
+        # kwargs at all -- the literal original bug) through the *new*
+        # logging write_swap_script, so the log file itself -- not a
+        # console that never had anywhere to flash -- shows which step it
+        # stalls on. The log write is a plain file redirect, not console
+        # I/O, so it should still land even if a later console-subsystem
+        # step (tasklist/find/ping/robocopy) is the one actually stuck.
+        workdir = tempfile.mkdtemp(prefix="afk-repro-diag-")
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        staged, target, relaunch, marker = self._fixture_in(workdir)
+        log_path = os.path.join(workdir, "update.log")
+        cfg = {"staged": staged, "target": target, "relaunch": relaunch,
+               "log_path": log_path, "creationflags": self.OLD_CREATIONFLAGS,
+               "stdio_mode": "none", "keep_alive_seconds": 0}
+        proc, interpreter, launcher_output, error_output = self._spawn_launcher(
+            cfg, workdir, timeout=60)
+        ok = self._poll_until(
+            lambda: self._mirrored(target) and os.path.exists(marker),
+            timeout=45)
+        log = self._read_or(log_path, "(no log written)")
+        # print(), not assert: informational only, see class docstring --
+        # this must never fail the suite on either the old or the fixed code.
+        print(f"[diagnostic:old_creationflags+no_stdio] interpreter={interpreter} "
+              f"succeeded={ok} launcher_rc={proc.returncode} "
+              f"launcher_output={launcher_output!r} "
+              f"launcher_error={error_output!r}\nupdate.log:\n{log}")
 
 
 @needs_display
