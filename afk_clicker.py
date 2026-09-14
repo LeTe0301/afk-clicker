@@ -938,14 +938,19 @@ def launch_swap_script(script):
     function instead of a hand-copied mirror that could silently drift from
     what production actually runs.
 
-    G#35/GH#63: the previous flags gave cmd.exe no console at all
-    (DETACHED_PROCESS), but cmd.exe runs tasklist/find/ping/robocopy --
-    console-subsystem programs that each need *some* console. With none to
-    inherit and none to allocate (DETACHED_PROCESS forbids that too), the
-    tree stalled rather than completing the update. CREATE_NO_WINDOW instead
-    gives the whole tree a real, hidden console to share -- no visible flash,
-    no console-starved child -- and explicit DEVNULL stdio means no handle is
-    left ambiguous.
+    G#35/GH#63: on windows-latest CI, the previous flags (DETACHED_PROCESS |
+    CREATE_NEW_PROCESS_GROUP, no stdio kwargs) reliably stalled the tree at
+    its very first `tasklist /FI ... | find ...` in write_swap_script's wait
+    loop -- the update.log written under those flags contained only the
+    `start pid=...` line, never `wait finished`, confirming the stall
+    happens before a single wait iteration completes. *Why* that pipeline
+    hangs without a console is not established (DETACHED_PROCESS does not
+    forbid a child from allocating its own console -- that allocation is
+    plausibly the flash Leo saw); only that it does, there, and that it
+    doesn't under the flags below: CREATE_NO_WINDOW gives the whole tree one
+    real, hidden console to share instead, and the same update.log
+    completes end to end (wait finished, copy exit code, done) under it.
+    Explicit DEVNULL stdio means no handle is left ambiguous either way.
     """
     if sys.platform == "win32":
         subprocess.Popen(

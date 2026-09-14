@@ -238,6 +238,33 @@ test suite (Windows / macOS)" step's log for `tests.test_updater`. Look for:
   that — the empty `cmd_output` rules suspect 2 out as *confirmed*, it does
   not prove suspect 1 beyond the `create_no_window` variant's own success.
 
+### Phase B CI confirmation and precise stall point (windows-latest, run
+34900930076, commit b3e841d)
+- **Fix confirmed on CI:** `WindowsLaunchReproduction.test_production_launch_
+  replaces_the_install_and_relaunches` **ok**,
+  `test_wait_loop_paces_polls_instead_of_busy_spinning` **ok**,
+  `SwapScriptWindowsCmdText.*` **ok**. Ubuntu and macOS legs green.
+- **The single remaining diagnostic
+  (`WindowsFixSuspectDiagnostics.test_old_creationflags_still_stall_for_the_
+  record`, `old_creationflags+no_stdio`) narrows the stall to a specific
+  line:** `succeeded=False`, and the `update.log` it produced under the old,
+  pre-fix flags contained **only** the `start pid=3324 staged=... target=...
+  relaunch=...` line — no `wait finished after N iterations` line at all.
+  `COUNT` is only incremented, and the "wait finished" line only written,
+  *after* `tasklist /FI "PID eq {pid}" | find "{pid}"` returns and reports
+  the pid gone; the launcher (pid 3324) had already exited by the time the
+  script ran that check. A log stopping right after `start` therefore means
+  **the first `tasklist | find` pipeline itself never returned** under
+  `DETACHED_PROCESS` — the stall is at that exact line, not somewhere later
+  in the wait loop, and not in the copy/relaunch steps (which never even ran
+  in this diagnostic). This is the most precise root-cause evidence
+  available; I'm not extending it further than that — *why* a `tasklist |
+  find` pipeline hangs under `DETACHED_PROCESS` specifically (console
+  allocation blocking? pipe creation between the two console-subsystem
+  processes?) is not established by this evidence, only that it does there
+  and that the identical script completes end to end (wait finished, copy
+  exit code, done, all logged) under `CREATE_NO_WINDOW`.
+
 ### The fix
 - **`launch_swap_script(script)`** (`afk_clicker.py:932-956`), a new
   module-level function holding all the platform `Popen` logic that used to
@@ -341,8 +368,8 @@ test suite (Windows / macOS)" step's log for `tests.test_updater`. Look for:
   `windows-latest`. 6 tests: `.cmd` extension, log directory created, log
   path quoted, no `timeout` left (`ping -n 2` present instead), `done` after
   the copy-exit-code line, relaunch not gated behind the copy succeeding.
-- **`SwapScriptLogLifecycle`** (new, local/Linux, actually executes the
-  generated `.sh`): 3 tests. `write_swap_script` always waits on
+- **`SwapScriptLogLifecycle`** (new, local, actually executes the generated
+  `.sh` via `/bin/sh`): 3 tests. `write_swap_script` always waits on
   `os.getpid()` of whichever process calls it, so calling it directly from
   the test method would make the script wait on the *test runner's own*
   still-alive pid and hang until the subprocess timeout; instead, each test
@@ -350,6 +377,20 @@ test suite (Windows / macOS)" step's log for `tests.test_updater`. Look for:
   same technique the Windows launcher reproduction already uses for the
   same reason) so that by the time the generated `.sh` actually runs, its
   waited-on pid has already exited and the wait ends at once.
+  **Round-2 fix (post windows-latest CI feedback on run 34900930076):** this
+  class errored on Windows CI — `subprocess.run(["/bin/sh", script])` raises
+  `FileNotFoundError: [WinError 2]`, since `@needs_display`'s `HEADLESS`
+  check is hard-coded `sys.platform.startswith("linux")` and so never skips
+  on `win32` at all. Added `@unittest.skipIf(sys.platform == "win32", ...)`
+  above `@needs_display` on the class (both stack fine: each `skipIf`/
+  `skipUnless` only ever *sets* the skip flag when its own condition is
+  true, never clears one already set by another, confirmed directly against
+  `unittest`'s implementation before relying on it). `@needs_display` itself
+  is kept, but not for the reason it's named for — this class never builds a
+  `Tk()`; it's needed because the subprocess above does `import
+  afk_clicker`, which imports `pynput` unconditionally, which raises without
+  an X display on headless Linux. The class docstring now says so directly
+  so the next reader doesn't have to re-derive it.
   1. `test_successful_update_ends_with_done_and_records_the_exit_code` —
      real staged/target/relaunch fixtures, runs the script, asserts
      `new.txt` present/`old.txt` gone/relaunch marker written, log contains
@@ -412,21 +453,25 @@ not asserted from reading the code:
 After every sabotage above was reverted, the full local suite was re-run
 clean (see "Verification" below).
 
-### What only CI can confirm
-- The Windows acceptance test, the new `test_wait_loop_paces_polls_instead_
-  of_busy_spinning` test, and `WindowsFixSuspectDiagnostics`'s single
-  remaining variant only run on `windows-latest` — this box is Linux-only,
-  so none of the `.cmd`'s actual *execution* (as opposed to its generated
-  *text*, which the new `SwapScriptWindowsCmdText` class does check
-  everywhere) has been run in this session. `robocopy`/`tasklist`/`ping`
-  cmdlet syntax and behavior, `CREATE_NO_WINDOW`'s actual effect on a
-  console-subsystem child tree, and the pacing test's real-world iteration
-  count under CI scheduling jitter are all unconfirmed until this PR's next
-  `windows-latest` CI run.
-- Whether `%LOG%`'s quoting survives a real Windows runner's actual
-  `%TEMP%`/settings-dir paths (as opposed to the synthetic paths used in
-  `SwapScriptWindowsCmdText`, which monkeypatches `sys.platform` on Linux)
-  is likewise only provable there.
+### What CI has now confirmed (windows-latest, run 34900930076, commit
+b3e841d) vs. what is still only provable there
+- **Confirmed:** `WindowsLaunchReproduction.test_production_launch_
+  replaces_the_install_and_relaunches` passes on the fixed code —
+  `CREATE_NO_WINDOW`'s actual effect on the real console-subsystem child
+  tree, `robocopy`/`tasklist`/`ping` cmdlet behavior end to end, and
+  `%LOG%`'s quoting against a real Windows runner's actual paths are all now
+  exercised, not just read. `test_wait_loop_paces_polls_instead_of_busy_
+  spinning` also passed, so the logged iteration count over a real 5s
+  keep-alive did land inside the generous `< keep_alive_seconds * 4` bound
+  under actual CI scheduling jitter. `SwapScriptWindowsCmdText`'s text
+  checks passed there too (expected — they don't depend on the platform
+  they run on).
+- **Still only provable on a real, double-clicked Windows machine (per
+  `docs/spec.md`'s acceptance criteria, not something CI can simulate):**
+  a frozen `--windowed` PyInstaller build's exact stdio inheritance shape,
+  and whether the manual 0.6.0 upgrade check itself (no visible console,
+  fully replaced install folder, relaunched instance reports the new
+  version) holds outside the reproduction's own launcher shape.
 
 ## Verification (this session)
 - `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean.

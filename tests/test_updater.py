@@ -536,10 +536,14 @@ class SwapScriptWindowsCmdText(unittest.TestCase):
                         "relaunch must not be gated behind the copy succeeding")
 
 
+@unittest.skipIf(sys.platform == "win32",
+                 "runs the .sh path via /bin/sh directly; the .cmd path is "
+                 "covered on Windows by SwapScriptWindowsCmdText (text) and "
+                 "the Windows-only classes below (execution, on CI)")
 @needs_display
 class SwapScriptLogLifecycle(unittest.TestCase):
     """
-    Local (Linux), end-to-end exercise of the shipped update log
+    Local (Linux/macOS), end-to-end exercise of the shipped update log
     (docs/spec.md Goals, "Shipped update log") by actually running the
     generated apply-update.sh against real temp directories.
 
@@ -551,6 +555,15 @@ class SwapScriptLogLifecycle(unittest.TestCase):
     exits on its own, write_swap_script is called here from a short-lived
     `python -c` subprocess -- by the time this test runs the script, that
     pid has already exited and the wait loop ends at once.
+
+    @needs_display is not about Tk here (this class never builds one) --
+    it's needed because the subprocess above does `import afk_clicker`,
+    which imports pynput unconditionally at module level, which raises
+    without an X display on Linux. skipIf(win32) above is the actual
+    platform guard for this class: HEADLESS (needs_display's condition) is
+    hard-coded to Linux-only, so without it this class would still be
+    collected and run on windows-latest CI -- and immediately error, since
+    Windows has no /bin/sh to invoke.
     """
 
     def _write_script_in_subprocess(self, staged, target, relaunch, log_path):
