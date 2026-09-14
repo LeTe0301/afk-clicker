@@ -1,261 +1,335 @@
-# Spec: App icon — the Loop icon (part 2 of 2 — depends on nothing from part 1, run after it)
+# Spec: Windows in-app Install never completes (G#35 / GH#63)
+
+Branch: `hotfix/ac-35/windows-install-never-updates`
 
 ## Summary
-Give Clickwork an actual icon — currently there is none anywhere (no
-`--icon` at build time, no `iconphoto`/`iconbitmap` call at runtime, so the
-window uses Tk's default feather). Add the "Loop" icon Leo picked (a mouse
-with a lit left button inside an endless-loop arrow) as the window icon and
-the packaged executable/bundle icon on all three platforms, generating the
-platform-specific formats from the one source SVG without adding a new
-frozen runtime dependency.
-
-Run this as its own build cycle after `docs/spec.md` (part 1, the rename)
-has landed — no functional dependency between the two, but it keeps each
-dispatch to one concern (part 1 is string/CI edits; this one is new
-asset-generation tooling plus new runtime code).
+Fix how `_quit_for_update()` launches `apply-update.cmd` on Windows so the
+swap script actually runs to completion (mirrors the install folder and
+relaunches the app) instead of being cut short right after a console flashes,
+by first building a Windows-CI reproduction that fails on today's code and
+confirms which of the three suspected causes is real, then applying the
+targeted fix.
 
 ## Goals
-- The source SVG lives in the repo as the single source of truth for the
-  icon.
-- Windows build gets a multi-resolution `.ico` via PyInstaller's `--icon`.
-- macOS build gets an `.icns` via PyInstaller's `--icon` (macOS bundle icon).
-- Linux/all platforms: the running window shows the icon via Tk's
-  `iconphoto`, sourced from a bundled PNG resolved correctly both when run
-  from source and when frozen (`sys._MEIPASS`).
-- None of this adds a new dependency to the *frozen build* — `TECHSTACK.md`
-  is explicit that every frozen dependency is a chance for PyInstaller's
-  static analysis to miss something and ship a build that dies at launch,
-  and CI currently pins exactly two packages (`pyinstaller`, `pynput`); this
-  spec does not change that pin list.
+- Confirm, with evidence captured on the `windows-latest` GitHub Actions
+  runner (the only place Windows behaviour is observable — the local box is
+  Linux-only), which of the three suspects in the ticket actually causes the
+  failure:
+  1. `DETACHED_PROCESS` gives `cmd` no console, so `cmd` and/or its
+     console-subsystem children (`tasklist`, `find`, `timeout`, `robocopy`)
+     each try to allocate their own — the visible flash.
+  2. `timeout /t 1 /nobreak` fails outright ("ERROR: Input redirection is not
+     supported") when it has no real console to read from, corrupting the
+     wait loop.
+  3. The spawned process tree does not survive `_quit_for_update`'s parent
+     process exiting shortly after `Popen()` returns.
+- Fix `_quit_for_update`'s Windows branch so that, end to end: the app window
+  closes, no console window is visible, the install folder is fully replaced
+  with the staged build's contents, and the relaunched build starts.
+- Land a regression test that fails on the current code and passes on the
+  fixed code, running automatically in CI (no manual `workflow_dispatch`,
+  which this token cannot trigger anyway).
+- **Shipped update log** (added by Leo, 2026-09-14 — replaces the earlier
+  "diagnostic-only logging" assumption). The swap script that ships writes
+  a step log on every update, so the next failure in the field leaves
+  evidence instead of a vanished console:
+  - **Location:** `update.log` in the settings directory, i.e.
+    `os.path.join(os.path.dirname(config_path()), "update.log")` — stable
+    across updates and findable by the app at its next launch (the
+    follow-up prompt depends on this). Not `%TEMP%`, which is shared and
+    cleaned by the OS. Create the directory if missing.
+  - **Lifecycle:** truncated/started fresh by each update, not appended
+    forever — one log per update attempt, bounded size.
+  - **Content, per line:** a timestamp and a step name. At minimum: script
+    start (pid being waited on, staged, target, relaunch), wait finished,
+    the copy step's exit code (`robocopy` ≥ 8 is failure; `cp -a` non-zero),
+    relaunch attempted, and a final `done` line. A log without `done` is how
+    the follow-up will recognise an update that died part-way.
+  - **Both script variants** (`.cmd` and `.sh`) write it, same path and same
+    step names, so the follow-up prompt is not Windows-only. The
+    Linux/macOS *launch line* in `_quit_for_update` stays byte-for-byte
+    unchanged; only the script text gains logging.
+  - `write_swap_script` takes the log path as an argument (caller passes
+    the settings-dir path) rather than computing it, so tests never write
+    into the real `%APPDATA%`/`~/.config`.
+  - **Fidelity warning:** redirecting the script's console children into a
+    file changes which std handles they have — the very thing suspects 1/2
+    are about. So the Windows acceptance test must exercise the real,
+    logging script as `write_swap_script` produces it, launched exactly as
+    production launches it; never a hand-simplified copy.
 
 ## Non-goals
-- Not the product rename (`docs/spec.md`, part 1) — this spec assumes that
-  work is already merged (title/header already say "Clickwork") but does
-  not depend on it functionally; if run out of order, only the header text
-  differs, nothing here breaks.
-- Not deciding the simplified small-size icon variant's actual pixel art.
-  The sketch note that the mouse gets muddy at 20px is a real, open design
-  question — this spec surfaces it to the ux-designer stage rather than
-  guessing at glyph simplification here (see "Open questions").
-- Not a tray/notification icon (the app has no system tray presence today;
-  out of scope unless a future spec adds one).
-- Not re-theming any other UI chrome — only the icon.
-- Not adding image manipulation as a runtime dependency (no Pillow import
-  inside `afk_clicker.py` itself) — see "Proposed approach" for why
-  generation happens once, out of band, not at build or run time.
+- **No UI/UX change.** `_set_update_state("Restarting…", enabled=False)` and
+  the rest of the Settings → Install status flow are untouched — this is a
+  pure launch-mechanism fix inside `_quit_for_update`. **ux-designer should be
+  skipped for this cycle.**
+- **No fix for already-installed 0.3.1/0.5.0 Windows clients.** Every
+  installed copy runs its own already-shipped swap script; this fix only
+  helps from the *next* successful update onward. Existing Windows users
+  install the fixed release by hand once. This goes in the 0.6.0 release
+  notes, not in code (per `backlog.md`'s "Release blocker" note).
+- **Not moving the swap script out of `%TEMP%`.** `write_swap_script`'s
+  `workdir = dirname(dirname(staged))` resolving to `%TEMP%` itself (because
+  the Windows zip isn't flattened, unlike the single-top-level-dir Linux/macOS
+  case) is real, but Leo's own manual repro — running the exact leftover
+  `%TEMP%\apply-update.cmd` by hand from an interactive `cmd` — updated to
+  0.5.0 correctly *from that exact location*. That rules the script's
+  location out as a contributor to this bug. Changing it now would be
+  unrelated scope creep against a code path that already has passing,
+  deliberate tests (`tests/test_updater.py:357-383`, the filesystem-root
+  guard). Leave it alone unless the CI repro below proves otherwise.
+- **No change to the Linux/macOS launch** (`_quit_for_update`'s
+  `subprocess.Popen(["/bin/sh", script], start_new_session=True)`), which
+  already works end to end per the ticket. The `.sh` script text changes only
+  by gaining the shipped update log (Goals); its wait/copy/relaunch
+  behaviour stays as it is.
+- **No new CI job or workflow file.** `ci.yml` already runs the full unit
+  test suite on `windows-latest` for every PR — reuse that leg (see
+  "Proposed approach").
+- **No renaming of the packaged executable or settings directory** — see
+  `docs/history/ac-33-spec.md`, still binding.
+- **No work on the unrelated updater residue items** (G#21 / GH#32).
+- **No in-app "update didn't finish — send us the log" prompt.** Leo
+  (2026-09-14) wants the app to ask the person to send the log via a
+  prefilled GitHub issue, but split it out: that is a follow-up ticket with
+  its own design pass, so this release blocker is not held up by UI work.
+  This cycle only makes the log exist, in a stable place the follow-up can
+  find (see Goals, "Shipped update log").
 
 ## Background / current state
-- No icon exists today: grepped `afk_clicker.py` for `iconphoto`,
-  `iconbitmap`, `--icon` — zero matches. The window currently shows
-  whatever default Tk provides per platform.
-- `THEMES["dark"]` (`afk_clicker.py:78-83`) defines the app's dark palette;
-  the accent color already in use is `#e08a55`, which the chosen icon reuses
-  exactly (see the SVG below) — so the icon matches the in-app palette
-  by construction, nothing to re-derive.
-- Build pipeline (`.github/workflows/release.yml`, `build.bat`) invokes
-  PyInstaller with `--name`, `--windowed`, `--noupx`, and a list of
-  `--hidden-import`s — no `--icon` flag anywhere yet, and no `--add-data`
-  either (nothing is bundled today beyond the interpreter and its imports).
-- Runtime is `tkinter` only (per `TECHSTACK.md`) — `tk.PhotoImage` supports
-  PNG natively since Tk 8.6, so a PNG can be loaded without Pillow. `.ico`/
-  `.icns` are opaque, PyInstaller-consumed build inputs; nothing at runtime
-  needs to parse them.
+- `write_swap_script(staged, target, relaunch)` — `afk_clicker.py:846-885`.
+  Windows branch writes `apply-update.cmd`: a `tasklist`/`find` wait loop with
+  `timeout /t 1 /nobreak >nul` between polls, then `robocopy "{staged}"
+  "{target}" /MIR /NFL /NDL /NJH /NJS /NC /NS >nul`, then `start ""
+  "{relaunch}"`. Confirmed correct by Leo running it by hand.
+- `_install_worker` (`afk_clicker.py:2949-2977`) stages the update, then calls
+  `write_swap_script`, then hands the resulting path to `_quit_for_update`.
+- `_quit_for_update(script)` (`afk_clicker.py:2979-2986`) is the actual bug
+  site:
+  ```python
+  def _quit_for_update(self, script):
+      self._set_update_state("Restarting…", enabled=False)
+      if sys.platform == "win32":
+          subprocess.Popen(["cmd", "/c", script],
+                           creationflags=0x00000008 | 0x00000200)  # DETACHED | NEW_GROUP
+      else:
+          subprocess.Popen(["/bin/sh", script], start_new_session=True)
+      self.on_close()
+  ```
+  `0x00000008` is `DETACHED_PROCESS`, `0x00000200` is
+  `CREATE_NEW_PROCESS_GROUP`. No `stdin`/`stdout`/`stderr` are passed, so
+  Python's default (non-inherited, since `close_fds` defaults to `True` on
+  Windows too) leaves the child with no standard handles at all. `on_close()`
+  runs immediately after, which tears down the Tk app and ends the process —
+  so in production the "parent" that suspect 3 is about really does exit
+  within roughly one mainloop iteration of the `Popen()` call.
+- `tests/test_updater.py:345-429`'s `SwapScript` class already tests the
+  *contents* written by `write_swap_script` (pid presence, wait-not-kill,
+  copy direction, no destructive path crossing). None of it exercises how the
+  script is actually *launched* — that gap is exactly what let this ship.
+- `tests/context.py:93`: `needs_display = unittest.skipIf(HEADLESS, ...)`
+  where `HEADLESS = sys.platform.startswith("linux") and not
+  os.environ.get("DISPLAY")` — irrelevant to Windows, which always has a
+  window server in CI. No existing Windows-only test gate exists yet in this
+  file; this fix introduces the first one.
+- `.github/workflows/ci.yml` already runs `python -m unittest discover -s
+  tests -t . -v` on `windows-latest` for every PR and every push to `main`
+  (no Xvfb needed on Windows/macOS — see the "Run the test suite (Windows /
+  macOS)" step). This is the only Windows execution environment available to
+  us: `release.yml`'s Windows build+smoke-test leg is not reachable without
+  `actions: write` (no `workflow_dispatch`), and pushing a `release/**`
+  branch is gated on a human approval before publish — not a test vehicle.
 
 ## Proposed approach
 
-### The source asset
-Commit the SVG verbatim as `assets/icon.svg`:
+### 1. Reproduction, on `windows-latest` CI, before touching the fix
+Add a Windows-only test class to `tests/test_updater.py`, gated with
+`@unittest.skipUnless(sys.platform == "win32", "Windows launch reproduction")`
+(no `@needs_display` — this exercises `subprocess`/`write_swap_script`, not
+Tk). It must reproduce the bug exactly as `_quit_for_update` triggers it,
+including the part of suspect 3 that requires the *caller* to actually exit:
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <rect width="128" height="128" rx="28" fill="#1c1f23"/>
-  <path d="M100 64 A36 36 0 1 1 86 35" fill="none" stroke="#e08a55" stroke-width="9" stroke-linecap="round"/>
-  <polygon points="96,42 84,24 76,42" fill="#e08a55"/>
-  <clipPath id="c-mouse"><rect x="50" y="44" width="28" height="42" rx="14"/></clipPath>
-  <rect x="50" y="44" width="14" height="17" fill="#e08a55" clip-path="url(#c-mouse)"/>
-  <rect x="50" y="44" width="28" height="42" rx="14" fill="none" stroke="#e4e7ea" stroke-width="5"/>
-  <line x1="64" y1="46" x2="64" y2="61" stroke="#e4e7ea" stroke-width="4"/>
-</svg>
-```
+1. Build a dummy install layout under a temp dir: `staged/new.txt` (content
+   `"new"`), `target/old.txt` (content `"old"`, so a successful `/MIR` proves
+   itself by making this file disappear), and `relaunch.cmd` — a `.cmd` file
+   (not a Python script; `start "" "{relaunch}"` needs something `cmd`'s
+   `start` can associate directly) whose body is `@echo off` +
+   `echo relaunched> "{marker_path}"`. Give the target path a space in it
+   (e.g. `target dir`) to catch a regression in the existing quoting.
+2. Spawn a short-lived **launcher** subprocess —
+   `subprocess.Popen([sys.executable, "-c", <inline code>], ...)` — whose
+   inline code, running as its own OS process (so `os.getpid()` inside
+   `write_swap_script` is *that* process's pid, not the test runner's):
+   - imports `app` (via the same `tests.context` path-setup the rest of the
+     suite uses),
+   - calls `app.write_swap_script(staged, target, relaunch)`,
+   - calls the **exact same** launch line as `_quit_for_update`:
+     `subprocess.Popen(["cmd", "/c", script], creationflags=0x00000008 |
+     0x00000200)`, redirecting `stdout`/`stderr` to a log file path passed
+     in (this differs from production only in *where the output goes*, not
+     in the creationflags/command — needed so a human can inspect what, if
+     anything, the console commands emitted, e.g. `timeout`'s "Input
+     redirection is not supported"),
+   - then exits immediately (falls off the end of the `-c` script) — the
+     stand-in for `on_close()` tearing the real app down right after
+     `Popen()` returns. This is what actually puts suspect 3 under test;
+     a launcher that stays alive for the rest of the test would not.
+3. The outer test polls (bounded, e.g. 20s timeout, short sleep interval)
+   for both `target/new.txt` to exist and `target/old.txt` to be gone (proof
+   `/MIR` ran) and for the relaunch marker file to exist. On timeout, fail
+   with an assertion message that includes the captured log file's contents
+   (if any) — that's the diagnostic evidence for which suspect was real.
+4. This test must fail on current `main` (sabotage-verify: run it on the PR's
+   `windows-latest` CI leg before writing the fix and confirm red) and pass
+   once the fix lands.
 
-### Generation strategy: pre-rendered, committed, not generated in CI
-**Decision: rasterize the SVG once, out of band (a one-off local/manual
-step, documented, not run by CI or by the app), and commit the resulting
-binaries.** Concretely:
-- `assets/icon.ico` — multi-size Windows icon (16/32/48/256 px), used by
-  `--icon` on the Windows build.
-- `assets/icon.icns` — macOS bundle icon, used by `--icon` on the macOS
-  build.
-- `assets/icon-16.png`, `assets/icon-32.png`, `assets/icon-48.png`,
-  `assets/icon-256.png` — used at runtime via `tk.PhotoImage`/`iconphoto`
-  (Tk picks the closest size per platform when given several).
-- `assets/icon.svg` stays in the repo alongside them as the editable
-  source, referenced in a short README note under `assets/` explaining that
-  the rasters are regenerated from it (by hand or with any SVG tool — this
-  spec does not mandate which) whenever the SVG changes.
+**Recommendation: this lives in `tests/test_updater.py`, running through
+`ci.yml`'s existing Windows leg — not a dedicated CI job.** `ci.yml` already
+executes the full suite on `windows-latest` for every push/PR; a new job
+would duplicate an already-available runner for no reproducibility benefit,
+and (per the hard constraint) we cannot `workflow_dispatch` a bespoke job
+anyway. Keeping it next to `SwapScript` also matches this file's existing
+layout — one test class per concern, same module.
 
-Rejected alternative: **generate the rasters at CI build time** (e.g. add
-`cairosvg`/`Pillow` to the pinned pip install step, rasterize, then feed
-PyInstaller). Rejected because:
-- It's a new frozen-adjacent build dependency in a project whose
-  `TECHSTACK.md` treats every dependency addition as a static-analysis/
-  frozen-build risk worth writing down and pinning explicitly — an icon
-  that never changes between releases doesn't need to be rebuilt on every
-  release run.
-- `cairosvg` needs a system Cairo install on the Windows/macOS runners,
-  which is a new per-platform CI dependency, not just a `pip install` line
-  — meaningfully more moving parts for an asset that is static.
-- Committed binaries are trivially reviewable (a reviewer can open the PNG)
-  and don't add nondeterminism to what a release build produces from a
-  given commit.
+### 2. Diagnose from the repro's evidence, then fix
+Use whatever the reproduction's captured log and pass/fail pattern show to
+attribute the failure to one or more of the three suspects (see "Open
+questions" #1 for the leading hypothesis and the fallback if it's wrong), then
+change `_quit_for_update`'s Windows branch (`afk_clicker.py:2979-2986`)
+accordingly. Re-run the same test on the PR's `windows-latest` leg (push a
+commit; there is no rerun-without-a-push available) until it's green.
 
-The generation step itself (SVG → ico/icns/png) is a one-time task for
-whoever implements this spec — any standard tool works (Inkscape CLI,
-`rsvg-convert`, an online converter, a local Pillow+cairosvg script run
-once and discarded per this project's "don't add to the tree what you
-can't remove" convention for scratch tooling). The *output* is what's
-committed; the *tool* is not part of this repo or its CI.
-
-### Runtime wiring
-- Resolve the assets directory so it works both from source and frozen:
-  ```python
-  def _asset_dir():
-      if getattr(sys, "frozen", False):
-          return os.path.join(sys._MEIPASS, "assets")
-      return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-  ```
-  (Mirrors the existing `is_frozen()` check at `afk_clicker.py:‑` used by the
-  updater — reuse that helper rather than duplicating the `sys.frozen`
-  check inline.)
-- After `root` is constructed (near `afk_clicker.py:1772`, alongside
-  `root.title(...)`), load the PNGs and call `iconphoto`:
-  ```python
-  icons = [tk.PhotoImage(file=os.path.join(_asset_dir(), f"icon-{n}.png"))
-           for n in (16, 32, 48, 256)]
-  root.iconphoto(True, *icons)
-  # keep a reference on self (e.g. self._icon_imgs = icons) -- PhotoImage
-  # is garbage-collected the moment nothing holds it, which blanks the
-  # icon silently; a bare local list works too as long as its scope
-  # outlives root, but attaching to self matches this file's existing
-  # pattern of holding Tk state on the instance.
-  ```
-  `True` as the first arg makes it the default for this toplevel and any
-  future `Toplevel` (there are none today, but harmless if one is added
-  later).
-- PyInstaller needs the assets folder bundled: add
-  `--add-data "assets/icon-16.png:assets"` (repeat per PNG, or
-  `--add-data "assets:assets"` to bundle the whole folder in one flag —
-  prefer the whole-folder form, it's one line instead of four and doesn't
-  need updating if a PNG size is added later) to both `release.yml`'s
-  PyInstaller invocation and `build.bat`'s. Note PyInstaller's separator is
-  `;` on Windows and `:` on POSIX — `build.bat` and `release.yml`'s Windows
-  job need `--add-data "assets;assets"`, the Linux/macOS jobs need
-  `--add-data "assets:assets"`.
-- Add `--icon assets/icon.ico` (Windows) / `--icon assets/icon.icns`
-  (macOS) to the respective PyInstaller invocations. Linux PyInstaller
-  builds have no `--icon` equivalent (there's no single Linux binary-icon
-  standard PyInstaller targets) — the running window's `iconphoto` call is
-  the only icon Linux gets, which is already covered above.
+### 3. Confirm no collateral change
+- The existing `SwapScript` tests (`tests/test_updater.py:345-429`) keep
+  every assertion they make today; they may only be extended for the new
+  log-path argument.
+- The Linux/macOS launch line in `_quit_for_update` is not touched.
+- `write_swap_script`'s `%TEMP%` workdir behaviour is not touched (see
+  "Non-goals").
 
 ## Affected areas
-- New files: `assets/icon.svg`, `assets/icon.ico`, `assets/icon.icns`,
-  `assets/icon-{16,32,48,256}.png`.
-- `afk_clicker.py` — new `_asset_dir()` helper (or reuse `is_frozen()` +
-  inline path join), `iconphoto` call near `root.title(...)`
-  (`afk_clicker.py:1772`).
-- `.github/workflows/release.yml` — `--icon`/`--add-data` flags added to
-  the `Build` step, per-platform (~`release.yml:126-138`).
-- `build.bat` — same two flags added to the Windows PyInstaller invocation
-  (`build.bat:58-64`).
-- No test-file renames needed (unlike part 1) — this is new surface, not a
-  rename of existing strings.
-
-This is a self-contained set of changes (one new asset folder, one runtime
-code addition, one build-flag addition per platform) — a single spec is
-appropriate; it does not need a further split.
+- `afk_clicker.py:2979-2986` (`_quit_for_update`, Windows branch only) —
+  single function, single platform branch. This is a small, single-layer
+  change; no sub-spec split needed (skill 11 doesn't apply here).
+- `afk_clicker.py:846-885` (`write_swap_script`, both branches) — gains
+  the log-path argument and the logging lines; `_install_worker`
+  (`afk_clicker.py:2946-2977`) passes the settings-dir log path.
+- `tests/test_updater.py` — new Windows-only test class (additive), plus
+  log tests for the `.sh` path that run locally.
+- `docs/implementation.md` (developer's own output) should record which
+  suspect(s) the CI evidence actually confirmed — Leo will want that on
+  record given three unconfirmed suspects were named going in.
+- No changes to `.github/workflows/ci.yml` or `release.yml`.
+- No data model / schema / API changes.
 
 ## Edge cases
-- **PhotoImage garbage collection**: if the loaded `PhotoImage` objects
-  aren't kept alive somewhere with `root`'s lifetime, the icon can go blank
-  after the reference is dropped (a well-known Tk gotcha) — the acceptance
-  criteria below check for this explicitly.
-- **Running from source (unfrozen) vs frozen**: `_asset_dir()` must resolve
-  correctly in both cases; the existing test environment runs unfrozen
-  (Linux, Xvfb, no PyInstaller build), so this is the path most likely to
-  be exercised by the test suite — the frozen path can only be verified by
-  an actual CI build (see "Acceptance criteria").
-- **Missing/unbuilt asset files**: if a developer's checkout is missing
-  `assets/icon-*.png` (e.g. a shallow export before assets are committed),
-  `iconphoto` should fail loudly at startup rather than silently produce a
-  blank window that's hard to diagnose — do not wrap the load in a bare
-  `try/except` that swallows the error, per
-  `docs/CODING-GUIDELINES.md`'s input-validation section's spirit (fail
-  visibly, don't guess). A missing asset is a packaging bug, not bad user
-  input, so this is a startup-time crash, not a "corrupt config, start from
-  defaults" case.
-- **Linux has no equivalent of `--icon`**: covered above — `iconphoto` is
-  the whole story there, and that's an accepted platform difference, not a
-  gap to work around.
-- **Small-size legibility**: per Leo's own sketch note, the mouse detail
-  goes muddy at 20px. This spec does not resolve it (see "Open questions").
+- **Relaunch path containing spaces** (real installs land in `Program
+  Files`) — covered by giving the dummy `target`/`relaunch` fixture paths a
+  space (see step 1 above); `start "" "{relaunch}"` is already quoted
+  correctly today, this just guards the fix from regressing it.
+- **Target directory has stale files not present in the staged build** —
+  already exercised by the `old.txt` disappearing assertion; `/MIR`'s pruning
+  behavior is unchanged by this fix.
+- **CI runner job-object cleanup**: GitHub Actions Windows runners sometimes
+  assign spawned process trees to a job object that gets torn down (and kills
+  children) at the end of a workflow step, independent of whether the actual
+  parent process (our short-lived launcher) exited on purpose. If the repro
+  is still red after the real fix specifically on the "process outlives its
+  immediate parent" axis, that's a CI-environment artifact, not evidence the
+  production fix is wrong — flagged under "Open questions" #2, not a blocker
+  to starting.
+- **Antivirus/Defender briefly locking or scanning a freshly-written
+  `apply-update.cmd`/relaunch exe** — out of scope; not something a
+  `creationflags` change can control, and not what Leo observed (his manual
+  run of the identical script worked).
+- **Empty staged directory / zero-byte update** — pre-existing behavior
+  (`robocopy /MIR` against an empty source deletes everything from target),
+  unaffected by and out of scope for this fix.
+- **Concurrent double-click of "Install"** — prevented UI-side today by
+  `enabled=False` during the worker; unrelated to this fix.
 
 ## Acceptance criteria
-- [ ] Given `assets/icon.svg`, when read, then its contents are
-  byte-for-byte the SVG in "Proposed approach" above.
-- [ ] Given the app launched from source (unfrozen, Xvfb), when the window
-  opens, then `root.iconphoto` was called with at least one non-empty
-  `PhotoImage` and no exception was raised — checkable via a UI test that
-  constructs the app and inspects `self._icon_imgs` (or equivalent) is
-  non-empty and each image's `width()`/`height()` is > 0.
-- [ ] Given the same launch, when the test suite runs a second time (or the
-  UI is rebuilt, per the existing `_rebuild_ui` pattern elsewhere in this
-  codebase), then the icon references are not dropped/garbage-collected —
-  i.e. the reference is held on `self` or another object with `root`'s
-  lifetime, not a bare local that falls out of scope.
-- [ ] Given `assets/icon-16.png` (or any one PNG) is deleted, when the app
-  is launched, then it raises visibly (an uncaught or explicitly-surfaced
-  error) rather than starting with a silently blank icon.
-- [ ] Given `.github/workflows/release.yml`'s Build step per platform, when
-  read, then the Windows job's PyInstaller invocation includes
-  `--icon assets\icon.ico` (or `assets/icon.ico` — whichever separator
-  PyInstaller accepts on that runner) and `--add-data "assets;assets"`; the
-  macOS job includes `--icon assets/icon.icns` and
-  `--add-data "assets:assets"`; the Linux job includes
-  `--add-data "assets:assets"` (no `--icon`).
-- [ ] Given a CI build actually runs (this can only be verified once merged
-  and built — flag this explicitly to the reviewer, since local test env is
-  Linux-only per this project's conventions and cannot prove the Windows
-  `.ico`/macOS `.icns` embedding), when the Windows `.exe` is inspected,
-  then it shows the Loop icon in Explorer/taskbar; when the macOS `.app` is
-  inspected in Finder, then it shows the Loop icon.
-- [ ] Given `build.bat`, when read, then it includes the same `--icon`/
-  `--add-data` flags as the release workflow's Windows job (kept in sync,
-  per the project's existing "build.bat pins the same versions CI does"
-  convention in `TECHSTACK.md`).
+- [ ] Given the current (pre-fix) code, when the new Windows-only test runs
+      on the PR's `windows-latest` CI leg, then it fails (target not fully
+      mirrored and/or relaunch marker missing within the timeout) —
+      confirmed by actually observing this red run before implementing the
+      fix, not assumed.
+- [ ] Given the fixed `_quit_for_update`, when the same test runs on
+      `windows-latest` CI, then it passes: `target/new.txt` exists,
+      `target/old.txt` is gone, and the relaunch marker file exists, all
+      within the timeout.
+- [ ] Given the fix, when the full suite runs via `ci.yml` on all three
+      platforms (`ubuntu-latest`, `windows-latest`, `macos-latest`), then
+      every previously-passing test — including `SwapScript`
+      (`tests/test_updater.py:345-429`) — still passes unmodified.
+- [ ] Given the fix, when `_quit_for_update` runs on Linux/macOS, then its
+      `subprocess.Popen(["/bin/sh", script], start_new_session=True)` line is
+      byte-for-byte unchanged.
+- [ ] Given 0.6.0 built and installed by hand once on a real Windows machine
+      (manual verification — CI cannot fully simulate a double-clicked
+      `--windowed` frozen exe), when Settings → Install is used to update to
+      a later release, then: no console window is visibly flashed, the
+      install folder is fully replaced, and the relaunched instance reports
+      the new version. Call this out explicitly to Leo as a manual check
+      once 0.6.0 ships — automated CI evidence alone does not close this
+      criterion.
+- [ ] `docs/implementation.md` states, with the CI run's actual evidence,
+      which of the three named suspects was confirmed (not asserted).
+- [ ] Given a successful update (the Windows acceptance test on CI, and the
+      `.sh` path on Linux locally), then the log path passed to
+      `write_swap_script` holds one fresh log for that attempt whose steps
+      include the copy step's exit code and end with `done`.
+- [ ] Given a script whose copy step fails (e.g. an unreadable/missing
+      staged dir), then the log records the failing exit code and has **no**
+      `done` line.
+- [ ] Given a second update after a first, the log holds only the second
+      attempt (truncated, not appended).
+- [ ] Existing `SwapScript` tests may be extended for the new argument but
+      not weakened — every assertion they make today still holds.
 
 ## Open questions
-- **Simplified small-size variant**: Leo's own sketch note says the mouse
-  gets muddy at 20px, and suggests a simplified small-size variant (drop
-  the mouse, keep loop+arrow) as "a legitimate design question." This spec
-  deliberately does not decide it — **routing this to the ux-designer
-  stage**: either (a) ship one icon at all sizes (simplest, matches "don't
-  guess at pixel art" — the assumption this spec proceeds under if
-  ux-designer has no objection), or (b) ux-designer specifies a simplified
-  16/32px glyph (loop+arrow only) as a second SVG variant, in which case
-  `assets/icon-16.png`/`icon-32.png` are rasterized from that variant
-  instead of a straight downscale of the full icon. Whichever is chosen,
-  the acceptance criteria above (non-empty PhotoImage, no GC, visible
-  failure on missing asset) hold unchanged.
-- **`.ico`/`.icns` generation tool**: not mandated (see "Proposed
-  approach") — whoever implements this picks any tool that produces a
-  correct multi-size `.ico`/valid `.icns` from the SVG; not a blocking
-  decision, just noted so the developer doesn't wait on an answer.
+1. **Leading fix hypothesis, to be confirmed empirically by the repro's
+   captured evidence, not decided here.** `DETACHED_PROCESS` is meant for a
+   process that will never need a console of its own; `cmd.exe` running
+   `tasklist`/`find`/`timeout`/`robocopy` very much does. The standard fix
+   for "launch a console-subsystem command with no visible window" is
+   `CREATE_NO_WINDOW` (`0x08000000`) instead of `DETACHED_PROCESS`, which
+   still gives the process tree a real (hidden) console — avoiding both the
+   flash (suspect 1) and `timeout` having no console to read from (suspect
+   2) — combined with explicit `stdin=subprocess.DEVNULL,
+   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL` so no handle is left
+   ambiguous. **Proceeding under the assumption this is the fix the repro
+   will confirm.** If instead the captured log/behavior points at suspect 3
+   (process tree dying with the parent), the remedy is different
+   (`CREATE_BREAKAWAY_FROM_JOB` and/or an explicit Job Object exempting the
+   child) and the developer should apply that instead — this is a technical
+   branch resolved by the CI evidence during implementation, not something
+   that needs Leo's input before starting.
+2. **CI job-object risk, informational, not blocking.** Noted under "Edge
+   cases" — if the repro is flaky specifically on outliving its parent when
+   run under GitHub's Windows runner, that may be a CI-runner artifact rather
+   than the real-world bug. Worth Leo knowing about if the repro proves hard
+   to get stable, but not a reason to hold off starting.
+3. **Permanent step-logging — resolved by Leo, 2026-09-14: yes, ship it**,
+   and the app should ask the person to send it. Split: the log ships in
+   this cycle (Goals, "Shipped update log"); the in-app prompt that opens a
+   prefilled GitHub issue with the log is a separate follow-up ticket. Note
+   for that follow-up, not this cycle: the log contains local paths (user
+   name in `C:\Users\…`), so the prompt should show the person what gets
+   sent before opening the issue.
 
 ## Risk / rollback notes
-- All additions are new files plus new, narrowly-scoped code (one helper,
-  one `iconphoto` call, a few build flags) — nothing existing is modified
-  behaviorally. Risk is concentrated in the two things only CI can prove
-  (correct `.ico`/`.icns` embedding on Windows/macOS) — called out
-  explicitly in "Acceptance criteria" as not locally verifiable.
-- Rollback is a straight revert; no on-disk user state (settings, staged
-  updates) is touched by any of this.
+- Blast radius of the fix itself is one function, one platform branch,
+  additive test only — a `git revert` of the single commit fully undoes it.
+- If `CREATE_NO_WINDOW` (or whatever the confirmed fix turns out to be)
+  changes process-exit-code visibility or buffering in some Windows
+  configuration not exercised by `windows-latest`, that would only surface on
+  a real user's machine, not in CI — this is the same class of gap the
+  ticket already accepts (CI is the only Windows evidence we have; a manual
+  check on 0.6.0 is called out explicitly in "Acceptance criteria").
+- The fix does not change on-disk script contents or the `%TEMP%` workdir,
+  so it carries no risk to the filesystem-root guard tests already covering
+  that path.
+- Existing installed clients (0.3.1, 0.5.0) are unaffected either way — they
+  run their own already-shipped, unfixed script regardless of what ships in
+  0.6.0 (see "Non-goals").

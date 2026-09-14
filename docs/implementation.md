@@ -1,363 +1,746 @@
-# Implementation: App icon — the Loop icon (part 2 of 2, G#34/GH#60)
+# Implementation: Windows in-app install never completes (G#35 / GH#63) — Phase A
 
 ## Summary
+Phase A only, per dispatch: added a Windows-only CI reproduction of the
+`_quit_for_update` install-swap bug to `tests/test_updater.py`. No production
+code (`afk_clicker.py`) was touched. This phase's job is to make the bug
+observable on `windows-latest` CI with enough captured evidence to attribute
+it to one of the three suspects in `docs/spec.md` — the actual fix is phase B.
 
-Gave Clickwork a real icon end to end: a committed `assets/icon.svg` (full)
-and `assets/icon-simplified.svg` (loop-only, per `docs/design.md`'s small-size
-decision) are the sources; `assets/icon-{16,32,48,256}.png`, `assets/icon.ico`
-and `assets/icon.icns` are the rasterized/packaged outputs, generated once,
-out of band, and committed. `afk_clicker.py` loads the four PNGs at startup
-via a new `_asset_dir()` helper and calls `root.iconphoto(True, *self._icon_imgs)`
-next to `root.title("Clickwork")`, holding the `PhotoImage`s on `self` so they
-survive `_rebuild_ui()` and never get garbage-collected. `release.yml` and
-`build.bat` now pass `--icon`/`--add-data` to PyInstaller, per platform. No
-new frozen or CI dependency was added — Pillow/cairosvg were only ever used
-in a throwaway venv to generate the committed binary assets.
+Revised once, after an orchestrator review caught two fidelity gaps in the
+first draft's acceptance case before it was pushed — see "Deviations from
+spec" and the second half of "Key decisions / tradeoffs" for what changed and
+why. Both were real: they could have made the acceptance case pass on
+unfixed code, which would have defeated the entire point of phase A.
+
+## Root cause
+Not yet determined — that is phase A's whole point. This phase adds the
+reproduction and its diagnostics; the CI run this PR triggers is the evidence
+phase B diagnoses from. See "Known limitations" for what could not be checked
+without a Windows machine.
 
 ## Changes by file
-
-- **`assets/icon.svg`** (new) — the full-icon source, copied byte-for-byte
-  from `docs/spec.md`'s "Proposed approach" block.
-- **`assets/icon-simplified.svg`** (new) — the loop-arrow-only variant from
-  `docs/design.md` (drops the mouse `clipPath`/rects/line), used to rasterize
-  the 16/32 px outputs.
-- **`assets/icon-16.png`, `icon-32.png`** (new) — rasterized from
-  `icon-simplified.svg`; **`icon-48.png`, `icon-256.png`** (new) — rasterized
-  from `icon.svg`. All RGBA PNGs, exact pixel sizes. Used at runtime via
-  `tk.PhotoImage`.
-- **`assets/icon.ico`** (new) — Windows multi-size icon: 16×16/32×32 from the
-  simplified SVG, 48×48/256×256 from the full SVG, built with Pillow's ICO
-  writer using exact per-size art (`sizes=`/`append_images=`, matched by
-  exact pixel dimensions — no proportional-scale fallback used for any of
-  the four sizes).
-- **`assets/icon.icns`** (new) — macOS bundle icon. Pillow's ICNS writer only
-  ever emits a fixed set of slots (32/64/128/256/512/1024 physical px, i.e.
-  the 16pt/32pt/128pt/256pt/512pt logical icons at 1x/2x) — there is no
-  writable slot below 32 physical px. The simplified SVG went into the two
-  smallest slots it has (32 px → `ic11`, the 16pt icon's Retina slot; 64 px →
-  `ic12`, the 32pt icon's Retina slot); the full SVG filled every slot from
-  128 px up (`ic07`/`ic13`/`ic08`/`ic14`/`ic09`/`ic10`). This reproduces
-  design's "16/32 simplified, 48+ full" cutoff exactly, using the only slots
-  the format and Pillow's writer actually have for a small icon.
-- **`assets/README.md`** (new) — short note (per spec) that the two SVGs are
-  the editable sources and everything else here is regenerated from them;
-  points at this doc for the exact regeneration commands.
-- **`afk_clicker.py`**
-  - New `_asset_dir()` (module-level, right after `is_frozen()`, which it
-    reuses rather than re-checking `sys.frozen` inline): returns
-    `sys._MEIPASS/assets` when frozen, else the directory next to
-    `afk_clicker.py`.
-  - In `AfkAutoclicker.__init__`, right after `root.title("Clickwork")`:
-    loads `icon-{16,32,48,256}.png` into `self._icon_imgs` and calls
-    `root.iconphoto(True, *self._icon_imgs)`. No `try/except` around this —
-    a missing PNG is a packaging bug and must raise, per the spec's edge
-    case and `docs/CODING-GUIDELINES.md`'s input-validation section.
-    `self._icon_imgs` sits outside `_build_ui()`/`_rebuild_ui()`'s scope
-    (that method only tears down `root`'s *children*, never `root` itself),
-    so the icon survives every rebuild without being re-created.
-  - `tk.PhotoImage(master=root, ...)` — **not** the spec snippet's bare
-    `tk.PhotoImage(file=...)`. Without an explicit `master`, `PhotoImage`
-    binds to Tkinter's process-global "default root" (the first `Tk()`
-    instance ever created in the process), not necessarily the `root`
-    argument this constructor was actually given. This is invisible in
-    normal use (one `Tk()` per process) but broke immediately under the
-    existing test suite, which builds many separate `tk.Tk()` interpreters
-    in one process (see "Deviations from spec" below).
-- **`.github/workflows/release.yml`** — the single shared `Build` step split
-  into three (`Build (Windows)`/`(Linux)`/`(macOS)`, each `if: runner.os ==
-  '...'`), matching the file's own existing convention for `Smoke test`/
-  `Package` (already split three ways for the same platform-specific-flag
-  reason). All six `--hidden-import`s are kept on all three platforms,
-  unchanged from the original shared step — only `--add-data`/`--icon` were
-  added, per platform:
-  - Windows: `--add-data "assets;assets" --icon assets\icon.ico`
-  - Linux: `--add-data "assets:assets"` (no `--icon` — no PyInstaller
-    equivalent on Linux, per spec)
-  - macOS: `--add-data "assets:assets" --icon assets/icon.icns`
-- **`build.bat`** — same two flags added to the Windows PyInstaller
-  invocation (`--add-data "assets;assets" --icon assets\icon.ico`), with a
-  comment noting it's kept in sync with `release.yml`'s Windows build step.
-  `--name "AFK Farm Clicker"` untouched, as required.
-- **`tests/test_ui.py`** — four new tests (see "Key decisions" for the
-  sabotage-check results):
-  - `AssetDir.test_unfrozen_resolves_next_to_the_module` — `_asset_dir()`
-    returns `<dir of afk_clicker.py>/assets` when unfrozen.
-  - `AppIcon.test_icon_images_are_loaded_non_empty` — `self.ui._icon_imgs`
-    is non-empty and every image's `width()`/`height()` > 0.
-  - `AppIcon.test_icon_reference_survives_a_rebuild` — after
-    `_apply_appearance("light")` (a real, synchronous `_rebuild_ui()` call,
-    the same trigger `RunningClickerSurvivesRebuild` already uses), the
-    *same* `self._icon_imgs` list object is still on `self` (not a
-    freshly-built one) and every image is still alive.
-  - `AppIconMissingAsset.test_missing_png_raises_instead_of_starting_blank`
-    — monkeypatches `app._asset_dir` (save/restore in setUp/tearDown, this
-    suite's existing monkeypatch style, no `unittest.mock`) to an empty
-    directory and asserts `AfkAutoclicker(...)` raises `tk.TclError` rather
-    than starting with a blank icon.
+- `tests/test_updater.py`
+  - Added `ROOT` (module-level): the project root path, needed a second time
+    because the new reproduction's launcher runs in a *separate* interpreter
+    that does not inherit `tests/context.py`'s `sys.path` insert.
+  - Added `_SwapScriptLauncher` — a plain mixin (deliberately **not** a
+    `unittest.TestCase` subclass) holding the fixture builder, the GUI-
+    interpreter picker, the launcher subprocess spawner, the poll helper,
+    the mirrored-target check, the diagnostics formatter, and the
+    `_LAUNCHER` inline script template shared by both test classes below.
+    Kept as a non-`TestCase` mixin specifically so unittest's method
+    discovery can't accidentally make one class inherit (and silently
+    re-run) the other's `test_*` methods.
+  - Added `WindowsLaunchReproduction` (`@unittest.skipUnless(sys.platform ==
+    "win32", ...)`) — the acceptance case:
+    `test_production_launch_replaces_the_install_and_relaunches`. Launches
+    the swap script with `_quit_for_update`'s exact command, creationflags,
+    *and stdio* (none at all — no `stdout`/`stderr`/`stdin` kwarg of any
+    kind on the `Popen` call).
+  - Added `WindowsFixSuspectDiagnostics` (same skip guard) —
+    `test_diagnostic_variants`, three subTest variants, informational only,
+    never fails the suite.
+  - No other test in the file was touched.
 
 ## Key decisions / tradeoffs
+- **Separate OS process for the launcher, not an in-process call.** Suspect 3
+  (the process tree not surviving its parent exiting) can only be reproduced
+  if `write_swap_script`'s `os.getpid()` belongs to a process that then
+  itself exits — the test runner process does not exit after `Popen()`
+  returns, so calling `write_swap_script` directly from the test method could
+  never exercise that suspect. The launcher's inline code calls the real
+  `app.write_swap_script(...)`, launches the result, and returns — standing
+  in for `on_close()` tearing the app down right after `Popen()` returns.
+- **Config crosses the process boundary via environment variables (JSON),
+  not string-formatted into the launcher source.** `staged`/`target`/
+  `relaunch` are temp paths that can contain quotes, backslashes or spaces;
+  formatting them into a Python source string would either produce a syntax
+  error or, worse, get treated as code. `AFK_TEST_CFG` carries
+  `json.dumps(cfg)`, `AFK_TEST_ROOT` carries the project root, and
+  `AFK_TEST_ERROR_LOG` carries the crash-report path as its *own* env var
+  rather than a cfg key — so even a cfg parse failure still lands somewhere
+  readable (see the fidelity fix below).
+- **`_SwapScriptLauncher` is a plain mixin, not a `TestCase` subclass.**
+  The first draft had `WindowsFixSuspectDiagnostics(WindowsLaunchReproduction)`
+  to reuse fixture code; caught in local testing that this makes unittest
+  discover and re-run `test_production_launch_replaces_the_install_and_relaunches`
+  as part of the diagnostics class too, which would have made a class
+  documented as "must never fail the suite" do exactly that. Fixed by
+  extracting the shared methods into `_SwapScriptLauncher`, a class with no
+  `unittest.TestCase` in its MRO, mixed into each concrete test class
+  separately.
+- **Fixture spaces:** both `target dir` and `relaunch dir` (the directories
+  holding the target install root and the relaunch `.cmd`) contain a space,
+  per `docs/spec.md`'s "Edge cases" — real installs land under `Program
+  Files`, and this guards `start "" "{relaunch}"`'s existing quoting from a
+  regression, not just the happy path.
+- **Straggler cleanup uses a PowerShell one-liner matching the `afk-repro`
+  temp-dir prefix**, not a bare `taskkill /IM cmd.exe`. The bug under test is
+  exactly a process tree that might outlive the timeout, and a blanket
+  `cmd.exe` kill would also kill unrelated `cmd.exe` processes a CI step
+  might have running. Matching on the command line for the shared
+  `afk-repro`/`afk-repro-diag` prefix scopes the kill to processes this test
+  file itself spawned. Wrapped in `try/except`, printed not raised — it's
+  best-effort cleanup, not an assertion.
 
-- **`master=root` on every `PhotoImage`** (see above) was not in the spec's
-  code snippet but is required for correctness, not a style preference:
-  running the new tests without it, `SetActiveThemeWidgets
-  .test_dark_is_restored_after_light` (a pre-existing, unrelated test that
-  builds two separate `tk.Tk()` roots back to back in one process) failed
-  with `_tkinter.TclError: can't use "pyimageNNN" as iconphoto: not a photo
-  image` — the second root's `iconphoto` call was handed an image bound to
-  the *first* root's interpreter. `master=root` fixes this and is a strict
-  correctness improvement over the spec's literal snippet; recorded under
-  "Deviations from spec" below since it changes the exact call shown there.
-- **`.icns` slot mapping**: Pillow's `IcnsImagePlugin._save` hard-codes its
-  output slots to `{ic07:128, ic08:256, ic09:512, ic10:1024, ic11:32,
-  ic12:64, ic13:256, ic14:512}` (verified by reading
-  `PIL/IcnsImagePlugin.py` directly in the throwaway venv) — there is no
-  writable 16px-physical slot at all, and no "48" slot either. Rather than
-  write a raw ICNS container by hand (design's non-mandated "any tool"
-  clause allows this), the simplified variant was placed in the two
-  smallest slots the format/writer actually expose (32 px = the 16pt icon's
-  @2x representation, 64 px = the 32pt icon's @2x representation) — visually
-  and semantically equivalent to design's "16pt/32pt simplified" intent, and
-  full art fills every slot 128 px and up, matching design's "48+ full" (the
-  format's smallest non-Retina full-icon slot is 128 px, well past 48).
-  Verified by extracting each slot's image back out with
-  `PIL.IcnsImagePlugin.IcnsFile.getimage()` and inspecting the pixels (see
-  "How to verify locally").
-- **`.ico` construction**: Pillow's ICO writer matches `sizes=` entries to
-  images by *exact* pixel size among `[im] + append_images`, falling back to
-  a proportional `thumbnail()` of the base image only for sizes with no
-  exact match. All four sizes (16/32/48/256) were supplied as exact,
-  purpose-rendered images, so no fallback thumbnailing was used anywhere in
-  `icon.ico`.
-- **`release.yml`'s `Build` step split into three** rather than one step
-  with inline OS branching inside the folded scalar: the file already splits
-  `Smoke test`/`Package` this exact way for the same "flags differ per OS,
-  and a folded `run: >` scalar has no comment syntax and no shell
-  conditionals of its own" reason (see `ac-33-implementation.md`'s note on
-  this same constraint) — this keeps the new step consistent with the
-  file's existing convention rather than inventing a new one. All six
-  `--hidden-import` flags were kept on every platform's step, unchanged
-  from the original single step, since trimming them was never asked for
-  and isn't implied by anything in the spec/design.
-- **`selftest()` was not extended** in round 1 to load the bundled PNGs.
-  Neither `docs/spec.md` nor `docs/design.md` mentions `selftest()` anywhere
-  (both grepped — zero hits), and the spec's own acceptance criteria stop at
-  "the Windows `.exe`/macOS `.app` shows the Loop icon" as a CI-build-only,
-  not-locally-verifiable check. This was flagged explicitly for the
-  reviewer, who correctly caught it as a must-fix (round 1 under-scoped a
-  real robustness gap rather than a pure "not asked for" case) — **see
-  "Round 2" below**, which extends `selftest()` accordingly.
+### Round-2 fidelity fixes (post orchestrator-review, pre-push)
+Two problems in the first draft's acceptance case, both catchable only by
+reasoning about what a Windows process actually inherits — neither would
+have shown up in the Linux-only local run, since both are specifically about
+Windows stdio/handle semantics:
+
+1. **The acceptance case had stopped being byte-identical to production.**
+   The first draft passed `stdout=log, stderr=log` to the acceptance case's
+   `Popen()` call "for diagnostics." But suspects 1/2 are specifically about
+   console/handle availability for `tasklist`/`timeout`/`robocopy` — handing
+   `cmd.exe` real, usable stdio handles when production hands it none at all
+   is plausibly the exact thing that would make those suspects' failure mode
+   disappear, which could turn the acceptance case green *on unfixed code*
+   and defeat the whole point of phase A. Fixed: the acceptance case's
+   `Popen(["cmd", "/c", script], creationflags=...)` now carries no other
+   kwarg at all — `stdio_mode == "none"` in `_LAUNCHER`. The captured-stdio
+   variant moved to `WindowsFixSuspectDiagnostics` as
+   `production_flags+captured_stdio`, which only ever prints what it saw.
+2. **How the launcher itself was spawned leaked into the result.**
+   `_spawn_launcher` used `subprocess.run(..., capture_output=True)` — pipes.
+   If the grandchild `cmd.exe` ended up inheriting a pipe write handle,
+   `subprocess.run()` would block waiting for that handle to close (i.e.
+   until `cmd.exe` exits), which would silently defeat the "parent exits
+   immediately" premise the whole suspect-3 reproduction depends on — and
+   pipes are also handles production's actual launch (a frozen `--windowed`
+   PyInstaller exe, no console, no std pipes) never has. Fixed:
+   `_spawn_launcher` now starves the launcher's stdin (`subprocess.DEVNULL`)
+   and redirects its stdout/stderr to a real file
+   (`<workdir>/launcher-output.log`) instead of a pipe, and prefers
+   `pythonw.exe` next to `sys.executable` (GUI subsystem, no console — the
+   same shape as the frozen app) over `python.exe`, falling back to
+   `sys.executable` if no `pythonw.exe` exists alongside it. Because
+   `pythonw.exe` cannot be assumed to have a working `sys.stdout`/`stderr`
+   to print to at all, `_LAUNCHER`'s body no longer prints anything; instead
+   it wraps everything after reading `AFK_TEST_ERROR_LOG` in a
+   `try/except Exception` that writes `traceback.format_exc()` to that path
+   on any failure, so a launcher-side crash is still visible on disk
+   regardless of what stdio the chosen interpreter actually has. Both the
+   acceptance case and every diagnostic variant now assert/report the
+   interpreter used, the launcher's own captured output, and this error-log
+   content.
 
 ## Deviations from spec
-
-- `tk.PhotoImage(file=...)` → `tk.PhotoImage(master=root, file=...)`. The
-  spec's own snippet omits `master=`; omitting it is a latent bug that only
-  surfaces when more than one `Tk()` root exists in a process (exactly what
-  this test suite does, and what a hypothetical future `Toplevel` would also
-  trigger). This is the only functional change from the spec's literal code;
-  everything else (helper name/shape, call site, `self._icon_imgs` naming,
-  `True` as the first `iconphoto` arg) matches the spec as written.
-- `.icns` slot sizes are `{32, 64, 128, 256, 512, 1024}` physical px rather
-  than design's literal `{16, 32, 48, 128, 256, 512}` table — see "Key
-  decisions" above. This is a tooling constraint (Pillow's ICNS writer has
-  no other slots to write to, and there is no standard 48px ICNS chunk type
-  at all), not a design disagreement; the *logical* icon sizes users
-  actually see (16pt, 32pt menu bar/Dock icons; 128pt+ Finder icons) get the
-  same simplified/full split design specified.
+- None from `docs/spec.md`'s "Proposed approach §1" beyond what's already
+  covered above (the round-2 fixes tighten fidelity to the spec's own "exact
+  same launch line" requirement — they do not relax it).
+- One extra beyond §1's own wording: an explicit `tearDown`/`_kill_stragglers`
+  straggler-process cleanup — the dispatch instructions asked for it
+  directly ("kill any leftover cmd/relaunch processes in tearDown"), and it
+  does not change what's under test.
+- Per the dispatch instructions, nothing in `afk_clicker.py` was touched, and
+  no extraction of a shared `launch_swap_script(script)` helper was done —
+  that refactor is explicitly deferred to phase B so this phase's red run is
+  against unmodified production code (`_LAUNCHER`'s Popen line is a
+  hand-mirrored copy of `afk_clicker.py:2982-2983`, called out by comment so
+  it can't silently drift).
 
 ## Known limitations
-
-- Per spec's own acceptance criteria: the Windows `.ico`/macOS `.icns`
-  embedding can only be proven by an actual CI build on those runners —
-  this local environment is Linux-only. What *was* verified locally: both
-  files parse as valid ICO/ICNS via Pillow, and the correct per-size
-  artwork (simplified vs. full) was extracted and visually inspected for
-  every slot in both containers (see "How to verify locally").
-- `assets/icon.ico`/`icon.icns` are binary and not human-diffable in a
-  typical `git diff` — reviewable by extracting and viewing, same as any
-  committed binary asset (the spec's own stated tradeoff for not generating
-  these in CI).
+- **Not run against real Windows.** This box is Linux-only; the test classes
+  skip (`unittest.skipUnless(sys.platform == "win32", ...)`) rather than
+  running here. Both compile clean (`python -m py_compile`), the embedded
+  `_LAUNCHER` string was verified separately to `compile()` without a syntax
+  error, and I read through the Popen/env/JSON round-trip and the
+  `pythonw.exe`-selection logic by hand, but none of it has executed —
+  including whether `pythonw.exe` actually sits next to `python.exe` on
+  GitHub's `windows-latest` runner image (expected for a standard CPython
+  install via `actions/setup-python`, but unconfirmed). That only happens
+  once this PR's `windows-latest` CI leg runs.
+- **Whether the red run actually reproduces the bug is unconfirmed until CI
+  runs.** The reproduction is built exactly to the spec's step-by-step
+  design, mirroring the real launch line and stdio shape as closely as a
+  test process can, but "does it actually go red on `windows-latest`" is the
+  thing this dispatch exists to find out — that's the evidence phase B needs
+  before touching `_quit_for_update`.
+- **CI job-object risk** (`docs/spec.md` "Edge cases"/"Open questions" #2):
+  if GitHub's Windows runner tears down a job object that kills the spawned
+  `cmd`/`robocopy` tree independent of whether the launcher process exited on
+  purpose, the repro could stay red even under a scenario where a real user's
+  machine would have succeeded. Flagged, not solved, in this phase.
+- **`WindowsFixSuspectDiagnostics`'s PowerShell straggler-kill and `tasklist`
+  diagnostics have not been exercised on a live Windows box** for the same
+  reason as above — read carefully for correctness (parameter names,
+  `Get-CimInstance`/`Stop-Process` cmdlet syntax) but not run.
 
 ## How to verify locally
+This machine is Linux, so the new classes can only be checked for "skip
+cleanly, don't break anything else":
 
-Test suite (this project's documented headless setup):
 ```
-python3 -m venv /tmp/some-venv && /tmp/some-venv/bin/pip install pynput==1.7.7
-Xvfb :93 -screen 0 1280x1024x24 -nolisten tcp &
-cd /home/dev/projects/afk-clicker
-DISPLAY=:93 /tmp/some-venv/bin/python -m unittest discover -s tests -t .
-pkill -f "Xvfb :93"
-```
-Result in this session: **297 tests, OK (skipped=5)** — up from the
-293/skipped=5 baseline (confirmed identical on `git stash` of this cycle's
-changes), i.e. exactly the 4 new tests added, no regressions.
+python3 -m py_compile tests/test_updater.py
 
-`python3 -m py_compile afk_clicker.py tests/test_ui.py` — no syntax errors.
+# venv with pynput, needed for the whole suite to import afk_clicker at all
+python3 -m venv <venv>
+<venv>/bin/pip install pynput
 
-`yaml.safe_load()` against the modified `.github/workflows/release.yml` —
-parses cleanly; each `Build (…)`/`Smoke test (…)`/`Package (…)` step's `run:`
-string was printed and inspected directly to confirm the folded scalars
-produced the intended single-line commands with the right `--icon`/
-`--add-data` per platform.
-
-To eyeball the running window's icon directly (Linux/X11):
-```
-DISPLAY=:93 /tmp/some-venv/bin/python afk_clicker.py
+# Xvfb only matters for the rest of the suite (pynput's X11 backend);
+# WindowsLaunchReproduction/WindowsFixSuspectDiagnostics don't need a display
+Xvfb :99 -screen 0 1280x1024x24 -nolisten tcp &   # skip if already running
+DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t . -v
 ```
 
-### Regenerating the committed assets
+Actually run in this session, after the round-2 fixes:
+- `python3 -m py_compile tests/test_updater.py` → compiled clean.
+- `compile(_SwapScriptLauncher._LAUNCHER, "<launcher>", "exec")` → syntax OK.
+- Full suite: `DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t . -v`
+  → `Ran 300 tests ... OK (skipped=7)`, with
+  `test_production_launch_replaces_the_install_and_relaunches` and
+  `test_diagnostic_variants` both reporting `skipped 'Windows launch
+  reproduction'` and every pre-existing test (including `SwapScript`)
+  unaffected.
 
-Not run by CI or the app — a one-off, out-of-band step. Requires a
-throwaway venv only (never a project or CI dependency):
-```
-python3 -m venv /tmp/some-venv
-/tmp/some-venv/bin/pip install cairosvg Pillow
-```
-Then, from a small script (see below) run as
-`/tmp/some-venv/bin/python gen_icons.py /home/dev/projects/afk-clicker`,
-which:
-1. Rasterizes `assets/icon-simplified.svg` to 16×16 and 32×32 PNGs, and
-   `assets/icon.svg` to 48×48 and 256×256 PNGs, via
-   `cairosvg.svg2png(url=..., output_width=N, output_height=N)` →
-   `PIL.Image.open(io.BytesIO(...))`. Saves these four as
-   `assets/icon-{16,32,48,256}.png`.
-2. Builds `assets/icon.ico` with
-   `png_256.save("icon.ico", sizes=[(16,16),(32,32),(48,48),(256,256)],
-   append_images=[png_16, png_32, png_48])` — Pillow matches each requested
-   size to the provided image of that exact size.
-3. Builds `assets/icon.icns` with `icns_1024.save("icon.icns",
-   append_images=[icns_32, icns_64, icns_128, icns_256, icns_512])`, where
-   `icns_32`/`icns_64` are rendered from the simplified SVG and
-   `icns_128`/`icns_256`/`icns_512`/`icns_1024` (the base image) from the
-   full SVG — see "Key decisions" for why these particular six sizes.
+**To verify the actual reproduction**, this needs to go through
+`windows-latest` CI: push this branch, open the PR, and read the "Run the
+test suite (Windows / macOS)" step's log for `tests.test_updater`. Look for:
+- `test_production_launch_replaces_the_install_and_relaunches ... FAIL` (the
+  expected red result on today's code) with the assertion message's captured
+  diagnostics — `launcher interpreter: ...` (confirm it's `pythonw.exe`),
+  `target mirrored: ...`, `relaunch marker present: ...`, the `tasklist
+  cmd.exe` output, `launcher stdout/stderr: ...`, and `launcher crash
+  traceback: ...` (should read "none" — a non-empty traceback here means the
+  launcher itself broke, not `_quit_for_update`).
+- The three `[diagnostic:...]` lines printed by `test_diagnostic_variants` —
+  `create_no_window+devnull_stdio`, `production_flags+captured_stdio`, and
+  `production_flags+parent_stays_alive` — each reports `succeeded=True/False`
+  plus `cmd_output` (only populated for `captured_stdio`). Whichever
+  configuration flips to `succeeded=True` relative to the acceptance case,
+  and whatever `production_flags+captured_stdio`'s `cmd_output` actually
+  shows (e.g. `timeout`'s "Input redirection is not supported"), is the
+  strongest signal for which of the three named suspects is real.
 
-The script itself was not committed (throwaway per this project's "don't add
-to the tree what you can't remove" convention) — the four bullet points
-above plus the exact Pillow/cairosvg calls used are sufficient to
-reconstruct it if `assets/icon.svg`/`icon-simplified.svg` ever change.
+## Phase B — the fix
 
-Verification of per-size artwork (both containers), done in this session
-via the throwaway venv:
-```python
-from PIL import Image
-im = Image.open("assets/icon.ico")
-im.ico.sizes()                       # {(16,16), (32,32), (48,48), (256,256)}
-im.ico.getimage((16, 16)).save(...)  # inspected — simplified (loop only)
-im.ico.getimage((48, 48)).save(...)  # inspected — full (mouse present)
+### Root cause, as evidenced by phase A's CI run (windows-latest, run
+34898517271, commit 6dcab6b)
+- **Acceptance case: FAIL**, as designed to. Target not mirrored, no
+  relaunch marker, a `cmd.exe` (PID 9324, session 2) still alive after 45s.
+  Launcher itself exited 0, no traceback — so the launcher process reached
+  `Popen()` and returned cleanly; the *spawned tree* is what stalled.
+- **`create_no_window+devnull_stdio`: succeeded=True.** Giving the tree a
+  real hidden console instead of none fixes it outright.
+- **`production_flags+parent_stays_alive` (5s): succeeded=False.** Keeping
+  the launcher alive longer after `Popen()` did not help — **suspect 3
+  (the tree dying with its parent) is ruled out.**
+- **`production_flags+captured_stdio`: succeeded=False, cmd_output=''.**
+  Completely empty — no `timeout` "Input redirection is not supported"
+  message ever appeared, so **suspect 2 is not confirmed as the cause**;
+  the script stalls with *no output at all* under a console-less `cmd`.
+- Taken together, this is consistent with **suspect 1**: `DETACHED_PROCESS`
+  gives `cmd.exe` no console, and `cmd` (or a console-subsystem child it
+  starts — `tasklist`/`find`/`timeout`/`robocopy`) stalls trying to get one,
+  rather than crashing or printing anything. I am not claiming stronger than
+  that — the empty `cmd_output` rules suspect 2 out as *confirmed*, it does
+  not prove suspect 1 beyond the `create_no_window` variant's own success.
 
-from PIL.IcnsImagePlugin import IcnsFile
-icns = IcnsFile(open("assets/icon.icns", "rb"))
-icns.itersizes()                     # (16,16,2),(32,32,2),(128,128,1/2),(256,256,1/2),(512,512,1/2)
-icns.getimage((32, 32, 2)).save(...) # 64px physical, inspected — simplified
-icns.getimage((128, 128, 1)).save(...)  # inspected — full
-```
-Every extracted PNG was viewed directly (Read tool) and confirmed to match
-the intended variant per size.
+### Phase B CI confirmation and precise stall point (windows-latest, run
+34900930076, commit b3e841d)
+- **Fix confirmed on CI:** `WindowsLaunchReproduction.test_production_launch_
+  replaces_the_install_and_relaunches` **ok**,
+  `test_wait_loop_paces_polls_instead_of_busy_spinning` **ok**,
+  `SwapScriptWindowsCmdText.*` **ok**. Ubuntu and macOS legs green.
+- **The single remaining diagnostic
+  (`WindowsFixSuspectDiagnostics.test_old_creationflags_still_stall_for_the_
+  record`, `old_creationflags+no_stdio`) narrows the stall to a specific
+  line:** `succeeded=False`, and the `update.log` it produced under the old,
+  pre-fix flags contained **only** the `start pid=3324 staged=... target=...
+  relaunch=...` line — no `wait finished after N iterations` line at all.
+  `COUNT` is only incremented, and the "wait finished" line only written,
+  *after* `tasklist /FI "PID eq {pid}" | find "{pid}"` returns and reports
+  the pid gone; the launcher (pid 3324) had already exited by the time the
+  script ran that check. A log stopping right after `start` therefore means
+  **the first `tasklist | find` pipeline itself never returned** under
+  `DETACHED_PROCESS` — the stall is at that exact line, not somewhere later
+  in the wait loop, and not in the copy/relaunch steps (which never even ran
+  in this diagnostic). This is the most precise root-cause evidence
+  available; I'm not extending it further than that — *why* a `tasklist |
+  find` pipeline hangs under `DETACHED_PROCESS` specifically (console
+  allocation blocking? pipe creation between the two console-subsystem
+  processes?) is not established by this evidence, only that it does there
+  and that the identical script completes end to end (wait finished, copy
+  exit code, done, all logged) under `CREATE_NO_WINDOW`.
 
-## Round 2 (docs/test-review.md Finding #1)
+### The fix
+- **`launch_swap_script(script)`** (`afk_clicker.py:932-956`), a new
+  module-level function holding all the platform `Popen` logic that used to
+  live inline in `_quit_for_update`. Windows:
+  `subprocess.Popen(["cmd", "/c", script], creationflags=CREATE_NO_WINDOW
+  (0x08000000) | CREATE_NEW_PROCESS_GROUP (0x00000200), stdin=stdout=stderr
+  =subprocess.DEVNULL)`. `CREATE_NEW_PROCESS_GROUP` is kept (spec: "unless
+  you have a reason" — I don't have one to drop it, and it costs nothing).
+  Linux/macOS: `subprocess.Popen(["/bin/sh", script],
+  start_new_session=True)`, byte-for-byte identical to before — confirmed by
+  diff, not just by eye (see "Verification" below).
+- **`_quit_for_update`** (`afk_clicker.py:3050-3053`) now just calls
+  `launch_swap_script(script)` then `self.on_close()`. This is also what the
+  Windows acceptance test calls directly (`_LAUNCHER`'s `stdio_mode ==
+  "production"` branch in `tests/test_updater.py`), so the test can never
+  silently drift from what production actually runs.
+- **`timeout` replaced with `ping -n 2 127.0.0.1 >nul`** in the `.cmd`'s wait
+  loop. `timeout /t 1 /nobreak` refuses redirected stdin outright ("ERROR:
+  Input redirection is not supported") when it has no real console to read
+  from — under `stdin=subprocess.DEVNULL` (needed regardless, so no handle
+  is left ambiguous) that failure is instant and silent, which would have
+  turned the wait loop into a tight busy-loop of `tasklist` calls even after
+  switching to `CREATE_NO_WINDOW`. `ping -n 2 127.0.0.1 >nul` is the
+  conventional console-free ~1s delay and needs nothing from stdin.
 
-### What was verified before acting
-Read `selftest()` (afk_clicker.py:228-254 before this round), the
-`--selftest` short-circuit (`if "--selftest" in sys.argv: sys.exit(selftest())`,
-before `AfkAutoclicker` is ever constructed), and the icon-loading code in
-`AfkAutoclicker.__init__` (afk_clicker.py:1794-1799 before this round). The
-finding was correct as written: `selftest()` never touched `_asset_dir()` or
-any `icon-*.png`, and `--selftest` returns before `AfkAutoclicker.__init__`
-ever runs, so none of the three per-platform Smoke test steps in
-`release.yml` exercised the icon-loading code this ticket's part 1 added. A
-broken `--add-data` destination on any OS would stay green through Build,
-Smoke test, and Package, then crash the shipped `--windowed` build on first
-launch with an uncaught `tk.TclError` (by design — this code deliberately
-does not catch it, per the spec's "fail loudly" edge case). Also confirmed
-Linux CI already runs `--selftest` under `xvfb-run -a` (`release.yml:205`,
-pre-existing) and Windows/macOS runners have native GUIs, so a real `tk.Tk()`
-root was already provably safe to open in `selftest()` on all three platforms
-(the pre-existing `tk.Tk().destroy()` line proved this before this round;
-nothing about opening one more root changes that).
+### Shipped update log
+- **`write_swap_script(staged, target, relaunch, log_path)`** — `log_path`
+  is a new **required, positional** argument (not keyword-with-a-default).
+  A default would create two code paths (logging vs. not), and every real
+  caller must always pass one now — the only reason to omit it would be a
+  test that doesn't care, and those are updated below anyway. Every existing
+  caller was updated: `_install_worker` (`afk_clicker.py:3033-3034`) passes
+  `os.path.join(os.path.dirname(config_path()), "update.log")`; every
+  `SwapScript`/`WindowsLaunchReproduction`/`WindowsFixSuspectDiagnostics`
+  call site in `tests/test_updater.py` was updated to pass one.
+- **Directory creation is Python-side, inside `write_swap_script` itself**
+  (`log_dir = os.path.dirname(os.path.abspath(log_path)); if log_dir:
+  os.makedirs(log_dir, exist_ok=True)`), not left to the `.cmd`/`.sh` text.
+  Simpler, cross-platform, directly unit-testable
+  (`SwapScriptWindowsCmdText.test_the_log_directory_is_created`), and avoids
+  `cmd`'s own `mkdir`/`if not exist` quoting quirks on a path that can
+  contain spaces.
+- **Lifecycle:** truncated at the top of every run (`> "%LOG%"` / `: >
+  "$LOG"`), never appended — one log per update attempt. Verified by
+  `SwapScriptLogLifecycle.test_a_second_update_truncates_the_log_rather_than_appending`.
+- **Content, both `.cmd` and `.sh`, same step names, each line timestamped**
+  (corrected in Round 3 — see below; earlier text here and the
+  `write_swap_script` docstring claimed a timestamp that the first version
+  of this fix did not actually write): `<timestamp> start pid=… staged=…
+  target=… relaunch=…`, `<timestamp> wait finished after N iterations`,
+  `<timestamp> copy exit code N`, `<timestamp> relaunch attempted`, and —
+  only on success — `<timestamp> done`. `.cmd` uses `%DATE% %TIME%`
+  (locale-formatted, fine for a human-read log); `.sh` uses
+  `$(date '+%Y-%m-%d %H:%M:%S')` (POSIX, fixed format).
+- **Robocopy ≥ 8 / `cp -a` non-zero = failure → no `done`, but relaunch is
+  still attempted unconditionally.** Decision: relaunching the *old* build
+  (whatever's left at `target`, which may be untouched or only partially
+  mirrored) after a failed copy is better than leaving the user with
+  nothing running at all — a stuck update is bad, a stuck update *and* no
+  running app is worse. The `done` gate only ever wraps the log line, never
+  the `start "" "{relaunch}"` / `"{relaunch}" &` line itself
+  (`SwapScriptWindowsCmdText.test_relaunch_is_attempted_even_if_the_copy_fails`
+  proves this for the `.cmd`; the `.sh` shares the same shape by
+  inspection — its `"{relaunch}" &` line is likewise unconditional, above
+  the `if [ "$RC" -eq 0 ]` guard).
+- **Wait-loop pacing/no-busy-spin:** the log now counts wait-loop iterations
+  (`COUNT`/`$COUNT`) and reports them in the `wait finished after N
+  iterations` line. Proven two ways, deliberately not by parsing `%date%
+  %time%` (locale-dependent on a Windows runner, so fragile): (1) statically
+  — `SwapScriptWindowsCmdText.test_no_timeout_left_in_the_wait_loop` checks
+  the word `timeout` is gone and `ping -n 2 127.0.0.1` is present; (2) at
+  runtime on Windows CI —
+  `WindowsLaunchReproduction.test_wait_loop_paces_polls_instead_of_busy_spinning`
+  keeps the launcher (and therefore the waited-on pid) alive for a known 5s
+  via `keep_alive_seconds`, then asserts the logged iteration count is
+  `> 0` and `< keep_alive_seconds * 4` — a busy-spin (no sleep at all) would
+  produce dozens-to-hundreds of iterations in the same 5s window, not a
+  small number. The main acceptance test's own pid dies within roughly one
+  mainloop iteration of `Popen()` (that's the point of it — see phase A), so
+  its own iteration count is usually 0-1 and isn't a meaningful pacing
+  signal by itself; the pacing proof deliberately lives in this second test.
+- **Quoting:** `set "LOG={log_path}"` (not `set LOG=...`) survives a log
+  path containing spaces (a Windows username with a space in it is common —
+  `C:\Users\First Last\AppData\...`), verified by
+  `SwapScriptWindowsCmdText.test_the_log_path_is_quoted`.
+- **Known, pre-existing, not expanded:** a `%` character anywhere in
+  `staged`/`target`/`relaunch`/`log_path` would still break the `.cmd`
+  (batch expands `%...%` sequences inside the interpolated string) — this
+  risk already existed for `staged`/`target`/`relaunch` before this change;
+  `log_path` now shares it. Not fixed here: `write_swap_script`'s existing
+  interpolation style already carries this risk and doing it properly (`%%`
+  escaping, or moving values into env vars set with `set "VAR=%~1"` from
+  script arguments) is a larger rewrite of the whole `.cmd` generation, out
+  of scope for this hotfix.
 
-### Fix
-- **`afk_clicker.py`**: extracted a new module-level `_load_app_icon(root)`
-  (placed right after `_asset_dir()`, which it calls) that does exactly what
-  `AfkAutoclicker.__init__` used to do inline: load the four
-  `icon-{16,32,48,256}.png` files as `tk.PhotoImage(master=root, ...)` and
-  call `root.iconphoto(True, *imgs)`, returning the image list. No
-  `try/except` — same fail-loudly rationale as before, now documented once in
-  the shared function's docstring instead of duplicated at both call sites.
-  - `AfkAutoclicker.__init__` now does `self._icon_imgs = _load_app_icon(root)`
-    instead of the inline load, same behavior, same place in the constructor.
-  - `selftest()` now opens a real `tk.Tk()` root (`icon_root`), calls
-    `_load_app_icon(icon_root)`, then destroys it — replacing the previous
-    `tk.Tk().destroy()` line that never touched the icon path. This is the
-    same root construction the docstring's stated purpose already relied on;
-    it now does one more thing with that root before tearing it down.
-  - This makes `--selftest` and `AfkAutoclicker.__init__` share one code
-    path, so they cannot drift apart again the way they did in round 1 — a
-    future change to icon loading is automatically covered by CI's
-    `--selftest` smoke step on all three platforms.
-- **`release.yml`**: untouched, per the finding's own instruction — the
-  existing `--selftest` invocations (`release.yml:198-199` Windows,
-  `release.yml:205` Linux via `xvfb-run -a`, `release.yml:209` macOS) already
-  run against the frozen build; no separate icon-specific smoke step was
-  needed once `selftest()` itself covers the load.
-- **`tests/test_ui.py`**: extended the existing `Selftest` class with
-  `test_selftest_fails_when_icon_asset_missing` (mirrors
-  `AppIconMissingAsset`'s existing save/restore-`app._asset_dir`
-  monkeypatch style already used elsewhere in this file) — points
-  `_asset_dir()` at an empty temp dir and asserts `app.selftest()` raises
-  `tk.TclError` instead of returning 0.
+### Tests (`tests/test_updater.py`)
+- **`SwapScript`** (existing, `:355-462`): both `write_swap_script` call
+  sites updated to pass a 4th `log_path` argument (a temp path). No
+  assertion was weakened or removed.
+- **`SwapScriptWindowsCmdText`** (new, cross-platform): monkeypatches
+  `app.sys.platform = "win32"` and restores it via `addCleanup` — the same
+  restore-in-a-cleanup style already used by
+  `tests/test_hotkey.py:305-316`'s `InputPermission`
+  (`test_false_on_darwin_when_the_question_cannot_be_answered`); this suite
+  deliberately has no `unittest.mock` anywhere (`tests/test_ui.py:2119-2120`).
+  Lets the `.cmd`'s *text* be checked on every platform, not just
+  `windows-latest`. 6 tests: `.cmd` extension, log directory created, log
+  path quoted, no `timeout` left (`ping -n 2` present instead), `done` after
+  the copy-exit-code line, relaunch not gated behind the copy succeeding.
+- **`SwapScriptLogLifecycle`** (new, local, actually executes the generated
+  `.sh` via `/bin/sh`): 3 tests. `write_swap_script` always waits on
+  `os.getpid()` of whichever process calls it, so calling it directly from
+  the test method would make the script wait on the *test runner's own*
+  still-alive pid and hang until the subprocess timeout; instead, each test
+  calls `write_swap_script` from a short-lived `python -c` subprocess (the
+  same technique the Windows launcher reproduction already uses for the
+  same reason) so that by the time the generated `.sh` actually runs, its
+  waited-on pid has already exited and the wait ends at once.
+  **Round-2 fix (post windows-latest CI feedback on run 34900930076):** this
+  class errored on Windows CI — `subprocess.run(["/bin/sh", script])` raises
+  `FileNotFoundError: [WinError 2]`, since `@needs_display`'s `HEADLESS`
+  check is hard-coded `sys.platform.startswith("linux")` and so never skips
+  on `win32` at all. Added `@unittest.skipIf(sys.platform == "win32", ...)`
+  above `@needs_display` on the class (both stack fine: each `skipIf`/
+  `skipUnless` only ever *sets* the skip flag when its own condition is
+  true, never clears one already set by another, confirmed directly against
+  `unittest`'s implementation before relying on it). `@needs_display` itself
+  is kept, but not for the reason it's named for — this class never builds a
+  `Tk()`; it's needed because the subprocess above does `import
+  afk_clicker`, which imports `pynput` unconditionally, which raises without
+  an X display on headless Linux. The class docstring now says so directly
+  so the next reader doesn't have to re-derive it.
+  1. `test_successful_update_ends_with_done_and_records_the_exit_code` —
+     real staged/target/relaunch fixtures, runs the script, asserts
+     `new.txt` present/`old.txt` gone/relaunch marker written, log contains
+     `copy exit code 0` and ends with `done`.
+  2. `test_a_failing_copy_records_a_nonzero_exit_code_and_never_writes_done`
+     — `staged` deliberately never created, so `cp -a` fails; asserts the
+     log has a non-`0` `copy exit code` and does not end with `done`.
+  3. `test_a_second_update_truncates_the_log_rather_than_appending` — runs
+     the script twice against the same `log_path`, asserts the second run's
+     log has exactly as many lines as the first (not double), and exactly
+     one `start pid=` line.
+- **`_SwapScriptLauncher`/`WindowsLaunchReproduction`
+  (Windows-only, CI-only):**
+  - `_LAUNCHER`'s inline script now takes a `stdio_mode: "production"`
+    branch that calls `app.launch_swap_script(script)` directly (not a hand
+    copy of flags) — used only by the acceptance test, so it can never
+    silently drift from what `_quit_for_update` actually calls. Every
+    `write_swap_script` call inside `_LAUNCHER` now also passes
+    `cfg["log_path"]`.
+  - `test_production_launch_replaces_the_install_and_relaunches` (renamed
+    fixture setup unchanged) now additionally asserts `update.log` exists,
+    contains `copy exit code`, and ends with `done`; on a timeout its
+    failure message now appends the log's own contents — the best evidence
+    left now that there's no console to flash and no captured `cmd_output`
+    on this code path.
+  - New `test_wait_loop_paces_polls_instead_of_busy_spinning` (see "Shipped
+    update log" above for what it proves and why it's separate from the
+    main acceptance test).
+- **`WindowsFixSuspectDiagnostics`** (Windows-only, CI-only, informational,
+  never fails the suite): reduced to one variant,
+  `test_old_creationflags_still_stall_for_the_record`, using a renamed
+  `OLD_CREATIONFLAGS` constant (`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`
+  — what shipped before this fix). Dropped the other three phase-A variants:
+  `create_no_window+devnull_stdio` is now literally what `launch_swap_script`
+  does, so it's covered by the acceptance case itself; `production_flags
+  +captured_stdio` and `production_flags+parent_stays_alive` already
+  answered their questions in phase A's CI run (empty output; suspect 3
+  ruled out) and re-running them teaches nothing further. What replaced
+  them: the *old* flags (no stdio kwargs at all, matching exactly what
+  shipped) run through the *new* logging `write_swap_script`, printing
+  `update.log`'s contents to the CI log — since the log write is a plain
+  file redirect (not console I/O), it should land even if a later
+  console-subsystem step is the one actually stuck, telling us *which*
+  step for the record.
 
-### Sabotage checks (both directions)
-- **Fix removed, test should fail**: temporarily reverted `selftest()` to
-  the pre-round-2 `tk.Tk().destroy()` line (no `_load_app_icon` call) and ran
-  `tests.test_ui.Selftest` alone: `test_selftest_fails_when_icon_asset_missing`
-  failed with `AssertionError: TclError not raised`, `test_selftest_passes`
-  still passed. Confirms the new test actually detects the gap Finding #1
-  described. Reverted back immediately (restored from a copy taken before
-  the sabotage edit) and reran the same two tests: both green again.
-- **Right root cause, not a coincidental error**: ran `selftest()` directly
-  from a Python REPL with `_asset_dir` monkeypatched to an empty dir (no
-  test framework involved) and printed the traceback — the `tk.TclError`
-  originates inside `_load_app_icon`'s list comprehension
-  (`tk.PhotoImage(master=root, file=os.path.join(_asset_dir(), "icon-16.png"))`),
-  `couldn't open ".../icon-16.png": no such file or directory` — not from
-  some unrelated empty-directory side effect.
-- **Manual CLI, both directions**: `DISPLAY=:93 <devvenv>/bin/python
-  afk_clicker.py --selftest; echo $?` with all assets present → `exit=0`.
-  Renamed `assets/icon-32.png` out of the way, reran the same command →
-  uncaught `_tkinter.TclError: couldn't open
-  ".../assets/icon-32.png": no such file or directory` and `exit=1`. Restored
-  the file immediately afterward; `ls assets/` and `git status --porcelain`
-  confirmed the working tree was left clean (no `assets/` diff, no stray
-  files).
+### Sabotage-verify results (all local, Linux, actually run and observed)
+Every new local assertion below was broken, confirmed red, then restored —
+not asserted from reading the code:
+| Test | Sabotage | Result |
+|---|---|---|
+| `SwapScriptWindowsCmdText.test_the_log_directory_is_created` | commented out the `os.makedirs(log_dir, ...)` call | `AssertionError: False is not true` |
+| `SwapScriptWindowsCmdText.test_the_log_path_is_quoted` | `set "LOG=..."` → `set LOG=...` | `AssertionError: ... not found in ...` |
+| `SwapScriptWindowsCmdText.test_no_timeout_left_in_the_wait_loop` | `ping -n 2 ...` → `timeout /t 1 /nobreak ...` | `AssertionError: 'timeout' unexpectedly found` |
+| `SwapScriptWindowsCmdText.test_done_is_written_after_the_copy_exit_code` | moved the `done` echo before the copy step | `407 not greater than 562` |
+| `SwapScriptWindowsCmdText.test_relaunch_is_attempted_even_if_the_copy_fails` | moved `start "" "{relaunch}"` inside the `if %RC% LSS 8` guard | `579 not less than 561` |
+| `SwapScriptLogLifecycle.test_successful_update_ends_with_done_and_records_the_exit_code` | dropped the `done` echo on success | `'relaunch attempted' != 'done'` |
+| `SwapScriptLogLifecycle.test_a_failing_copy_records_a_nonzero_exit_code_and_never_writes_done` | made `done` unconditional | `True is not false` (log ended with `done` despite `copy exit code 1`) |
+| `SwapScriptLogLifecycle.test_a_second_update_truncates_the_log_rather_than_appending` | `: > "$LOG"` → `: >> "$LOG"` | `10 != 5` |
 
-### Regression check
-`DISPLAY=:93 <devvenv>/bin/python -m unittest discover -s tests -t .` →
-**298 tests, OK (skipped=5)** — the 297 from round 1 plus this round's one
-new test, no regressions. `python -m py_compile afk_clicker.py
-tests/test_ui.py` — clean.
+After every sabotage above was reverted, the full local suite was re-run
+clean (see "Verification" below).
 
-### Deviations from spec/design (round 2)
-None. This closes a reviewer-identified gap in `selftest()`'s own coverage,
-not a new product requirement; the fix is the minimal shared-function
-extraction the finding itself suggested, with `release.yml` left untouched
-as instructed since its existing `--selftest` invocations already cover the
-fix once `selftest()` itself was extended.
+### What CI has now confirmed (windows-latest, run 34900930076, commit
+b3e841d) vs. what is still only provable there
+- **Confirmed:** `WindowsLaunchReproduction.test_production_launch_
+  replaces_the_install_and_relaunches` passes on the fixed code —
+  `CREATE_NO_WINDOW`'s actual effect on the real console-subsystem child
+  tree, `robocopy`/`tasklist`/`ping` cmdlet behavior end to end, and
+  `%LOG%`'s quoting against a real Windows runner's actual paths are all now
+  exercised, not just read. `test_wait_loop_paces_polls_instead_of_busy_
+  spinning` also passed, so the logged iteration count over a real 5s
+  keep-alive did land inside the generous `< keep_alive_seconds * 4` bound
+  under actual CI scheduling jitter. `SwapScriptWindowsCmdText`'s text
+  checks passed there too (expected — they don't depend on the platform
+  they run on).
+- **Still only provable on a real, double-clicked Windows machine (per
+  `docs/spec.md`'s acceptance criteria, not something CI can simulate):**
+  a frozen `--windowed` PyInstaller build's exact stdio inheritance shape,
+  and whether the manual 0.6.0 upgrade check itself (no visible console,
+  fully replaced install folder, relaunched instance reports the new
+  version) holds outside the reproduction's own launcher shape.
 
-### Known limitations (round 2)
-Same as round 1: Windows `.ico`/macOS `.icns` *display* in Explorer/Finder
-still cannot be verified from this Linux-only local environment — this round
-only closes the "does a broken `--add-data` destination get caught at all"
-gap, which is fully verifiable headless. It does not and cannot newly verify
-icon *rendering* on Windows/macOS, which remains, as before, a CI-build-only
-check per the spec's own acceptance criteria.
+## Round 3 (independent PR review on PR #65, held pre-merge)
 
-### How to verify locally (round 2, additive to the block above)
-```
-Xvfb :93 -screen 0 1280x1024x24 -nolisten tcp &
-cd /home/dev/projects/afk-clicker
-DISPLAY=:93 <devvenv>/bin/python -m unittest discover -s tests -t .
-DISPLAY=:93 <devvenv>/bin/python afk_clicker.py --selftest; echo $?   # expect 0
-mv assets/icon-32.png assets/icon-32.png.hidden
-DISPLAY=:93 <devvenv>/bin/python afk_clicker.py --selftest; echo $?   # expect 1, TclError
-mv assets/icon-32.png.hidden assets/icon-32.png
-pkill -f "Xvfb :93"
-```
+CI was green everywhere (head ccf501f) and the independent review posted
+MERGE, but flagged two concerns before the coordinator would let the merge
+through. Both addressed without touching CI-confirmed behaviour otherwise.
+
+### 1. Timestamps were missing from `update.log`
+`docs/spec.md`'s "Shipped update log" goal requires "a timestamp and a step
+name" per line; the shipped `write_swap_script` wrote no timestamp on
+either platform, and its own docstring wrongly claimed "a timestamped
+line" (now corrected — see "Content, both `.cmd` and `.sh`..." above).
+Fixed by prefixing every log line:
+- `.cmd`: `%DATE% %TIME%` — ordinary parse-time expansion (not delayed
+  expansion; delayed expansion was deliberately not enabled, since it would
+  make a literal `!` in a path — now present in the acceptance fixture, see
+  below — behave differently). The one line inside a `( ... )` block (the
+  final `done`, gated on `%RC% LSS 8`) is stamped at the moment that whole
+  if-block is parsed, a negligible instant before it actually executes —
+  noted as a comment in `write_swap_script`, not treated as a problem.
+- `.sh`: `$(date '+%Y-%m-%d %H:%M:%S')` — POSIX, fixed format, no locale
+  dependency (unlike `%DATE%`, which is why the wait-loop pacing test still
+  deliberately does not parse timestamps for its proof — see that section
+  above, unchanged).
+- Test updates: added
+  `SwapScriptLogLifecycle.test_every_line_is_timestamped` (every non-empty
+  line in a real, executed `.sh` run matches `^\d{4}-\d{2}-\d{2}
+  \d{2}:\d{2}:\d{2} `) and
+  `SwapScriptWindowsCmdText.test_every_log_line_carries_a_timestamp` (every
+  `echo` line targeting `"%LOG%"` contains `%DATE% %TIME%`). Three existing
+  assertions that anchored on exact line content had to loosen from
+  equality to `.endswith(...)`/substring, now that a timestamp always
+  precedes the step text: `SwapScriptLogLifecycle.test_successful_update_
+  ends_with_done_and_records_the_exit_code` (`lines[-1].strip() == "done"` →
+  `.endswith("done")`), `WindowsLaunchReproduction.test_production_launch_
+  replaces_the_install_and_relaunches`'s own `done` check (same change),
+  and `SwapScriptLogLifecycle.test_a_second_update_truncates_the_log_
+  rather_than_appending`'s `start pid=` line count (`line.startswith(...)`
+  → `"start pid=" in line`, since the line now starts with a timestamp, not
+  `start`). `copy exit code`/`wait finished after N iterations` substring
+  and regex searches were already not anchored to line start, so those
+  needed no change. Sabotage-verified: stripped the timestamp from the
+  `.sh`'s `copy exit code` line → `test_every_line_is_timestamped` failed
+  with `Regex didn't match ... 'copy exit code 0'`, reverted; stripped
+  `%DATE% %TIME%` from the `.cmd`'s `copy exit code` line →
+  `test_every_log_line_carries_a_timestamp` failed with `'%DATE% %TIME%'
+  not found in ...`, reverted.
+
+### 2. Special characters in paths, only proven on real Windows for spaces
+so far. `_SwapScriptLauncher._fixture_in` (the Windows acceptance/
+diagnostics fixture) previously used `target dir`/`relaunch dir` — a space
+only. Real Windows paths realistically also carry `(`, `)`, `&`, `^`, `!`
+(`C:\Program Files (x86)\...`, `Tom & Jerry`). Changed the fixture to
+`target (x86) & co^!` / `relaunch (x86) & co^!` (keeping the space), and
+added `_log_path_in(workdir)` so the log's own settings directory
+(`settings (x86) & co^!`) carries the same characters — the log path is
+interpolated into the script exactly the way `target`/`relaunch` are, so it
+carries the same quoting risk. `%` was deliberately left out of the
+fixture, per the coordinator's instruction: a `%` anywhere in
+`staged`/`target`/`relaunch`/`log_path` already breaks the pre-existing
+`robocopy`/`start` lines (`cmd` expands `%...%` sequences inside the
+interpolated script text) — a limitation that predates this fix entirely
+and is already recorded, not solved, under "Known, pre-existing, not
+expanded" above; this round doesn't change that note, it just avoids
+introducing a fixture that would exercise it. The `relaunch.cmd` fixture's
+own body only ever references the marker path (which has no special
+characters), so nothing in the fixture itself needed changing beyond the
+directory names — this is deliberately proving *production's* quoting, not
+routing around it. Round 3's CI run then failed only on the relaunch; Round 4 below traces
+that to the `.cmd` fixture, and run 34906199873 shows production handles
+these characters.
+
+### Verification (Round 3, this session)
+- `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean.
+- Full suite: `DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests
+  -t .` → `Ran 312 tests ... OK (skipped=8)` (up from Round 2's 310 — the 2
+  new timestamp tests; skip count unchanged since both new tests run
+  locally on Linux under Xvfb).
+- Both sabotages above were actually applied to `afk_clicker.py`, run,
+  observed red with the exact `AssertionError` text quoted, then reverted
+  to the original text before moving on; `git diff afk_clicker.py` at the
+  end of this session carries no sabotage.
+- The special-character fixture change (concern 2) has no local test to
+  sabotage-verify against — it only executes on `windows-latest` CI, same
+  as the rest of the Windows-only classes; it was checked by reading
+  (correct `os.path.join` usage, no shell-quoting done on the Python side
+  that could mask what `write_swap_script`'s own `.cmd`-side quoting does)
+  and by confirming the full local suite still passes with the changed
+  fixture paths (Linux doesn't exercise the Windows-only classes, so this
+  only proves the change didn't break Python-level path handling, not the
+  `.cmd` quoting itself — that's CI's job, per "What only CI can confirm").
+
+## Round 4 (independent PR review, round 3 CI evidence, PR #65 head 2551f9a)
+
+### Round 3 CI evidence (windows-latest, run 34904637357)
+Ubuntu and macOS green. `windows-latest` failed both `WindowsLaunchReproduction`
+tests with the same signature:
+- `target mirrored: True`; `relaunch marker present: False`; two `cmd.exe`
+  still alive after the timeout.
+- Acceptance case's `update.log`: `start pid=5708 staged="...\staged"
+  target="...\target (x86) & co^!" relaunch="...\relaunch (x86) &
+  co^!\relaunch.cmd"` / `wait finished after 0 iterations` / `copy exit code
+  3` / `relaunch attempted` / `done`. Pacing test: 5 iterations in ~5.4s,
+  same `copy exit code 3`, same `done`.
+- Reading that log: timestamps work (Round 3's own fix held), the
+  special-char `start`/echo line survived intact (no corruption visible in
+  the log itself), `robocopy` handled the path fine (exit code 3 = files
+  copied + extras purged, a normal success code, not a failure one), and
+  `done` was written (since `%RC% LSS 8` was true). The *only* step that
+  didn't happen was the relaunch actually producing its marker, alongside
+  two leftover `cmd.exe`.
+
+### Hypothesis (not confirmed by reasoning alone — CI is what confirms it)
+`start "" "<dir>\relaunch.cmd"` cannot run a `.cmd`/`.bat` file by itself
+(CreateProcess needs an actual executable); Windows resolves this by having
+`start` hand it to a nested `cmd /c "<path>"`. That nested `cmd`'s own
+quote-stripping rule — strip the outer quotes on a quoted string if it
+contains `&`, `(`, `)`, `^` between the quotes — can then split the path at
+the `&`, corrupting it before the batch file ever runs; a stray `cmd.exe`
+window left partway through matches what a broken `/C` parse looks like.
+Production's actual relaunch target is `sys.executable`, a real `.exe`, and
+`start` launches a `.exe` directly via CreateProcess with **no** nested
+shell to re-parse anything — so this failure mode is specific to the test
+fixture's choice of a `.cmd` stand-in, not necessarily to production.
+**Explicitly not applied to production code on this hypothesis alone** —
+the coordinator's instruction was to prove it on CI first.
+
+### Fixture fix
+- **`_SwapScriptLauncher._fixture_in`** no longer builds `relaunch` at all
+  — it now returns `(staged, target, marker)`, since the acceptance case and
+  the diagnostics need genuinely different relaunch targets, not just a
+  different suffix.
+- **`_build_relaunch_exe(workdir)`** (new): copies the *running*
+  interpreter's `python.exe` from `sys.base_prefix`, plus whatever DLLs it
+  actually needs (globbed — `python3.dll`, `python3[0-9][0-9].dll`,
+  `vcruntime140*.dll` — the exact name varies by Python/VC-runtime version,
+  so a fixed list would be a guess) into the same special-char directory
+  shape (`relaunch (x86) & co^!`). A bare copy of `python.exe` cannot find
+  its own standard library relative to that temp location, so it also needs
+  `PYTHONHOME` pointed at the real install -- see `extra_env` below.
+- **`extra_env` on `_spawn_launcher`** (new parameter): sets
+  `PYTHONHOME=sys.base_prefix` on the environment handed to the launcher
+  subprocess, which flows down unchanged through `launch_swap_script`'s
+  `Popen` (no `env=` override there) and `start`'s own child, since none of
+  that chain replaces the environment at any hop. `PYTHONHOME` overrides
+  Python's normal "stdlib relative to the executable" search, so the copy
+  still finds `Lib`/`DLLs` at the real install even though the `.exe` file
+  itself lives somewhere else.
+- **`_startup_script_writing(workdir, marker)`** (new): a `PYTHONSTARTUP`
+  script (also carried via `extra_env`). `start "" "<exe>"` with no
+  arguments gives the copied `python.exe` a new console and no script to
+  run, so it falls into the interactive prompt — exactly when
+  `PYTHONSTARTUP` is read, before the first prompt — where it writes the
+  marker and calls `os._exit(0)` immediately rather than sitting at a
+  prompt forever.
+- **`_build_relaunch_cmd(workdir, marker)`** (new, informational only):
+  the exact Round 3 `.cmd` shape, kept for
+  `WindowsFixSuspectDiagnostics.test_cmd_relaunch_in_special_char_dir_for_
+  the_record` — a new, clearly-named, print-only diagnostic that runs that
+  same `.cmd` fixture through the *fixed* launch flags (`stdio_mode:
+  "production"`, not the old creationflags), so CI's log records directly
+  whether the `.cmd`-in-a-special-char-dir shape still fails even once the
+  launch flags are right — the actual evidence for or against the
+  hypothesis above, separate from whatever the acceptance case's new `.exe`
+  fixture reports.
+- `WindowsLaunchReproduction.setUp` and both of its test methods
+  (`test_production_launch_replaces_the_install_and_relaunches`,
+  `test_wait_loop_paces_polls_instead_of_busy_spinning`) now build the
+  `.exe` relaunch and pass `extra_env=self.relaunch_env` to
+  `_spawn_launcher`.
+- `WindowsFixSuspectDiagnostics.test_old_creationflags_still_stall_for_the_
+  record` keeps using `_build_relaunch_cmd` (it's testing the old
+  creationflags stalling in the wait loop, before the relaunch step is ever
+  reached — the choice of relaunch target doesn't matter for what that test
+  is evidence of).
+- `_kill_stragglers` needed no new image-name match: `start "" "<full
+  path>"` always puts that full path — which lives under this test's own
+  `afk-repro*` workdir — into the resulting process's own `CommandLine`, so
+  the existing `*afk-repro*` match already covers a stuck `relaunch.exe`
+  the same way it already covered stray `cmd.exe`. Documented as a comment
+  rather than added as a second, redundant match.
+- **`WindowsFixSuspectDiagnostics.test_exe_relaunch_probe_from_a_plain_
+  directory_for_the_record`** (new, coordinator addition ahead of the
+  push, informational only): the exact same `.exe` probe as the acceptance
+  case — `_build_relaunch_exe` + `_startup_script_writing` +
+  `PYTHONHOME`/`PYTHONSTARTUP` — but from a directory with no special
+  characters at all (`relaunch plain`), while `staged`/`target` keep the
+  same special-char shape `_fixture_in` already builds. This isolates the
+  one thing the acceptance case alone cannot: whether a Windows CI failure
+  of the `.exe` probe is the probe mechanism itself, or specifically the
+  special characters in the *relaunch* path. **Interpretation, to fill in
+  once the next CI run reports both results:**
+  | plain-dir `.exe` probe | special-char `.exe` probe (acceptance case) | Meaning |
+  |---|---|---|
+  | succeeds | succeeds | Production handles both; Round 3's actual failure was specific to the old `.cmd` fixture, not to special characters as such. |
+  | succeeds | fails | A real production bug with special characters in the relaunch path specifically. |
+  | fails | (either) | The `.exe` probe mechanism itself (copy + `PYTHONHOME`/`PYTHONSTARTUP`) is broken; the acceptance case's result is not meaningful until the probe is fixed. |
+  **Outcome (windows-latest, run 34906199873, commit 9aa7e81): row 1.**
+  Acceptance case with the `.exe` in `relaunch (x86) & co^!` passed, as did
+  the pacing test; the plain-dir `.exe` probe diagnostic printed
+  `succeeded=True`; the `.cmd` relaunch in the special-char dir printed
+  `succeeded=False` with a complete update.log (`copy exit code 3` … `done`).
+  So production handles `(`, `)`, `&`, `^`, `!` and spaces in the target,
+  relaunch and log paths, and Round 3's red was the `.cmd` fixture going
+  through `start`'s `cmd /K`, not the product. The old-flags diagnostic
+  again logged only the `start` line.
+
+### What this round could not verify locally
+This box is Linux; `sys.base_prefix` here has no `python.exe`, `python3.dll`,
+or `vcruntime140*.dll` to copy, so `_build_relaunch_exe`,
+`_startup_script_writing`, and the `PYTHONHOME`/`PYTHONSTARTUP` chain have
+only been checked by reading (CPython's own documented behaviour for both
+env vars, and the fact `ci.yml` runs Windows tests against a plain
+`actions/setup-python` install with no virtualenv, so `sys.base_prefix ==
+sys.prefix` there and setting `PYTHONHOME` to it cannot itself break the
+launcher's or the copy's own initialisation) — never executed. Whether the
+copied `python.exe` actually reaches an interactive prompt and reads
+`PYTHONSTARTUP` under `start`'s new console, and whether the hypothesis
+above is actually what Round 3 hit (as opposed to something else about the
+`.cmd` fixture), are both open until the next `windows-latest` CI run.
+Both are now answered by run 34906199873 (see the outcome under the table
+above): the probe chain works on `windows-latest`, and the hypothesis held.
+
+The same run's **macOS leg failed** on
+`tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`
+(`'minecraft'` missing after a rebuild). That is the G#30 flake PR #58 was
+meant to have fixed; this commit touched only `tests/test_updater.py` and
+this doc, so it is unrelated to this PR and recorded in `backlog.md` as a
+recurrence rather than fixed here.
+
+### Verification (Round 4, this session)
+- `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean (no
+  production code changed this round — this is a test-fixture-only round,
+  per the coordinator's instruction not to change production on the
+  hypothesis alone).
+- Full suite: `DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests
+  -t .` → `Ran 314 tests ... OK (skipped=10)` (up from Round 3's 312/8 — two
+  new informational diagnostic tests this round, both Windows-only:
+  `test_cmd_relaunch_in_special_char_dir_for_the_record` and, added just
+  before the push per the coordinator's follow-up,
+  `test_exe_relaunch_probe_from_a_plain_directory_for_the_record`).
+- No sabotage-verification this round: every change is inside the
+  Windows-only fixture/test classes, which cannot execute on this Linux box
+  at all (the classes are skipped, not run-with-a-broken-product) — the
+  same limitation already recorded for the rest of the Windows-only test
+  code in "What only CI can confirm" above.
+
+## Verification (this session)
+- `python3 -m py_compile afk_clicker.py tests/test_updater.py` → clean.
+- `DISPLAY=:99 <venv>/bin/python -m unittest tests.test_updater -v` →
+  `Ran 46 tests ... OK (skipped=3)` — the 3 skips are the Windows-only tests
+  (now 3, up from 2, after adding
+  `test_wait_loop_paces_polls_instead_of_busy_spinning`).
+- Full suite: `DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests
+  -t .` → `Ran 310 tests ... OK (skipped=8)` (up from phase A's 300/7 —
+  10 new local tests added, 1 new Windows-only skip).
+- Every sabotage in the table above was actually applied to
+  `afk_clicker.py`, run, observed red, then reverted to the exact original
+  text before moving to the next one; the diff shown by `git diff
+  afk_clicker.py` at the end of this session matches the intended change
+  with no sabotage left in place.
+- `_quit_for_update`'s Linux/macOS `Popen` line
+  (`subprocess.Popen(["/bin/sh", script], start_new_session=True)`) is
+  unchanged — confirmed by `git diff`, not just visual inspection: the only
+  change to that branch is that it's now inside `launch_swap_script` rather
+  than inline in `_quit_for_update`.
