@@ -1807,7 +1807,79 @@ class Selftest(unittest.TestCase):
     def test_selftest_passes(self):
         self.assertEqual(app.selftest(), 0)
 
+    def test_selftest_fails_when_icon_asset_missing(self):
+        # selftest() must actually walk the same _load_app_icon() path
+        # AfkAutoclicker.__init__ uses -- a broken --add-data destination
+        # (simulated here by pointing _asset_dir() at a dir with no
+        # icon-*.png files) has to fail selftest() in CI, not just at
+        # first real launch of the frozen build.
+        real_asset_dir = app._asset_dir
+        empty_dir = tempfile.mkdtemp()   # exists, but has no icon-*.png
+        app._asset_dir = lambda: empty_dir
+        try:
+            with self.assertRaises(tk.TclError):
+                app.selftest()
+        finally:
+            app._asset_dir = real_asset_dir
 
+
+@needs_display
+class AssetDir(unittest.TestCase):
+    """_asset_dir() unfrozen: next to afk_clicker.py, per is_frozen()==False."""
+
+    def test_unfrozen_resolves_next_to_the_module(self):
+        expected = os.path.join(
+            os.path.dirname(os.path.abspath(app.__file__)), "assets")
+        self.assertEqual(app._asset_dir(), expected)
+
+
+class AppIcon(UITestCase):
+    """root.iconphoto(), wired near root.title() in AfkAutoclicker.__init__."""
+
+    def test_icon_images_are_loaded_non_empty(self):
+        self.assertTrue(self.ui._icon_imgs)
+        for img in self.ui._icon_imgs:
+            self.assertGreater(img.width(), 0)
+            self.assertGreater(img.height(), 0)
+
+    def test_icon_reference_survives_a_rebuild(self):
+        # _rebuild_ui() only tears down root's *children* (see its own
+        # docstring); the icon is loaded once in __init__, outside
+        # _build_ui()/_rebuild_ui(), so the same list object -- not a
+        # fresh one built from scratch -- must still be on self afterwards,
+        # and the PhotoImage objects inside it must still be alive (a
+        # dropped reference blanks the icon silently rather than raising).
+        before = self.ui._icon_imgs
+        self.ui._apply_appearance("light")      # runs synchronously
+        self.root.update()
+        self.assertIs(self.ui._icon_imgs, before)
+        for img in self.ui._icon_imgs:
+            self.assertGreater(img.width(), 0)
+            self.assertGreater(img.height(), 0)
+
+
+@needs_display
+class AppIconMissingAsset(unittest.TestCase):
+    """A packaging bug (an asset missing from the checkout), not bad user
+    input -- must raise at startup, not silently start with a blank icon
+    (docs/CODING-GUIDELINES.md's input-validation section: fail visibly)."""
+
+    def setUp(self):
+        self._real_asset_dir = app._asset_dir
+        self._empty_dir = tempfile.mkdtemp()   # exists, but has no icon-*.png
+
+    def tearDown(self):
+        app._asset_dir = self._real_asset_dir
+
+    def test_missing_png_raises_instead_of_starting_blank(self):
+        app._asset_dir = lambda: self._empty_dir
+        config = os.path.join(tempfile.mkdtemp(), "settings.json")
+        root = tk.Tk()
+        try:
+            with self.assertRaises(tk.TclError):
+                app.AfkAutoclicker(root, store=app.Store(config))
+        finally:
+            root.destroy()
 
 
 class HotkeyPersistence(UITestCase):

@@ -244,7 +244,13 @@ def selftest():
         kb.Listener(on_press=lambda k: False)     # pynput keyboard backend
     Hotkey({"ctrl"}, [_record(kb.KeyCode.from_char("h"))]).label()
     Hotkey(set(), [_record(kb.Key.f6), _record(kb.Key.f7)]).label()
-    tk.Tk().destroy()                             # Tcl/Tk actually bundled
+    icon_root = tk.Tk()                           # Tcl/Tk actually bundled
+    _load_app_icon(icon_root)                     # the bundled icon-*.png
+                                                    # files actually resolve
+                                                    # through --add-data on
+                                                    # this platform -- same
+                                                    # code path as __init__
+    icon_root.destroy()
     # A real temp file, not os.devnull: Store.save() writes to a sibling and
     # os.replace()s it into place, so as root this replaced the /dev/null
     # device node with a regular file.
@@ -631,6 +637,40 @@ def pick_asset(release):
 def is_frozen():
     """True inside a PyInstaller build -- only then is there anything to swap."""
     return getattr(sys, "frozen", False)
+
+
+def _asset_dir():
+    """
+    Where the icon PNGs live -- inside PyInstaller's extracted bundle
+    (sys._MEIPASS, populated by --add-data "assets:assets") when frozen,
+    next to this file otherwise. Reuses is_frozen() rather than a second
+    inline sys.frozen check.
+    """
+    if is_frozen():
+        return os.path.join(sys._MEIPASS, "assets")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+
+
+def _load_app_icon(root):
+    """
+    Loads the four bundled icon-*.png files from _asset_dir() and calls
+    root.iconphoto(...) -- the one runtime path both AfkAutoclicker.__init__
+    and selftest() go through, so a broken --add-data destination on any
+    platform fails the same way (and is caught by selftest()) as it would in
+    a real launch. A missing/unloadable PNG is a packaging bug, not bad user
+    input, so this deliberately does not catch the exception
+    (docs/CODING-GUIDELINES.md's input-validation section: fail visibly,
+    don't guess) -- it raises rather than starting with a silently blank
+    icon. Returns the PhotoImage list; the caller must keep a reference to
+    it for as long as root is alive, or Tk silently drops the icon.
+    """
+    imgs = [
+        tk.PhotoImage(master=root,
+                      file=os.path.join(_asset_dir(), f"icon-{n}.png"))
+        for n in (16, 32, 48, 256)
+    ]
+    root.iconphoto(True, *imgs)
+    return imgs
 
 
 def install_root():
@@ -1770,6 +1810,13 @@ class AfkAutoclicker:
         self._os_theme = os_theme
 
         root.title("Clickwork")
+        # Loaded once here, not inside _build_ui()/_rebuild_ui(): root itself
+        # survives every rebuild (only its children are torn down), so the
+        # icon must not be re-created on each one. _load_app_icon() (shared
+        # with selftest(), so CI actually exercises this path) keeps the
+        # PhotoImage objects alive on self -- Tk drops the icon silently the
+        # instant nothing holds a reference to them, a well-known gotcha.
+        self._icon_imgs = _load_app_icon(root)
         root.resizable(True, True)
         # Both panes still turn off geometry propagation to hold their tuned
         # widths, so nothing tells the window how tall to start -- without an
