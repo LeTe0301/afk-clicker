@@ -18,6 +18,13 @@ prompt (PR #72), top-aligned panes (PR #68), the macOS Accessibility-permission 
 whose in-app Install cannot work (G#35); he was pointed at the one-time manual unzip.
 The first real in-app Windows update (0.6.0+ → next release) is still unverified.
 
+**0.8.0 built 2026-09-15, waiting on Leo's approval** (`release/0.8.0` from `70e5751`,
+run 35026463043): tests + all three builds green, `publish` parked at the `release`
+environment's deployment gate. Ships the "couldn't save settings" notice + update-check
+hardening (PR #78), the button click-away test (PR #77), the review residue cleanup
+(PR #76), and the Minecraft sweep warning (PR #80). Once approved, merge
+`release/0.8.0` back into `main` the way `release/0.7.0` was.
+
 **0.6.0 released 2026-09-15** (`v0.6.0` from `0d83eef`, run 34931395022): the
 Clickwork name (PR #61), the Loop icon (PR #62) and the Windows install-update fix
 (PR #65, G#35). `release/0.5.0` and `release/0.6.0` are both merged back into `main`.
@@ -581,3 +588,65 @@ every time a PR merges** — Gitea needs its own explicit close.
 
 **0.7.0 was released later on 2026-09-15** (see top of file). Before that: `main` had PRs #68/#70/#72/#73 beyond 0.6.0,
 none cut into a version. Always ask Leo before cutting a release.
+
+## Session handoff — 2026-09-15 (night)
+
+`main` is at `90e1083`. Queue items 1-5 are all merged: PR #74 (G#7 → `c142eee`),
+PR #76 (G#10 → `c2db91d`), PR #77 (G#18 → `c1c7977`), PR #78 (G#21 → `ffe3fc3`),
+PR #80 (G#22 → `edd4975`). 0.7.0 shipped mid-session; 0.8.0 is built and waiting on
+Leo's approval (see "In progress" above) — merge `release/0.8.0` back into `main`
+once it publishes.
+
+**In progress right now:** branch `hotfix/ac-23/macos-font-size-floor` exists
+(checked out off `90e1083`, empty — no commits, no `docs/spec.md` yet). Leo decided
+(2026-09-15, recorded on Gitea #23 and GitHub #35): land an `fs(base, s)` font-size
+floor now, standalone, ahead of G#38 — G#38 will reuse the same helper for its
+continuous scaling. Rejected: fold into G#38, drop the 90% step, accept as-is. A
+product-manager dispatch to write `docs/spec.md` was started and then stopped by
+Leo before it produced anything — safe to just start it again.
+
+**Updated queue, in order** (continues after G#23):
+
+1. ~~G#23 / GH#35 — macOS font-size floor.~~ **In progress**, see above.
+2. G#4 / GH#6 — click interval measures 25–40% slow on macOS CI. Investigation
+   only; may end in "accept and document." Needs a real Mac to fully resolve.
+3. G#38 / GH#67 — UI scale follows the window size. Leo's decisions recorded as
+   comments on both tickets (2026-09-15): add "Auto" next to the fixed
+   90/100/115/130% steps, Auto is the default; continuous scaling, not snapping to
+   steps; screen-relative reference. Spec must handle: debounce/settle rebuilds
+   during a drag resize; the font-size floor G#23 lands (reuse it, don't rebuild
+   it) and rounding for sizes between steps; must not fight `WINDOW_MIN_H` or the
+   icon-rail collapse threshold mid-drag.
+4. G#12 / GH#14 — calibration suite for the review agent (ten planted features).
+   Rebase first: it (and G#13's, which contains its own `2bdf55f`) is stacked on
+   `901f0a4`, whose FIFO tests fail on Windows.
+5. G#13 / GH#15 — Macros tab story. Blocked on the settings schema version bump
+   (ROADMAP) — resolve that first, then run as a `story` workflow, the largest
+   item on this list. Rebase its branch first (see #4).
+
+**Smaller items not yet in the ordered queue above, pick up opportunistically**
+(all ticketed, `github: true`): G#40/GH#75 (macOS `Sidebar.test_running_dot_and_follow`
+flake, hit 2 of 7 legs so far), G#41/GH#79 (`Store.save` leaves `settings.json.tmp`
+on a failed `os.replace`), G#42/GH#81 (the three older `WindowMinimumHeight` tests
+can't detect a clipped pane — fix before trusting them on G#23/G#38), G#43/GH#82
+(stale trace-order comment), G#44/GH#83 (`TabBar` ignores its own `height`),
+G#45/GH#84 (`_rebuild_ui` doesn't cancel a pending pane fill), G#46/GH#85 (delete
+15 merged remote branches — confirm the list with Leo first), G#47/GH#86 (token
+lacks `actions: write` — Leo's action item, no code), G#48/GH#87 (a code comment
+about needing two Xvfb displays for stress-testing).
+
+**Housekeeping done this pass:** every backlog item now states `github: true`/`false`
+per the shared ticketing rule (`~/.config/agent-knowledge/ticketing.md`); the six
+untracked open items above got tickets (G#43-48); stale entries removed (a finished
+0.5.0-approval note, a duplicate ac-12/ac-13 stacking note folded into G#12); six
+lessons (flake sabotage-verify, `pgrep -f` self-match, etc.) demoted from checkbox
+items to plain notes, since they're not work to do.
+
+**Standing reminders, still true:** close Gitea explicitly on every merge — GitHub's
+`Closes #N` never touches it. CI can't be re-run with this token (403); close and
+reopen the PR to retrigger. The auto-mode classifier has blocked pushes/merges
+intermittently; a same-command retry has gone through every time so far. Any test
+reaching a real `apply_hotkey()` listener SIGTRAPs macOS CI unless `app.HotkeyWatcher`
+is stubbed (see `docs/history/ac-21-implementation.md` round 3). Design docs have
+gotten WCAG contrast arithmetic wrong three separate times this session — always
+recompute from the literal `THEMES` hex values before trusting a design doc's numbers.
