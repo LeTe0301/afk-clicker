@@ -312,6 +312,21 @@ _MOD_ORDER = {"ctrl": 0, "altgr": 1, "alt": 2, "shift": 3, "cmd": 4}
 # membrane boards ghost past two simultaneous keys in the same matrix row.
 MAX_CHORD = 3
 
+# X11 hands _record a keysym as "vk" (see _record's docstring above), and the
+# X11 protocol reserves keysym values up to 0x1FFFFFFF -- the largest vk any
+# of the three backends can produce. Win32 VKs (0-255) and macOS keycodes
+# (roughly 0-127) both already fall well inside this, so one bound covers a
+# settings file recorded on any platform and read back on any other.
+MAX_VK = 0x1FFFFFFF
+
+# A real dead-key/compose keypress (CGEventKeyboardGetUnicodeString on the
+# darwin backend, the only one of the three that can hand back more than one
+# code point per event) stays at a small handful of code points in practice --
+# nothing about real input-method composition approaches this. Generous
+# enough not to reject a genuine composed character, far short of an
+# adversarial payload like a 200-char string.
+MAX_CHAR_LEN = 8
+
 
 def macos_input_permitted():
     """
@@ -437,6 +452,12 @@ class Hotkey:
         raw, mods = blob.get("keys"), blob.get("mods", [])
         if not isinstance(raw, (list, tuple)) or not raw:
             return None
+        # Reject, do not truncate -- a restored 4-key chord silently trimmed
+        # to 3 fires on any 3 of the 4 keys the user actually recorded, which
+        # is strictly *easier* to trigger than the saved combination. The
+        # same reject-vs-adjust mistake as the modifier filtering below.
+        if len(raw) > MAX_CHORD:
+            return None
         # Reject, do not filter. Dropping the entries that fail the check
         # silently turned a saved Ctrl+Shift+F6 into an armed, firing Ctrl+F6 --
         # a global hotkey the user never recorded, wearing a plausible label.
@@ -459,13 +480,25 @@ class Hotkey:
                 return None
             if not (vk is None or isinstance(vk, int)):
                 return None
+            # isinstance(True, int) is True -- bool is an int subclass, so the
+            # check above alone lets a bool vk through to label as "Key True".
+            if isinstance(vk, bool):
+                return None
+            if vk is not None and not (0 <= vk <= MAX_VK):
+                return None
             if not (char is None or isinstance(char, str)):
+                return None
+            # bool("") is False, so an empty char slid through here into a
+            # rendered "Key None" label; an unbounded char rendered a 200-char
+            # string verbatim into the same label.
+            if char is not None and not (1 <= len(char) <= MAX_CHAR_LEN):
                 return None
             if name is None and vk is None and char is None:
                 return None
-            # Shape is not vocabulary: "bogus" and "" are strings of the right
-            # type and would arm a hotkey no key can ever satisfy.
-            if name is not None and not hasattr(kb.Key, name):
+            # Shape is not vocabulary: kb.Key is an Enum class, so hasattr
+            # says yes to mro, __class__, __init__, _member_map_, __module__
+            # -- everything Enum/object supplies, not just real key names.
+            if name is not None and name not in kb.Key.__members__:
                 return None
             records.append((name, vk, char))
         return cls(list(mods), records)
