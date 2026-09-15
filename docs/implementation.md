@@ -362,7 +362,13 @@ timeout, keep G#39 open as "mitigated, trigger unconfirmed").
    bounded-then-ignored — so a bound that would routinely time out on the
    very stall this fix is meant to tolerate would turn "generous enough to
    let a slow-but-real scan land" into "reliably fails on exactly the
-   scenario H1 describes," which is worse than the race it replaces. `fail`
+   scenario H1 describes," which is worse than the race it replaces.
+   *Correction from the round 2 re-review:* the ~5s cold start is the
+   **first** scan's worst case, and `settle()` has already absorbed it by
+   the time this join runs; the thread joined here is usually a later,
+   warm periodic scan (PR #71: all under 0.5s). So 5.0s is a generous
+   margin that in practice only trips on a genuinely stuck scan, not a
+   routinely slow one. `fail`
    over `skip`: a skip would hide a genuinely stuck poller from CI's summary
    the same way a proceed-anyway silently hides it from the assertion;
    `self.fail` with a message naming the condition is the only outcome that
