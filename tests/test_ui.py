@@ -724,6 +724,68 @@ class InstallWorker(UITestCase):
                        f"status line {shown!r} does not read as a checksum failure")
         self.assertTrue(self.ui.update_button._enabled, "the button was left disabled after a refusal")
 
+    def _install_worker_with_tag(self, tag):
+        """Drives _install_worker() all the way to its write_swap_script()
+        call with checksums/staging faked out, capturing the
+        target_version it was actually called with -- the network is
+        mocked (fetch_checksums, download_and_stage, write_swap_script);
+        this never reaches GitHub or writes a real script to disk."""
+        calls = []
+
+        def fake_write_swap_script(staged, target, relaunch, log_path, target_version=None):
+            calls.append(target_version)
+            return "/tmp/does-not-exist-fake-script"
+
+        original_fetch = app.fetch_checksums
+        original_stage = app.download_and_stage
+        original_write = app.write_swap_script
+        app.fetch_checksums = lambda asset, timeout=30: {"x": "y"}
+        app.download_and_stage = lambda asset, checksums, on_progress=None: "/tmp/fake-staged"
+        app.write_swap_script = fake_write_swap_script
+        try:
+            release = {"assets": [
+                {"name": "SHA256SUMS", "browser_download_url": "x"},
+                {"name": "Clickwork-linux-x86_64.tar.gz", "browser_download_url": "x"}]}
+            self.ui._pending = (tag, release["assets"][1], release)
+            self.ui._install_worker()
+        finally:
+            app.fetch_checksums = original_fetch
+            app.download_and_stage = original_stage
+            app.write_swap_script = original_write
+        return calls
+
+    def test_a_shell_metacharacter_tag_never_reaches_write_swap_script(self):
+        # Security review, PR #72: tag_name is untrusted network input
+        # (GitHub API), and before this fix flowed straight into the
+        # generated update script as target_version -- proven live that a
+        # tag of '$(touch .../PWNED)' survives the .sh path's own
+        # single-`\"`-escaping (POSIX double quotes don't stop $()/
+        # backtick command substitution) and executes on relaunch. Every
+        # shape tried here must come out as target_version=None (write_
+        # swap_script's own existing "version unknown" default), never
+        # the raw tag.
+        dangerous_tags = [
+            '$(touch /tmp/afk-clicker-test-pwned)',
+            'v1.0.0`touch /tmp/x`',
+            'v1.0.0"; touch /tmp/x; "',
+            'v1.0.0 && touch /tmp/x',
+            'v1.0.0 | touch /tmp/x',
+        ]
+        for tag in dangerous_tags:
+            with self.subTest(tag=tag):
+                calls = self._install_worker_with_tag(tag)
+                self.assertEqual(calls, [None],
+                                 f"dangerous tag {tag!r} reached write_swap_script unrejected")
+
+    def test_an_oversized_tag_never_reaches_write_swap_script(self):
+        calls = self._install_worker_with_tag("v" + "9" * 40 + ".0.0")
+        self.assertEqual(calls, [None])
+
+    def test_a_normal_release_tag_still_reaches_write_swap_script_unchanged(self):
+        # The fix must not turn every real release into "version unknown".
+        calls = self._install_worker_with_tag("v0.7.0")
+        self.assertEqual(calls, ["v0.7.0"])
+
 
 class NumBoxFocus(UITestCase):
     """A field keeps eating keystrokes until something explicitly drops focus."""
@@ -4267,6 +4329,81 @@ class UpdateLogPrompt(CapturesCallbackExceptions, unittest.TestCase):
         # root.update() services pending idle jobs the same way
         # UITestCase.settle() already relies on for the startup game scan.
         self.root.update()
+
+    # ---------- round 3 (test-review.md): the startup idle job itself ----------
+
+    def test_on_close_before_the_startup_idle_job_ever_ran_cancels_it(self):
+        # G#36/GH#64 round 3: after_idle(self._maybe_offer_log_report),
+        # scheduled at __init__'s own tail, used to have no stored id
+        # anywhere -- nothing could ever cancel it. A close reached before
+        # this job's first turn left it queued; on macOS CI it later fired
+        # against an already-destroyed root (TclError deep inside
+        # _fit_log_dialog_to_content -- invisible on Linux/Windows's own
+        # idle-flush timing). Mirrors
+        # OverlappingAppearanceChanges.test_on_close_between_an_appearance_change_and_its_idle_rebuild's
+        # own "after info" technique for _rebuild_after_id.
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
+        # Deliberately no self.root.update() here -- the whole point is to
+        # close before this startup idle job has ever had a turn.
+        job_id = self.ui._log_report_after_id
+        self.assertIsNotNone(job_id, "no startup idle job was actually pending")
+
+        # _release_right() is on_close()'s last call before root.destroy()
+        # -- hooking it is the last point "after info" can still be
+        # queried at all, proving the cancellation happened strictly
+        # before destroy(), not just "eventually".
+        original_release = self.ui._release_right
+        checked = []
+
+        def patched_release():
+            original_release()
+            checked.append(self.root.tk.call("after", "info"))
+
+        self.ui._release_right = patched_release
+        try:
+            self.ui.on_close()
+        finally:
+            self.ui._release_right = original_release
+        self.assertEqual(len(checked), 1, "the patched _release_right never ran")
+        self.assertNotIn(job_id, checked[0],
+                         "on_close() left the startup idle job scheduled")
+
+        try:
+            self.root.update()   # give the stale job a turn, if it survived
+        except tk.TclError:
+            pass
+        self._assert_no_callback_exceptions()
+        self.ui = None   # already closed -- tearDown must not double-close it
+
+    def test_maybe_offer_log_report_swallows_a_tclerror_from_a_torn_down_root(self):
+        # Belt-and-braces half of round 3's fix: even though on_close() now
+        # cancels the startup idle job before it can fire against a torn-
+        # down root (the test above), _maybe_offer_log_report() itself
+        # must not let a stray TclError from _show_update_log_dialog()
+        # become an uncaught callback exception -- Tk's cancel guarantees
+        # around root.destroy() are not being trusted as airtight on every
+        # platform. Exercised directly, not by trying to win a real
+        # destroy-timing race.
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self._build()
+        self.assertIsNotNone(self.ui._log_dialog)
+        self.ui._on_log_dismiss()   # close it, so the next call starts fresh
+        self.root.update()
+        # A fresh log, so update_log_status() is not "ok" and
+        # _maybe_offer_log_report() actually reaches the guarded call
+        # below rather than returning before it.
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+
+        original_show = self.ui._show_update_log_dialog
+        def raise_tclerror(*a, **k):
+            raise tk.TclError("bad window path name \".!toplevel.!frame\"")
+        self.ui._show_update_log_dialog = raise_tclerror
+        try:
+            self.ui._maybe_offer_log_report()   # must not raise
+        finally:
+            self.ui._show_update_log_dialog = original_show
+        self._assert_no_callback_exceptions()
 
     def test_no_dialog_when_no_log_exists(self):
         self._build()

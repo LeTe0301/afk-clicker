@@ -46,12 +46,27 @@ is new `AfkAutoclicker` methods plus one new reusable canvas checkbox.
     `_capture_log_dialog_restore_state` (round 2), `_restore_log_dialog`
     (round 2).
   - `on_close()` — calls `_close_log_dialog()` if the dialog is still open,
-    before the existing teardown sequence.
+    before the existing teardown sequence; round 3: also cancels
+    `self._log_report_after_id` the same way `_rebuild_after_id`/
+    `_pane_fill_after_id` are.
   - `_rebuild_ui()` — round 2: captures the update-log dialog's restorable
     state and closes it *before* its own teardown loop runs (which would
     otherwise destroy it as a byproduct, leaving dangling references), then
     rebuilds it, in the new theme/scale, at its own tail. See "Round 2"
     below for the full story.
+  - Round 3: `AfkAutoclicker.__init__` — new `self._log_report_after_id`
+    instance attribute; the startup `after_idle(self._maybe_offer_log_report)`
+    call now stores its id there instead of discarding it.
+    `_maybe_offer_log_report()` — its one widget-touching call
+    (`_show_update_log_dialog(...)`) is now wrapped in `try/except
+    tk.TclError: pass`, belt-and-braces against a stray fire post-teardown.
+    See "Round 3" below.
+  - Round 4 (security): `_is_safe_version_tag(tag)` (new, placed directly
+    after `is_newer`) — validates a tag against this project's own
+    `vX.Y.Z` release shape. `_install_worker` now computes
+    `safe_target_version = tag if _is_safe_version_tag(tag) else None`
+    and passes *that* to `write_swap_script`, never the raw `tag`. See
+    "Round 4" below.
 
 - `tests/test_updater.py`
   - `import urllib.parse` added.
@@ -67,6 +82,10 @@ is new `AfkAutoclicker` methods plus one new reusable canvas checkbox.
     "unknown (older log format)" fallback, default redaction and
     `redact=False`, the URL round-trip, and the 2000-char cap with
     oldest-line-first truncation.
+  - Round 4 (security): new `SafeVersionTag` class (6 tests) —
+    `_is_safe_version_tag` accepts this project's own tag shape, rejects
+    shell metacharacters, an oversized tag, the wrong number of
+    dot-separated parts, non-digit parts, and non-string/empty input.
 
 - `tests/test_ui.py`
   - `import urllib.parse` added.
@@ -90,6 +109,19 @@ is new `AfkAutoclicker` methods plus one new reusable canvas checkbox.
     `test_appearance_change_preserves_the_fallback_state_and_url`, and
     `test_fallback_is_not_clipped_at_{90,100,115,130}_percent` (via a
     shared `_assert_fallback_not_clipped` helper). See "Round 2" below.
+  - Round 3: 2 more tests in the same class —
+    `test_on_close_before_the_startup_idle_job_ever_ran_cancels_it`
+    (mirrors `OverlappingAppearanceChanges`'s own `after info` technique
+    for `_rebuild_after_id`) and
+    `test_maybe_offer_log_report_swallows_a_tclerror_from_a_torn_down_root`.
+  - Round 4 (security): 3 new tests in the existing `InstallWorker` class
+    — `test_a_shell_metacharacter_tag_never_reaches_write_swap_script`,
+    `test_an_oversized_tag_never_reaches_write_swap_script`,
+    `test_a_normal_release_tag_still_reaches_write_swap_script_unchanged`
+    (via a shared `_install_worker_with_tag(tag)` helper that fakes
+    `fetch_checksums`/`download_and_stage`/`write_swap_script` and drives
+    `_install_worker()` directly, the same technique the class's two
+    existing tests already use).
 
 ## Key decisions / tradeoffs
 
@@ -367,6 +399,178 @@ performed *while the dialog was open*, checkbox pre-ticked before the
 switch — the "after" state: dialog alive, rebuilt in light theme, checkbox
 still ticked, preview still showing full paths).
 
+## Round 3 (macOS CI: PR #72 head 67516be, all 22 `UpdateLogPrompt` tests failing)
+
+**Symptom**: every `UpdateLogPrompt` test failed on macOS CI (ubuntu/
+windows stayed green) in `tearDown()`'s `_assert_no_callback_exceptions()`,
+all the same shape: `TclError: bad window path name ".!toplevel.!frame"`
+deep inside `_fit_log_dialog_to_content`, called from
+`_show_update_log_dialog`, called from `_maybe_offer_log_report`, itself
+called from Tk's `callit` — an `after`/`after_idle` callback firing.
+
+**Root cause**: `self.root.after_idle(self._maybe_offer_log_report)`
+(`__init__`'s own tail) was never tracked anywhere — unlike every other
+scheduled job in this file (`self._timers`, `self._rebuild_after_id`,
+`self._pane_fill_after_id`, all cancelled by `on_close()`). A test whose
+own `tearDown()`/`on_close()` runs before this specific idle job gets a
+turn leaves it queued; when it does eventually fire, it builds/measures
+widgets against a root that's already torn down. This is the exact same
+*class* of bug as G#39's history (an untracked, uncancelled `after`/
+`after_idle` handle surviving teardown) — not the same bug, a different
+untracked handle — invisible on Linux/Windows's idle-flush timing
+(confirmed: 369/369 green under Xvfb across this whole implementation,
+every round), reliably fatal on macOS's.
+
+**Fix**:
+- `self._log_report_after_id` (new `__init__` attribute) stores the id
+  the startup `after_idle()` call returns.
+- `on_close()` cancels it — guarded `after_cancel` + `except tk.TclError:
+  pass`, the identical pattern already used for `_rebuild_after_id`/
+  `_pane_fill_after_id`, placed right after them.
+- `_maybe_offer_log_report()` additionally wraps its one widget-touching
+  call (`_show_update_log_dialog(...)`) in `try/except tk.TclError: pass`
+  — belt and braces, since a scheduled Tk callback's cancel guarantees
+  around `root.destroy()` are apparently not airtight on every platform.
+  Everything above that call in the method is pure file I/O, no Tk, so
+  nothing else needed wrapping.
+
+**Verified locally** (this sandbox has no macOS runner, so the exact
+platform-specific teardown race — a live root's Tcl interpreter still
+answering to a command while an individual child widget it just built is
+already gone — could not be reproduced byte-for-byte; the hazard *class*
+was, both ways):
+- Constructed `AfkAutoclicker`, called `on_close()` immediately (no
+  `root.update()`/idle flush at all — the job never got a turn), then
+  forced Tk's idle queue to process. On the fixed code: `_log_report_after_id`
+  goes from a real id to `None`, no callback exceptions, clean. With the
+  fix monkeypatched out (`on_close()` forgets the id, simulating the
+  original bug): the queued job fires anyway and raises "invalid command
+  name" — reproducible, though the exact downstream error text
+  necessarily differs from macOS's own async widget-teardown timing
+  (Linux/Xvfb's X11 teardown is synchronous; this sandbox's raw repro hits
+  "invalid command name" on the callback itself rather than macOS's
+  "bad window path name" three calls deeper into widget construction —
+  same hazard class, different platform-specific manifestation of it).
+- The more portable, deterministic check: a direct regression test
+  (`test_on_close_before_the_startup_idle_job_ever_ran_cancels_it`)
+  mirroring `OverlappingAppearanceChanges`'s own established `after info`
+  technique for `_rebuild_after_id` — captures the job's real id right
+  after `__init__` (before any `update()`), hooks `_release_right()`
+  (on_close()'s last call before `root.destroy()`) to snapshot `after
+  info`'s output, and asserts the id is no longer in it. **Sabotage-
+  verified**: commenting out the cancel makes this test fail red with the
+  id still present in `after info`, confirming it actually exercises the
+  cancel path (not just checking a flag).
+- A second direct test
+  (`test_maybe_offer_log_report_swallows_a_tclerror_from_a_torn_down_root`)
+  exercises the belt-and-braces guard on its own terms: monkeypatches
+  `_show_update_log_dialog` to raise `tk.TclError` directly and asserts
+  `_maybe_offer_log_report()` doesn't propagate it. **Sabotage-verified**:
+  removing the `try/except` makes this test error with the raised
+  `TclError` uncaught.
+
+## Round 4 (security review, PR #72 — BLOCKER)
+
+**Finding**: command injection via `tag_name`. `_check_worker` reads
+`tag = release.get("tag_name", "")` straight from the GitHub API with no
+validation; it flows into `_install_worker`'s
+`write_swap_script(..., target_version=tag)` call, which writes it
+**verbatim** into the generated `.cmd`/`.sh` update script. The reviewer
+proved live: a release tag of `'$(touch /tmp/.../PWNED)'`, through the
+real `write_swap_script` → the real generated `.sh` → `/bin/sh`
+execution, created the marker file. The `.sh` path's own single-`\"`-
+escaping (added in round 1 for the legitimate `version="..."` case) does
+not stop `$()`/backtick command substitution inside POSIX double quotes;
+the `.cmd` path has zero escaping at all. This runs entirely outside the
+asset's SHA256 verification — a tag name alone, never the downloaded
+binary, is enough.
+
+**Fix, at the source, not by escaping harder downstream** (this project's
+own "root cause, not symptom" convention, `docs/CODING-GUIDELINES.md`'s
+"Input validation" section — *"anything read from disk or typed by a user
+is untrusted"*, extended here to anything read from the network — and
+mirroring what `.github/workflows/release.yml`'s own version-input check
+already does for the same shape of string):
+- `_is_safe_version_tag(tag)` (new, placed directly after `is_newer`,
+  same neighbourhood) — `True` only for a tag shaped exactly like this
+  project's own release tags: an optional leading `v`/`V`, then exactly
+  three dot-separated all-digit parts, 1–32 characters total (matching
+  `release.yml`'s own `MAJOR.MINOR.PATCH` check, generalized to also
+  accept the `v`-prefixed form the GitHub API's `tag_name` field actually
+  carries — `release.yml` itself strips `v` before checking, the API
+  keeps it).
+- `_install_worker` computes `safe_target_version = tag if
+  _is_safe_version_tag(tag) else None` and passes *that* to
+  `write_swap_script` — never the raw `tag`. Fails safe, not closed:
+  `target_version` is best-effort diagnostics for the log's own
+  `"wrong_version"` detection, not load-bearing for the update itself, so
+  an unexpectedly-shaped tag is treated exactly like "version unknown"
+  (`write_swap_script`'s own pre-existing default), never a reason to
+  abort the update. `tag` itself (used everywhere else — button labels,
+  status text) is untouched; only the one call site that generates and
+  executes a script is gated.
+
+**The 2000-char title-cap concern the reviewer also raised is closed by
+this same fix, confirmed by recomputation, not just assumed**:
+`build_issue_report`'s title embeds `target_version` verbatim/unbounded
+(the log tail is the only thing the truncation loop shrinks). Once
+`_install_worker` only ever writes a *validated* tag (or `None`) into
+`update.log`'s `version="..."` field, `target_version` reaching
+`build_issue_report` at read time is always either `None` or ≤32
+characters of digits and dots. Recomputed directly: a maximal validated
+tag (`"v" + "9"*26 + ".0.0"`, 31 chars) produces a 67-character title and
+a 357-character full URL — nowhere near the 2000-char cap. A tag that
+could actually threaten the cap is, by construction, already rejected by
+`_is_safe_version_tag` before it ever reaches the log file.
+
+**Verified live, both directions**, before writing any test:
+- Re-ran the reviewer's own repro technique (a malicious tag through the
+  *real* `write_swap_script`, not a stub, then actually executing the
+  generated `.sh` via `/bin/sh`) with `target_version` computed the
+  **unfixed** way (`safe = tag`, bypassing validation): the generated
+  script contained a `version="$(touch .../PWNED)"` line verbatim, and
+  running it created the marker file — injection confirmed reproducible
+  in this sandbox too, not just the reviewer's environment.
+- Same repro with the **fixed** computation (`safe = tag if
+  _is_safe_version_tag(tag) else None`): the generated script contains no
+  `version=` line at all and no trace of the malicious text; running it
+  does not create the marker file.
+
+**New tests**:
+- `tests/test_updater.py`'s new `SafeVersionTag` class (6 tests) — pure
+  unit tests of `_is_safe_version_tag` itself: accepts this project's
+  `vX.Y.Z` shape; rejects `$()`, backticks, `"`, `&&`, `|`, `;`, and an
+  embedded newline; rejects an oversized tag; rejects the wrong number of
+  dot-separated parts; rejects non-digit parts; rejects non-string/empty
+  input.
+- `tests/test_ui.py`'s existing `InstallWorker` class gains 3 tests driven
+  through the real `_install_worker()` (checksums/staging/`write_swap_script`
+  faked, matching the class's own existing technique) via a shared
+  `_install_worker_with_tag(tag)` helper that captures the
+  `target_version` `write_swap_script` was actually called with: 5 shell-
+  metacharacter shapes and an oversized tag all come out as `None`; a
+  normal `"v0.7.0"` tag still comes out unchanged (the fix must not turn
+  every real release into "version unknown").
+
+**Sabotage-verified**: replacing `_install_worker`'s
+`safe_target_version = tag if _is_safe_version_tag(tag) else None` with
+`safe_target_version = tag` (skip the validation) made both the
+metacharacter test (all 5 subtests) and the oversized-tag test fail red,
+each showing the raw dangerous tag reaching `write_swap_script` instead
+of `None`.
+
+### Non-blocking notes from the review (no code change, per the reviewer's own read)
+- `docs/design.md`'s claim that "Open folder" cross-platform handling is
+  "already tested in earlier features" is inaccurate — this feature is
+  this codebase's *first* use of that `os.startfile`/`open`/`xdg-open`
+  three-way branch; it's consistent in shape with other existing
+  per-platform branches elsewhere in the file, but not itself reused code.
+  Left as-is (a design-doc wording nit, not a functional issue); noted
+  here for the record.
+- `LiveRepository.test_resolves_the_highest_version` intermittently errors
+  instead of skipping cleanly when offline — confirmed pre-existing on
+  `main`, unrelated to this feature, out of scope for this PR.
+
 ## How to verify locally
 
 1. Activate the project's existing test venv (pynput + Tk) and run the
@@ -374,8 +578,8 @@ still ticked, preview still showing full paths).
    ```
    xvfb-run -a python -m unittest discover -s tests -t . -v
    ```
-   Expect `Ran 358 tests ... OK (skipped=10)` — 315 on `main` plus 43 new
-   across both rounds (22 in `tests/test_updater.py`, 21 in
+   Expect `Ran 369 tests ... OK (skipped=10)` — 315 on `main` plus 54 new
+   across all four rounds (28 in `tests/test_updater.py`, 26 in
    `tests/test_ui.py`).
 2. To exercise just the new pieces:
    ```

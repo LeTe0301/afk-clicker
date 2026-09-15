@@ -43,6 +43,47 @@ class VersionCompare(unittest.TestCase):
 
 
 @needs_display
+class SafeVersionTag(unittest.TestCase):
+    """_is_safe_version_tag() -- the gate _install_worker puts between an
+    untrusted GitHub API tag_name and write_swap_script's target_version
+    (PR #72 security review: a crafted tag_name was proven live to run
+    arbitrary shell commands through the generated update script)."""
+
+    def test_accepts_this_project_s_own_tag_shape(self):
+        for tag in ("v0.7.0", "v1.0.0", "v0.10.0", "0.7.0"):
+            with self.subTest(tag=tag):
+                self.assertTrue(app._is_safe_version_tag(tag))
+
+    def test_rejects_shell_metacharacters(self):
+        dangerous = [
+            "$(touch /tmp/x)", "v1.0.0`touch /tmp/x`",
+            'v1.0.0"; touch /tmp/x; "', "v1.0.0 && touch /tmp/x",
+            "v1.0.0 | touch /tmp/x", "v1.0.0; rm -rf /", "v1.0.0\ntouch /tmp/x",
+        ]
+        for tag in dangerous:
+            with self.subTest(tag=tag):
+                self.assertFalse(app._is_safe_version_tag(tag))
+
+    def test_rejects_an_oversized_tag(self):
+        self.assertFalse(app._is_safe_version_tag("v" + "9" * 40 + ".0.0"))
+
+    def test_rejects_the_wrong_number_of_parts(self):
+        for tag in ("v1.0", "v1.0.0.0", "v1"):
+            with self.subTest(tag=tag):
+                self.assertFalse(app._is_safe_version_tag(tag))
+
+    def test_rejects_non_digit_parts(self):
+        for tag in ("v1.0.x", "vx.y.z", "v1.0.0-rc1", " v1.0.0"):
+            with self.subTest(tag=tag):
+                self.assertFalse(app._is_safe_version_tag(tag))
+
+    def test_rejects_non_string_and_empty(self):
+        for tag in (None, 123, "", [], {}):
+            with self.subTest(tag=tag):
+                self.assertFalse(app._is_safe_version_tag(tag))
+
+
+@needs_display
 class AssetSelection(unittest.TestCase):
     RELEASE = {"assets": [
         {"name": "Clickwork-windows-x64.zip", "browser_download_url": "w"},

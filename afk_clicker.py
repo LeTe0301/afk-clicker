@@ -604,6 +604,34 @@ def is_newer(tag, current=__version__):
     return _version_tuple(tag) > _version_tuple(current)
 
 
+def _is_safe_version_tag(tag):
+    """True only for a tag shaped exactly like this project's own release
+    tags -- "vX.Y.Z", the same MAJOR.MINOR.PATCH shape
+    .github/workflows/release.yml's own version check enforces before a
+    tag is ever published (that workflow strips a leading "v" first; the
+    GitHub API's own tag_name field, read here, keeps it -- release.yml's
+    `tag_name: v${{ ... }}`).
+
+    tag_name is untrusted (docs/CODING-GUIDELINES.md "Input validation" --
+    it's read from a network response, not typed by this project's own
+    release process necessarily matching it) and, via _install_worker,
+    flows straight into write_swap_script's target_version, which is
+    written verbatim into a generated shell/batch script. Proven live
+    (G#36/GH#64 PR #72 security review): a tag_name of
+    '$(touch /tmp/x/PWNED)' survived the .sh path's own single-`\"`-escaping
+    (POSIX double quotes do not stop $()/backtick command substitution)
+    and ran on execution; the .cmd path has no escaping at all. No amount
+    of escaping downstream is trustworthy for a string this shape-
+    unconstrained -- validating at the source, before it ever reaches
+    write_swap_script, and refusing anything that isn't a plain version
+    number, is the actual fix, not a better escape."""
+    if not isinstance(tag, str) or not (1 <= len(tag) <= 32):
+        return False
+    body = tag[1:] if tag[:1] in ("v", "V") else tag
+    parts = body.split(".")
+    return len(parts) == 3 and all(part.isdigit() for part in parts)
+
+
 class NoReleases(Exception):
     """The repository exists but has nothing published yet."""
 
@@ -2248,6 +2276,25 @@ class AfkAutoclicker:
                                         # reference an unrelated .set() call
                                         # (or, eventually, cyclic GC running
                                         # on any thread) can fire into.
+        self._log_report_after_id = None   # the one after_idle(self._
+                                        # maybe_offer_log_report) job
+                                        # scheduled at this __init__'s own
+                                        # tail, if it hasn't fired yet --
+                                        # None once it has (or once
+                                        # on_close() has cancelled it).
+                                        # G#39-class bug (round 3,
+                                        # test-review.md): this id used to
+                                        # go nowhere, so nothing could ever
+                                        # cancel that job -- a test whose
+                                        # own on_close() ran before this
+                                        # idle callback got a turn left it
+                                        # queued, and Tk eventually ran it
+                                        # against an already-destroyed root
+                                        # (invisible on Linux/Windows's
+                                        # idle-flush timing, reliably fatal
+                                        # on macOS CI: TclError building/
+                                        # measuring widgets with nothing
+                                        # left to attach them to).
         self._update_text = ("Check for updates", True, None)   # args of the
                                 # most recent _set_update_state() call, kept
                                 # current whether or not Settings is open --
@@ -2358,8 +2405,9 @@ class AfkAutoclicker:
         # already dismissed/sent this launch). after_idle so the main
         # window paints first; this never blocks startup and touches no
         # network (only clicking Send via GitHub, inside the dialog itself,
-        # ever does).
-        self.root.after_idle(self._maybe_offer_log_report)
+        # ever does). The id is kept (round 3, test-review.md) so on_close()
+        # can cancel it -- see self._log_report_after_id's own comment.
+        self._log_report_after_id = self.root.after_idle(self._maybe_offer_log_report)
 
     def _apply_minsize(self, grow_only=False):
         """The tuned-default-size mechanism (#14, retuned by G#28/GH#48):
@@ -3383,8 +3431,18 @@ class AfkAutoclicker:
                 self._ui(self._set_update_state, "Install folder is read-only", True, BAD)
                 return
             log_path = os.path.join(os.path.dirname(config_path()), "update.log")
+            # Fail safe, not closed: target_version is best-effort
+            # diagnostics (the log's own "wrong_version" detection), not
+            # load-bearing for the update itself -- an unexpectedly-shaped
+            # tag_name (from GitHub's API, untrusted) is treated the same
+            # as "version unknown" (write_swap_script's own existing
+            # default), never passed through to a generated script. See
+            # _is_safe_version_tag's own docstring for why: this is a
+            # security fix (command injection via tag_name), not a
+            # cosmetic validation nicety.
+            safe_target_version = tag if _is_safe_version_tag(tag) else None
             script = write_swap_script(staged, target, sys.executable, log_path,
-                                       target_version=tag)
+                                       target_version=safe_target_version)
         except ChecksumError as exc:
             # Say what happened. "Update failed" for a digest mismatch reads
             # like a network problem and invites a retry.
@@ -3423,14 +3481,27 @@ class AfkAutoclicker:
         but this is the only way tests can point a whole AfkAutoclicker at
         a temp settings directory (app.Store(self.config), the same
         isolation UITestCase already uses) without this prompt ever
-        touching a real machine's actual settings directory."""
+        touching a real machine's actual settings directory.
+
+        Belt and braces (round 3, test-review.md): on_close() now cancels
+        the after_idle() job that calls this before it can fire against a
+        torn-down root (the actual, tracked-down fix for the macOS CI
+        failure -- see self._log_report_after_id's own comment), but this
+        guards the case anyway, since a scheduled Tk callback's cancel
+        guarantees around root.destroy() are apparently not airtight on
+        every platform. Everything above this docstring's return is pure
+        file I/O, no Tk; only _show_update_log_dialog() below touches
+        widgets, so that's the only call wrapped."""
         log_path = os.path.join(os.path.dirname(self.store.path), "update.log")
         status = update_log_status(log_path)
         if status == "ok":
             return
         log_text = read_update_log(log_path) or ""
         target_version = _extract_target_version(log_text)
-        self._show_update_log_dialog(status, log_path, log_text, target_version)
+        try:
+            self._show_update_log_dialog(status, log_path, log_text, target_version)
+        except tk.TclError:
+            pass    # the root this would have built a dialog against is gone
 
     def _capture_log_dialog_restore_state(self):
         """A plain-data snapshot of the update-log dialog's own state --
@@ -4155,6 +4226,21 @@ class AfkAutoclicker:
             except tk.TclError:
                 pass
             self._pane_fill_after_id = None
+        # Same reasoning again, for the startup after_idle(self._
+        # maybe_offer_log_report) job (G#36/GH#64 round 3, test-review.md):
+        # a test (or a real close happening in the sliver of time before
+        # the main window's first idle pass) can reach on_close() before
+        # this job ever got a turn. Previously untracked entirely -- the
+        # exact G#39-class bug (an unclosed scheduled callback surviving
+        # teardown) -- reliably invisible on Linux/Windows's idle-flush
+        # timing, reliably fatal on macOS CI once the queued call finally
+        # ran against an already-destroyed root.
+        if self._log_report_after_id is not None:
+            try:
+                self.root.after_cancel(self._log_report_after_id)
+            except tk.TclError:
+                pass
+            self._log_report_after_id = None
         self.stop()
         if self.hk_listener is not None:
             self.hk_listener.stop()
