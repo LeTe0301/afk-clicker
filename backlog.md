@@ -55,9 +55,9 @@ Bugs and residue:
       with a frozen build, and log each script step to a file. Also: the script
       lands in `%TEMP%` itself, because `write_swap_script()` takes
       `dirname(dirname(staged))` and the Windows zip isn't flattened. **G#35 / GH#63**,
-      in progress on `hotfix/ac-35/windows-install-never-updates` (2026-09-14). Leo
-      also wants the shipped script to keep a step log (`update.log` in the settings
-      dir); the in-app "send us the log" prompt is split out as G#36 / GH#64.
+      shipped in 0.6.0 (PR #65). Leo also wanted the shipped script to keep a step log
+      (`update.log` in the settings dir) — done, same PR; the in-app "send us the log"
+      prompt was split out as G#36 / GH#64, now also done below.
 - [x] **`Segmented` never calls `trace_remove`**, so a destroyed widget's trace stays
       registered on its variable. Found during story #24's end-to-end pass: writing to
       `appearance_var`/`ui_scale_var` after closing Settings (without reopening) hits
@@ -91,7 +91,15 @@ Bugs and residue:
 - [ ] G#10 / GH#12 — Review residue: roadmap line, startup ordering, test hygiene, stale counts.
 - [ ] G#18 / GH#22 — Review residue from PR #21. The `bind_all` comment is done; still missing: a test that a Button click drops a field's focus.
 - [ ] G#21 / GH#32 — Review residue from the updater PRs: a hex check in `fetch_checksums`, the zip comment, the superseded-worker race test, and `Store.save` swallowing `OSError`.
-- [ ] G#36 / GH#64 — Ask the person to send `update.log` (prefilled GitHub issue) when an in-app update didn't finish. Follow-up to G#35, which ships the log; needs a design pass.
+- [x] **Done 2026-09-15, PR #72.** G#36 / GH#64 — Ask the person to send `update.log`
+      (prefilled GitHub issue) when an in-app update didn't finish. Follow-up to G#35,
+      which ships the log. Four review rounds: two design-doc contrast-arithmetic
+      fixes, a theme/UI-scale change destroying the open dialog, the no-browser
+      fallback clipping its own buttons at 100%, a macOS-only crash from an untracked
+      `after_idle` handle (same class of bug as G#39, not the same bug), and a real
+      command-injection finding — the GitHub release tag reached the swap script
+      unvalidated, and a crafted tag could run a command. Fixed by validating the
+      tag's shape before it's used at all.
 - [ ] G#4 / GH#6 — The click interval measures 25–40 % slow on the macOS CI runner. Needs a real Mac.
 - [ ] G#23 / GH#35 — macOS reports `_dpi_s` ~0.75, so the 90 % UI-scale step renders
       5 pt labels (6 pt at 100 %, which already ships). Not a regression; the spec's
