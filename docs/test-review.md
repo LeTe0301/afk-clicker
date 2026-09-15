@@ -97,5 +97,73 @@ Net: the trade is acceptable. The loud-fail does add a small, real chance of a n
 
 No must-fix findings this round. Original Finding #1 (AC3/H1 overclaim) is resolved by the spec revision and the consistent hedging across all three docs plus the test comment. Original Finding #2 (bounded join residual risk) is resolved by the loud-fail change — the residual risk is now surfaced, not silently absorbed. Original Finding #3 (sibling test) stands as a non-finding, unaffected by this round's changes.
 
-## Overall verdict (final)
+## Overall verdict (final, superseded by Round 3 below)
 **Approve.** All test cases re-verified by me this round (sabotage still 5/5-equivalent and cleanly distinguishable from the new loud-fail message, loud-fail path fires correctly under an independently-constructed stuck-thread injection, full suite unchanged at 314/OK/skipped=10). All acceptance criteria in the revised `docs/spec.md` are met and traceable to the diff. The one should-fix (a one-sentence doc-precision correction in `docs/implementation.md`) is non-blocking and can be picked up whenever, not worth another round-trip on its own.
+
+---
+
+## Round 3 re-review (`git diff f730db9..4161e32`, commit `4161e32`)
+
+### What changed
+An independent PR review (`.../scratchpad/pr70-review.md`, `.../scratchpad/pr70-own-sabotage.py`) found a BLOCKER my two rounds above did not: the Round 2 quiesce block (`tests/test_ui.py`, pop timer / join `self.ui._poll_thread` / drain) only ever sees `self.ui._poll_thread`'s *current* value. `_poll_games()` overwrites that attribute on every call, including its own periodic reschedule, without joining whatever scan it just superseded — so when an older scan is still stalled when a newer one starts (H1's own described trigger), the older scan's thread handle is orphaned and invisible to the quiesce, and can land later and silently clobber an already-applied result. The reviewer reproduced this directly against real production code, confirmed a genuine **product race** (not just test exposure), and the orchestrator revised scope to allow a narrow `afk_clicker.py` change. The fix:
+1. `__init__` gains `self._poll_seq = 0` / `self._poll_applied_seq = 0`.
+2. `_poll_games()` stamps each call with a sequence number (incremented on the main thread, before `.start()`), and hands it to `scan()`'s completion callback, which now calls `self._ui(self._apply_scan, seq, running)` instead of `self._ui(self._mark_running, running)`.
+3. New `_apply_scan(self, seq, running)`: drops `running` if `seq < self._poll_applied_seq`, else records the high-water mark and calls the unchanged `_mark_running(running)`.
+4. New test `AnOlderScanResultDoesNotOverwriteANewerOne.test_an_orphaned_older_scan_landing_later_is_dropped`, driven through the real `_poll_games()`/`scan()` path with a controllable, event-gated `detect_running` (deterministic ordering: older scan starts and blocks, newer scan starts and lands first, older scan is released and lands last).
+5. `docs/spec.md`, `docs/implementation.md`, `backlog.md` all updated with a Round 3 scope-revision note, the fix, both rejected alternatives (join-the-predecessor; test-only thread tracking), and re-verification — all consistent with the existing "trigger unconfirmed" hedge (G#39 stays `- [ ]` open).
+
+### Re-verification (run by me, independently, this round)
+| Check | Method | Result |
+|---|---|---|
+| Full suite | `DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .` | `Ran 315 tests in 95.9s ... OK (skipped=10)` — 314 + 1 new test, matches expectation |
+| Reviewer's repro script against the fix (`4161e32`) | Ran `pr70-own-sabotage.py` unmodified | `after_orphan_ok=True` (the trailing `TclError` on the script's own redundant second `root.destroy()` call is a pre-existing script artifact — `on_close()` already destroys `root`, unrelated to the fix) |
+| Reviewer's repro script against Round 2 code | `git checkout f730db9 -- afk_clicker.py`, ran the same script, then `git checkout 4161e32 -- afk_clicker.py` and `diff`-verified byte-identical restoration | `after_orphan_ok=False` — confirms the script genuinely reproduces the finding against the pre-fix code, not just against the fix |
+| My own sabotage of the new test — **different mechanism than the developer's `if False and seq < ...`**: moved `self._poll_seq += 1; seq = self._poll_seq` to *after* `self._poll_thread.start()` instead of before | Edited `afk_clicker.py`, ran the new test 5x, reverted | 5/5 `FAILED` — `NameError: cannot access free variable 'seq' where it is not associated with a value in enclosing scope`, thrown inside `scan()` on the background thread; the test's own assertion then fails too since `_apply_scan` never runs for the second scan. Confirms the shipped code's ordering (assign `seq` before `.start()`) is load-bearing, independent of the sequence-check sabotage the developer already tried |
+| `<` vs `<=` in `_apply_scan` | Changed `if seq < self._poll_applied_seq:` to `if seq <= self._poll_applied_seq:`, ran the new test 3x plus the full suite, reverted | All still `OK` / `315 ... OK (skipped=10)` — **no observable difference**, confirming equal `seq` values genuinely cannot arise given `_poll_seq` is a strict main-thread-only increment per `_poll_games()` call (see analysis below) |
+| Target test's `_ui_queue` swap sabotage, re-run once against current tip | Reinserted `self._ui_queue = queue.SimpleQueue()` at `afk_clicker.py:2369`, ran the target test once, reverted | `FAILED` with the original assertion message, unaffected by the Round 3 change — confirms the two fixes (Round 1/2's test quiesce and Round 3's product sequencing) are cleanly independent, not accidentally relying on each other |
+
+### Specific checks requested
+
+**Counters touched only on the main thread?** Yes. `self._poll_seq` is only ever incremented inside `_poll_games()` itself (`afk_clicker.py:3127-3128`), and `_poll_games()`'s only call sites are: `__init__` → `_build_ui()`'s tail (`afk_clicker.py:2289`, main-thread construction), `_rebuild_ui()` → `_build_ui()`'s tail again (`afk_clicker.py:2386`, always invoked from a Tk-driven caller per its own docstring), and its own `self.root.after(5000, self._poll_games)` reschedule (a Tk `after()` callback, which only ever fires on the thread running `mainloop()`/`root.update()`). `scan()` itself, running on the background thread, only ever *reads* the already-captured `seq` local (a plain closed-over `int`, not `self._poll_seq`) and never touches either counter. `self._poll_applied_seq` is only read/written inside `_apply_scan()`, which only ever runs via `_drain_ui()` on the main thread (queued through the existing thread-safe `self._ui(...)` hand-off). No new cross-thread access to either counter — confirmed by reading every call site, not just trusting the doc's claim.
+
+**`<` vs `<=`, and can equal `seq`s happen?** No — confirmed empirically (table above) and by construction: `_poll_seq` is incremented exactly once per `_poll_games()` call, synchronously on the main thread with no reentrancy possible in between (nothing yields the GIL between `self._poll_seq += 1` and `seq = self._poll_seq`), so every scan gets a strictly unique, strictly increasing sequence number; `_apply_scan(seq, ...)` is only ever invoked once per scan (from that scan's own `scan()` closure). So a given `seq` value can never be compared against `self._poll_applied_seq` when they're equal, in current usage — `<` and `<=` are behaviorally identical today. `<` is still the more defensively correct choice (if some future change ever caused `_apply_scan` to be invoked twice for the same scan, `<` would let the second, idempotent application through harmlessly, while `<=` would silently drop it) — a nit, not a finding, since it costs nothing and the code already reads as intentionally choosing the stricter comparison.
+
+**Could dropping a stale result ever leave the indicator permanently stuck?** No. The gate compares against the *highest applied* sequence number, not the *highest started* one, and `_poll_applied_seq` only ratchets forward on an actual successful application. If some scan N never lands at all (crashes, or the object is torn down mid-scan so `weak()` returns `None`), a later scan N+1 (started by the next periodic reschedule, which fires unconditionally regardless of whether N finished) still has `seq = N+1 > self._poll_applied_seq` (whatever it currently is, ≤ N-1), so it applies normally the moment it lands — a skipped/never-landing scan doesn't block anything after it. Verified by reading `_poll_games()`'s reschedule (`afk_clicker.py:3151`, unconditional `self.root.after(5000, self._poll_games)`, not gated on the previous scan's completion) and `_apply_scan`'s comparison (`seq < self._poll_applied_seq`, not `seq < self._poll_seq` or similar). The only way the indicator could go genuinely stale is if *every* scan from some point onward failed to land — an unrelated hang scenario (e.g. the already-documented ~1-in-a-couple-hundred stuck `Display()` case repeating indefinitely), not a new risk this fix introduces; that scenario existed identically before this fix (a permanently stuck scan never landed then either).
+
+**Any existing caller/test relying on scans calling `_mark_running` directly?** Grepped both files: in `afk_clicker.py`, `_mark_running` is now only called from `_apply_scan` (production) — no other production call site. In `tests/test_ui.py`, three call sites remain unchanged and unaffected: `Sidebar`'s three direct, synchronous `self.ui._mark_running({"minecraft"})` calls (lines 197/208/210, bypass sequencing entirely, calling the method directly rather than through a scan) and `QueuedNonResyncedUpdatesSurviveARebuild`'s own `self.ui._ui(self.ui._mark_running, target)` (a hand-queued value, also correctly bypassing `_apply_scan`, since a manually-queued test value isn't a scan result with a sequence number). `_mark_running`'s own signature is unchanged, so none of these needed updating — confirmed by re-reading each call site, not just the doc's claim.
+
+**Weakref / no-self-across-blocking-call constraint preserved?** Yes — read `_poll_games()` in full (`afk_clicker.py:3093-3151`) myself. `weak = weakref.ref(self)` and the `del me` before `detect_running(profiles)` are unchanged; the only new local is `seq`, a plain `int` captured by `scan()`'s closure — an immutable value, not a reference back to `self` or the UI, so it does not reintroduce the off-thread-`Variable`-finalization risk the method's own comment documents. `scan()` still re-resolves `me = weak()` after the blocking call before touching `self` again.
+
+### Spec coverage (Round 3 AC)
+- "Given a real, older scan still in flight when a newer one starts and lands first ... it must not overwrite the newer scan's already-applied result" — met; the new dedicated test drives this through the real `_poll_games()`/`scan()` path (not hand-made sequence numbers) and I independently confirmed both directions (fails against `f730db9`, passes against `4161e32`) plus a second, differently-designed sabotage.
+- "Sabotage (disable just the sequence check) must fail the new test" — met; developer's `if False and ...` variant and my own "assign seq after start" variant both fail it, via two genuinely different mechanisms.
+- "The existing `_ui_queue`-swap sabotage ... must still hold" — met, re-verified independently this round.
+- Full-suite regression (315 now, not 314) — met, re-verified.
+- No instrumentation reaches tracked branches — met; `git diff f730db9..4161e32 --stat -- .github/` is empty.
+
+### Findings (Round 3)
+No must-fix or should-fix findings this round. The fix is minimal (two counters, one new method, one call-site change), correctly reasoned (both rejected alternatives — joining the predecessor, and test-only thread tracking — are the right calls for the stated reasons: the former would turn a rare stale-data race into an unbounded detection freeze; the latter would leave the real production gap open for any future caller), and closes a genuinely different failure mode than Round 1/2 without touching or weakening either of those mechanisms (confirmed independent via the `_ui_queue`-swap re-run above, which is untouched by this round's change).
+
+One minor observation, not a finding: the `<` vs `<=` choice in `_apply_scan` is currently unobservable given `seq` values are always unique by construction — noted above for completeness per the coordinator's ask, not because it's a gap.
+
+## Overall verdict (final)
+**Approve.** All three rounds' acceptance criteria are met and independently re-verified by me across this whole review (test cases re-run myself in every round, not inferred from developer/reviewer reports): the original test-quiesce fix (Round 1/2, sabotage- and race-class-verified), the loud-fail hardening (Round 2, sabotage-verified, trade-off analyzed and judged acceptable), and now the product-level sequencing fix (Round 3, independently reproduced both broken and fixed, sabotage-verified via two different mechanisms, and checked against every specific concern raised: main-thread-only counter access, the `<`/`<=` distinction, no permanent staleness risk, no other caller depending on `_mark_running`'s old direct-call behavior, and the weakref/no-self-across-blocking-call constraint intact). Full suite: 315 tests, OK, skipped=10. No must-fix or should-fix findings outstanding from any round.
+
+## Orchestrator note: the PR review's one unreproduced failure (2026-09-15)
+
+The independent PR review of `4161e32` saw `AnOlderScanResultDoesNotOverwriteANewerOne`
+fail once in a full-suite run (`'global'` instead of `'minecraft'`) and could not reproduce
+it in 9 further runs. The likeliest cause is the orchestrator's own dispatch: that review
+ran **in parallel with this cycle review, in the same working tree**, and this review
+temporarily checked out `f730db9`'s `afk_clicker.py` (no sequence gate) to confirm the
+reviewer's repro fails there. A suite that imported the app during that window would fail
+exactly this way, and nothing in the gate's logic produces that result otherwise.
+
+Re-checked with nobody else touching the tree, on `4161e32`:
+- the new test in isolation: **0/30** failures;
+- full suite: **3/3** OK (315, skipped=10);
+- the new test plus `QueuedNonResyncedUpdatesSurviveARebuild`, 25× on `:99` while a
+  full-suite loop ran on `:98` as load: **0/25** failures.
+
+Lesson for dispatching: never run two reviewers that apply sabotage or check out old files
+against the same working tree at the same time.
