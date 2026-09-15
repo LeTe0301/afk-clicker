@@ -3842,6 +3842,34 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
         # stubbed, ever starts, so nothing but this test's own queued call
         # can land, and a genuinely dropped entry has nothing left to hide
         # behind.
+        #
+        # Round 3 (G#39/GH#69, macOS-only recurrence): stubbing self.
+        # _poll_games only closes the ONE call site above (the rebuild's own
+        # rescan) -- it does nothing about a scan already started by setUp()
+        # itself. __init__ -> _build_ui()'s tail runs the first, real
+        # _poll_games() before this test method (or its stub) ever exists,
+        # which both starts a background scan thread AND arms a
+        # self-rescheduling 5000ms self.root.after(...) timer
+        # (afk_clicker.py:3131) that captured the REAL _poll_games as its
+        # callback -- reassigning self.ui._poll_games later has no effect on
+        # a timer that already holds the original bound method. On a loaded
+        # macOS runner, settle() (tests/test_ui.py's own UITestCase.settle())
+        # calls root.update() in a loop while waiting out a slow initial
+        # `osascript` scan, and root.update() (unlike update_idletasks())
+        # does service due timer events -- so if that first scan takes
+        # long enough, the periodic timer fires a SECOND real scan while
+        # still inside setUp(), before this test body runs. settle() returns
+        # as soon as _seen_running first exists, not once no scan is in
+        # flight, so that second scan can still be running, unjoined, when
+        # this method starts. Its own self._ui(self._mark_running, ...) call
+        # is a plain, thread-safe queue put needing no Tk event-loop cycle to
+        # land, so it can clobber this test's manually-queued target between
+        # the put below and the final _drain_ui() exactly like the rebuild's
+        # own rescan used to (Round 1/2), just from a different, earlier
+        # source the _poll_games stub can't reach. Neutralizing it before the
+        # manual put -- cancelling any armed timer and joining the real poll
+        # thread, bounded 2.0s, same as on_close() (afk_clicker.py:3446-3484)
+        # -- closes this gap the same way Round 2 closed the rebuild one.
         old_seen = self.ui._seen_running   # already set by setUp()'s settle()
         target = {"minecraft"}
         self.assertNotEqual(old_seen, target,
@@ -3851,6 +3879,24 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
         original_poll_games = self.ui._poll_games
         self.ui._poll_games = lambda: None
         try:
+            # Neutralize a scan already in flight/armed from setUp() (Round
+            # 3/G#39) before queuing the manual value below: cancel the
+            # periodic timer if one is still armed, join the real poll
+            # thread if it's still running (bounded, matching on_close()'s
+            # own convention), then drain once more so a genuine, harmless
+            # landing from before this critical section can't be mistaken
+            # for -- or collide with -- the value this test is about to
+            # queue itself.
+            job = self.ui._timers.pop("poll_games", None)
+            if job is not None:
+                try:
+                    self.ui.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+            poll_thread = getattr(self.ui, "_poll_thread", None)
+            if poll_thread is not None and poll_thread.is_alive():
+                poll_thread.join(timeout=2.0)
+            self.ui._drain_ui()
             self.ui._ui(self.ui._mark_running, target)
             self.ui._rebuild_ui()
             self.ui._drain_ui()
