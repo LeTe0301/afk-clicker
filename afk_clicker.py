@@ -2434,6 +2434,15 @@ class AfkAutoclicker:
         # the first _build_ui() call, never inside _build_ui()/_rebuild_ui()
         # itself: re-running it on every rebuild would try to register a
         # second listener while self.hk_listener is still running.
+        #
+        # _build_ui(s) above is a plain synchronous call, so by the time
+        # execution reaches here its tail (self._timers/_sync_settings()/
+        # _drain_ui()/_poll_games(), defined inside _build_ui() itself) has
+        # already run and populated self.settings. A restored hotkey press
+        # can therefore never reach loop() against an empty settings
+        # snapshot; there is no ordering gap to close. (This became true
+        # only when commit 54a3b65 pulled those four lines into _build_ui()'s
+        # tail -- an unrelated refactor that closed the gap as a side effect.)
         saved = Hotkey.from_json(self.store.data.get("hotkey") or {})
         if saved is not None:
             self.hotkey = saved

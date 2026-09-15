@@ -342,7 +342,7 @@ class Persistence(unittest.TestCase):
                      {"keys": [["f6"]], "mods": "ctrl"},
                      {"keys": [[1, 2, 3]]}, "not a dict", None):
             with self.subTest(blob=blob):
-                self.assertIsNone(app.Hotkey.from_json(blob if blob else {}))
+                self.assertIsNone(app.Hotkey.from_json(blob))
 
 
 @needs_display
