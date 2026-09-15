@@ -1,6 +1,12 @@
 """The hotkey engine: identity, matching, labels and persistence."""
+import ctypes.util  # noqa: F401 -- imported eagerly, under the real platform,
+                     # so unittest.mock.patch can resolve "ctypes.util.find_
+                     # library" below even after the test fakes sys.platform
+                     # to "darwin" (ctypes.util's own import branches on
+                     # sys.platform, so importing it lazily post-fake breaks)
 import json
 import unittest
+import unittest.mock
 
 from .context import app, kb, needs_display, hotkey, record
 
@@ -303,17 +309,19 @@ class InputPermission(unittest.TestCase):
         self.assertIs(app.macos_input_permitted(), True)
 
     def test_false_on_darwin_when_the_question_cannot_be_answered(self):
-        # Pretend to be macOS on a machine with no ApplicationServices. The two
-        # mistakes do not cost the same: a wrong True is an uncatchable SIGTRAP
-        # that takes the window with it, a wrong False is a message.
-        if app.sys.platform == "darwin":
-            self.skipTest("only meaningful where the framework is absent")
-        original = app.sys.platform
-        app.sys.platform = "darwin"
+        # The two mistakes do not cost the same: a wrong True is an
+        # uncatchable SIGTRAP that takes the window with it, a wrong False is
+        # a message. Patch find_library rather than sys.platform to force the
+        # unanswerable-question branch, so this asserts something real on a
+        # genuine Mac too instead of skipping there.
+        original_platform = app.sys.platform
+        if original_platform != "darwin":
+            app.sys.platform = "darwin"     # still needed off-Mac to reach the branch at all
         try:
-            self.assertIs(app.macos_input_permitted(), False)
+            with unittest.mock.patch("ctypes.util.find_library", return_value=None):
+                self.assertIs(app.macos_input_permitted(), False)
         finally:
-            app.sys.platform = original
+            app.sys.platform = original_platform
 
 if __name__ == "__main__":
     unittest.main()
