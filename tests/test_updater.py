@@ -12,6 +12,7 @@ import time
 import hashlib
 import pathlib
 import unittest
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -547,6 +548,21 @@ class SwapScriptWindowsCmdText(unittest.TestCase):
         self.assertLess(relaunch_index, done_guard_index,
                         "relaunch must not be gated behind the copy succeeding")
 
+    def test_no_version_suffix_when_target_version_omitted(self):
+        # G#36/GH#64: the 5 existing call sites (this class's own setUp
+        # included) never pass target_version, so the start line must stay
+        # byte-identical to the pre-feature text -- no "version=" anywhere.
+        self.assertNotIn("version=", self.body)
+
+    def test_version_suffix_when_target_version_given(self):
+        log_path = os.path.join(tempfile.mkdtemp(), "update.log")
+        script = app.write_swap_script(self.staged, self.target, "relaunch.exe",
+                                       log_path, target_version="v0.7.0")
+        with open(script, encoding="utf-8") as fh:
+            body = fh.read()
+        start_line = next(line for line in body.splitlines() if "start pid=" in line)
+        self.assertIn('version="v0.7.0"', start_line)
+
 
 @unittest.skipIf(sys.platform == "win32",
                  "runs the .sh path via /bin/sh directly; the .cmd path is "
@@ -578,13 +594,16 @@ class SwapScriptLogLifecycle(unittest.TestCase):
     Windows has no /bin/sh to invoke.
     """
 
-    def _write_script_in_subprocess(self, staged, target, relaunch, log_path):
+    def _write_script_in_subprocess(self, staged, target, relaunch, log_path,
+                                    target_version=None):
         code = ("import sys; sys.path.insert(0, sys.argv[1]); "
                "import afk_clicker as app; "
-               "print(app.write_swap_script(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]))")
-        result = subprocess.run(
-            [sys.executable, "-c", code, ROOT, staged, target, relaunch, log_path],
-            capture_output=True, text=True, timeout=10)
+               "print(app.write_swap_script(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], "
+               "target_version=(sys.argv[6] if len(sys.argv) > 6 else None)))")
+        args = [sys.executable, "-c", code, ROOT, staged, target, relaunch, log_path]
+        if target_version is not None:
+            args.append(target_version)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
 
@@ -664,6 +683,34 @@ class SwapScriptLogLifecycle(unittest.TestCase):
         self.assertIn("copy exit code", log)
         self.assertNotIn("copy exit code 0", log)
         self.assertFalse(log.strip().endswith("done"), log)
+
+    def test_target_version_recorded_on_the_start_line_when_given(self):
+        # G#36/GH#64: the sh variant of the same target_version suffix
+        # SwapScriptWindowsCmdText already checks on the .cmd text.
+        workdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        staged, target, relaunch, marker = self._fixture(workdir)
+        log_path = os.path.join(workdir, "update.log")
+
+        script = self._write_script_in_subprocess(staged, target, relaunch, log_path,
+                                                   target_version="v0.7.0")
+        self._run(script)
+
+        log = open(log_path, encoding="utf-8").read()
+        start_line = next(line for line in log.splitlines() if "start pid=" in line)
+        self.assertIn('version="v0.7.0"', start_line)
+
+    def test_no_version_field_when_target_version_omitted(self):
+        workdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, workdir, ignore_errors=True)
+        staged, target, relaunch, marker = self._fixture(workdir)
+        log_path = os.path.join(workdir, "update.log")
+
+        script = self._write_script_in_subprocess(staged, target, relaunch, log_path)
+        self._run(script)
+
+        log = open(log_path, encoding="utf-8").read()
+        self.assertNotIn("version=", log)
 
     def test_a_second_update_truncates_the_log_rather_than_appending(self):
         workdir = tempfile.mkdtemp()
@@ -1271,6 +1318,135 @@ class WindowsFixSuspectDiagnostics(_SwapScriptLauncher, unittest.TestCase):
               f"launcher_rc={proc.returncode} "
               f"launcher_output={launcher_output!r} "
               f"launcher_error={error_output!r}\nupdate.log:\n{log}")
+
+
+@needs_display
+class UpdateLogDetection(unittest.TestCase):
+    """update_log_status()/read_update_log() -- G#36/GH#64's read-only
+    startup detection, no network, no Tk."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.workdir, ignore_errors=True)
+        self.log_path = os.path.join(self.workdir, "update.log")
+
+    def _write(self, text):
+        with open(self.log_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_no_log_file_is_ok(self):
+        self.assertEqual(app.update_log_status(self.log_path), "ok")
+
+    def test_read_update_log_returns_none_for_a_missing_file(self):
+        self.assertIsNone(app.read_update_log(self.log_path))
+
+    def test_log_without_a_trailing_done_line_is_incomplete(self):
+        self._write("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n"
+                    "2026-01-01 00:00:01 wait finished after 1 iterations\n")
+        self.assertEqual(app.update_log_status(self.log_path), "incomplete")
+
+    def test_done_with_no_version_field_is_ok(self):
+        self._write("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n"
+                    "2026-01-01 00:00:01 done\n")
+        self.assertEqual(app.update_log_status(self.log_path), "ok")
+
+    def test_done_with_a_matching_version_is_ok(self):
+        self._write(
+            f'2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c version="v{app.__version__}"\n'
+            "2026-01-01 00:00:01 done\n")
+        self.assertEqual(app.update_log_status(self.log_path), "ok")
+
+    def test_done_with_a_mismatched_version_is_wrong_version(self):
+        self._write(
+            '2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c version="v0.0.1"\n'
+            "2026-01-01 00:00:01 done\n")
+        self.assertEqual(app.update_log_status(self.log_path), "wrong_version")
+
+    def test_current_version_argument_overrides_the_module_default(self):
+        self._write(
+            '2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c version="v9.9.9"\n'
+            "2026-01-01 00:00:01 done\n")
+        self.assertEqual(
+            app.update_log_status(self.log_path, current_version="9.9.9"), "ok")
+
+    def test_read_update_log_bounds_a_huge_file_to_its_tail(self):
+        # "Log absurdly large" -- read_update_log must never load the whole
+        # file, only its last 1 MiB.
+        with open(self.log_path, "wb") as fh:
+            fh.write(b"x" * (2 * 1024 * 1024))
+            fh.write(b"TAIL-MARKER")
+        text = app.read_update_log(self.log_path)
+        self.assertLessEqual(len(text), 1024 * 1024 + len("TAIL-MARKER"))
+        self.assertTrue(text.endswith("TAIL-MARKER"))
+
+    def test_read_update_log_replaces_invalid_utf8_bytes_instead_of_raising(self):
+        with open(self.log_path, "wb") as fh:
+            fh.write(b"2026-01-01 00:00:00 staged=C:\\Users\\caf\xe9 target=b\n")
+        text = app.read_update_log(self.log_path)
+        self.assertIn("\ufffd", text)
+
+
+@needs_display
+class IssueReportBuilder(unittest.TestCase):
+    """build_issue_report()/build_issue_url() -- the redacted preview and
+    the prefilled GitHub issue URL, no network."""
+
+    LOG_TEXT = ('2026-01-01 00:00:00 start pid=1 staged="{home}/x" '
+               'target="{home}/y" relaunch="{home}/z" version="v0.7.0"\n'
+               "2026-01-01 00:00:01 copy exit code 1\n")
+
+    def setUp(self):
+        self.home = os.path.expanduser("~")
+        self.log_text = self.LOG_TEXT.format(home=self.home)
+
+    def test_title_names_the_target_version_when_known(self):
+        title, _body = app.build_issue_report("0.6.0", "v0.7.0", self.log_text)
+        self.assertEqual(title, "Update from v0.6.0 to v0.7.0 didn't finish")
+
+    def test_title_falls_back_when_target_version_is_unknown(self):
+        title, _body = app.build_issue_report("0.6.0", None, self.log_text)
+        self.assertEqual(title, "In-app update didn't finish (v0.6.0)")
+
+    def test_body_names_app_version_target_version_and_os(self):
+        _title, body = app.build_issue_report("0.6.0", "v0.7.0", self.log_text)
+        self.assertIn("**App version:** 0.6.0", body)
+        self.assertIn("**Target version:** v0.7.0", body)
+        self.assertIn(app.platform.platform(), body)
+
+    def test_body_names_unknown_target_version_as_older_log_format(self):
+        _title, body = app.build_issue_report("0.6.0", None, self.log_text)
+        self.assertIn("**Target version:** unknown (older log format)", body)
+
+    def test_redacted_by_default_hides_the_home_directory(self):
+        _title, body = app.build_issue_report("0.6.0", "v0.7.0", self.log_text)
+        self.assertNotIn(self.home, body)
+        self.assertIn("~/x", body)
+
+    def test_redact_false_keeps_the_full_paths(self):
+        _title, body = app.build_issue_report("0.6.0", "v0.7.0", self.log_text, redact=False)
+        self.assertIn(f"{self.home}/x", body)
+
+    def test_build_issue_url_round_trips_title_and_body(self):
+        title, body = app.build_issue_report("0.6.0", "v0.7.0", self.log_text)
+        url = app.build_issue_url(title, body)
+        self.assertTrue(url.startswith(f"https://github.com/{app.GITHUB_REPO}/issues/new?"))
+        query = url.split("?", 1)[1]
+        params = dict(pair.split("=", 1) for pair in query.split("&"))
+        self.assertEqual(urllib.parse.unquote_plus(params["title"]), title)
+        self.assertEqual(urllib.parse.unquote_plus(params["body"]), body)
+
+    def test_a_huge_log_is_truncated_to_stay_under_the_url_cap(self):
+        huge_log = "\n".join(f"2026-01-01 00:00:{i:02d} line {i}" for i in range(2000))
+        title, body = app.build_issue_report("0.6.0", "v0.7.0", huge_log)
+        url = app.build_issue_url(title, body)
+        self.assertLessEqual(len(url), 2000)
+        self.assertIn("truncated", body)
+
+    def test_truncation_drops_the_oldest_lines_first(self):
+        huge_log = "\n".join(f"line {i}" for i in range(2000))
+        _title, body = app.build_issue_report("0.6.0", "v0.7.0", huge_log)
+        self.assertNotIn("line 0\n", body)
+        self.assertIn("line 1999", body)
 
 
 @needs_display

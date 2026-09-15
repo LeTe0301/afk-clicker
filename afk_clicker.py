@@ -19,12 +19,15 @@ Prebuilt binaries for Windows, Linux and macOS: see the Releases page.
 import hashlib
 import json
 import os
+import platform
 import queue
 import shutil
 import tarfile
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
+import webbrowser
 import zipfile
 import random
 import subprocess
@@ -852,7 +855,7 @@ def download_and_stage(asset, checksums, on_progress=None):
     return staged
 
 
-def write_swap_script(staged, target, relaunch, log_path):
+def write_swap_script(staged, target, relaunch, log_path, target_version=None):
     """
     A tiny script that waits for this process to exit, replaces the install
     directory and starts the new build. It has to be an external process: a
@@ -869,7 +872,25 @@ def write_swap_script(staged, target, relaunch, log_path):
     settings directory (stable, findable at next launch); tests use a temp
     path so they never touch the real one. Its directory is created if
     missing.
+
+    target_version, if given (G#36/GH#64), is the raw release tag ("vX.Y.Z")
+    being installed -- recorded as a trailing ` version="..."` on the start
+    line so a future launch can tell "the relaunch silently ran the old
+    build" (done, but the wrong version) apart from "the copy/relaunch
+    genuinely finished" (done, matching version), a distinction a bare
+    "done" line can't make on its own. A keyword, default-None parameter,
+    not a new required positional: omitting it is a legitimate, meaningful
+    state ("version unknown"), and every existing call site keeps writing a
+    byte-identical start line with nothing appended.
     """
+    version_suffix = f' version="{target_version}"' if target_version else ""
+    # The .sh branch's echo line is itself one big double-quoted string
+    # (see below), so an unescaped `"` inside version_suffix would close
+    # that string early and get silently swallowed by the shell rather
+    # than land in the log -- confirmed the hard way (sabotage-verified in
+    # tests/test_updater.py: the unescaped version produced `version=v0.7.0`
+    # in the actual log, no quotes at all). \" keeps the quotes literal.
+    sh_version_suffix = (f' version=\\"{target_version}\\"' if target_version else "")
     pid = os.getpid()
     # Two levels up from the staged tree is the temp working directory that
     # download_and_stage created. Guard it: with a shallow `staged` this walks
@@ -900,7 +921,7 @@ def write_swap_script(staged, target, relaunch, log_path):
         # differently).
         script = f'''@echo off
 set "LOG={log_path}"
-> "%LOG%" echo %DATE% %TIME% start pid={pid} staged="{staged}" target="{target}" relaunch="{relaunch}"
+> "%LOG%" echo %DATE% %TIME% start pid={pid} staged="{staged}" target="{target}" relaunch="{relaunch}"{version_suffix}
 set COUNT=0
 :wait
 tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
@@ -924,7 +945,7 @@ if %RC% LSS 8 (
         script = f'''#!/bin/sh
 LOG="{log_path}"
 : > "$LOG"
-echo "$(date '+%Y-%m-%d %H:%M:%S') start pid={pid} staged={staged} target={target} relaunch={relaunch}" >> "$LOG"
+echo "$(date '+%Y-%m-%d %H:%M:%S') start pid={pid} staged={staged} target={target} relaunch={relaunch}{sh_version_suffix}" >> "$LOG"
 COUNT=0
 while kill -0 {pid} 2>/dev/null; do
   COUNT=$((COUNT + 1))
@@ -947,6 +968,178 @@ fi
     if sys.platform != "win32":
         os.chmod(path, 0o755)
     return path
+
+
+# ── reading the log back: did the last in-app update actually finish? ──────
+# G#36/GH#64: everything below is a read-only consumer of the log
+# write_swap_script writes above -- no change to the swap mechanism itself,
+# and no network anywhere in this section (only Send via GitHub, in the
+# dialog code further down, ever opens a browser).
+
+_UPDATE_LOG_TAIL_BYTES = 1024 * 1024   # "Log absurdly large" (docs/spec.md
+    # Edge cases): never load more than this, however the file got that big.
+
+
+def read_update_log(log_path):
+    """The decoded text of update.log, or None if it doesn't exist (or
+    can't be read at all -- same "not worth crashing over" posture as
+    Store.save()).
+
+    Reads at most the last _UPDATE_LOG_TAIL_BYTES bytes via a seek from the
+    end, so a corrupted/runaway log (a future script bug looping forever)
+    can't make this read the whole file into memory. Decoded as UTF-8 with
+    errors="replace": cmd's `echo ... > file` redirection writes bytes in
+    the console's OEM code page on Windows (CP437/CP850, not UTF-8), and a
+    non-ASCII username can put a byte sequence here that isn't valid UTF-8
+    -- this must never raise or hang the startup dialog over an accented
+    character, a `\ufffd` in the diagnostic tail is an acceptable trade
+    (docs/spec.md Edge cases, "Log unreadable / garbled encoding")."""
+    try:
+        size = os.path.getsize(log_path)
+    except OSError:
+        return None
+    try:
+        with open(log_path, "rb") as fh:
+            if size > _UPDATE_LOG_TAIL_BYTES:
+                fh.seek(size - _UPDATE_LOG_TAIL_BYTES)
+            data = fh.read()
+    except OSError:
+        return None
+    return data.decode("utf-8", errors="replace")
+
+
+def _extract_target_version(log_text):
+    """Pulls the raw tag out of a start line's trailing `version="..."`
+    field, or None if the field is absent (either an older-format log that
+    predates this feature, or write_swap_script was called without
+    target_version). Plain string search, not re: _version_tuple() just
+    above already sets the precedent of parsing these ad hoc fields by hand
+    rather than reaching for a new regex dependency."""
+    marker = 'version="'
+    start = log_text.find(marker)
+    if start == -1:
+        return None
+    start += len(marker)
+    end = log_text.find('"', start)
+    if end == -1:
+        return None
+    return log_text[start:end]
+
+
+def update_log_status(log_path, current_version=__version__):
+    """"ok" (nothing to report -- no log, or the last attempt finished and
+    landed the expected version), "incomplete" (the log has no trailing
+    `done` line -- the update died part-way), or "wrong_version" (the log
+    ends with `done`, names a target version, and it doesn't match
+    current_version -- the relaunch silently started the old build, a
+    failure a bare `done` line can't otherwise reveal).
+
+    An older-format log (`done`, no `version="..."` field at all) is
+    treated as "ok", never "wrong_version" -- there is nothing to compare
+    against (docs/spec.md "Edge cases", "Older-format logs")."""
+    text = read_update_log(log_path)
+    if text is None:
+        return "ok"
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines or not lines[-1].strip().endswith("done"):
+        return "incomplete"
+    target_version = _extract_target_version(text)
+    if target_version is None:
+        return "ok"
+    if _version_tuple(target_version) == _version_tuple(current_version):
+        return "ok"
+    return "wrong_version"
+
+
+def _redact_home(text, home=None):
+    """Every occurrence of the home directory replaced with `~`, the
+    default state of the dialog's preview (docs/spec.md "Preview +
+    consent"). Matched case-insensitively on Windows, since Windows paths
+    are themselves case-insensitive -- `C:\\Users\\Leo` and
+    `c:\\users\\leo` name the same directory. Plain string search, not re,
+    same precedent as _extract_target_version above."""
+    home = os.path.expanduser("~") if home is None else home
+    if not home or not text:
+        return text
+    if sys.platform != "win32":
+        return text.replace(home, "~")
+    lower_text, lower_home = text.lower(), home.lower()
+    pieces = []
+    pos = 0
+    idx = lower_text.find(lower_home)
+    while idx != -1:
+        pieces.append(text[pos:idx])
+        pieces.append("~")
+        pos = idx + len(home)
+        idx = lower_text.find(lower_home, pos)
+    pieces.append(text[pos:])
+    return "".join(pieces)
+
+
+GITHUB_ISSUE_URL_CAP = 2000   # docs/spec.md "Issue body": no documented
+    # GitHub-specific number exists for the issues/new web-form URL; this is
+    # the long-standing cross-browser/cross-OS convention (the legacy IE
+    # ~2083-char cap, with headroom).
+_ISSUE_LOG_TAIL_CHARS = 4000   # "read at most the log's last 4000 raw
+    # characters" before the cap-driven shrink loop below even starts.
+_ISSUE_TRUNCATION_MARKER = ("… (truncated — see update.log locally for the "
+                            "full file) …")
+
+
+def build_issue_url(title, body):
+    """The plain, prefilled `issues/new` URL build_issue_report's (title,
+    body) turns into -- no GitHub API call, no OAuth, just a URL the
+    person's own browser opens (docs/spec.md "No GitHub API calls")."""
+    query = urllib.parse.urlencode({"title": title, "body": body})
+    return f"https://github.com/{GITHUB_REPO}/issues/new?{query}"
+
+
+def build_issue_report(current_version, target_version, log_text, redact=True):
+    """(title, body) for the prefilled GitHub issue -- the exact text the
+    dialog previews and, once turned into a URL by build_issue_url(), the
+    exact text `Send via GitHub` submits. redact=True (the dialog's
+    default) replaces the home directory with `~` before anything else
+    happens, so what's cut for the length cap below is whichever text was
+    actually shown.
+
+    The body's log tail shrinks (oldest lines dropped first, a truncation
+    marker prefixed) until the *encoded URL* -- title and body together --
+    fits GITHUB_ISSUE_URL_CAP; the log's own format is compact enough
+    (docs/spec.md "Issue body") that this loop only ever does real work on
+    an unexpectedly huge or corrupt log."""
+    if target_version:
+        title = f"Update from v{current_version} to {target_version} didn't finish"
+    else:
+        title = f"In-app update didn't finish (v{current_version})"
+
+    text = log_text or ""
+    if redact:
+        text = _redact_home(text)
+
+    tail = text[-_ISSUE_LOG_TAIL_CHARS:]
+    truncated = len(tail) < len(text)
+    lines = tail.splitlines()
+
+    def _body(lines_subset, was_truncated):
+        content = "\n".join(lines_subset)
+        if was_truncated:
+            content = f"{_ISSUE_TRUNCATION_MARKER}\n{content}"
+        target_line = target_version or "unknown (older log format)"
+        return (f"**App version:** {current_version}\n"
+                f"**Target version:** {target_line}\n"
+                f"**OS:** {platform.platform()} ({sys.platform})\n"
+                f"\n"
+                f"```\n"
+                f"update.log\n"
+                f"{content}\n"
+                f"```\n")
+
+    body = _body(lines, truncated)
+    while len(build_issue_url(title, body)) > GITHUB_ISSUE_URL_CAP and lines:
+        lines = lines[1:]           # drop the oldest kept line first
+        truncated = True
+        body = _body(lines, truncated)
+    return title, body
 
 
 def launch_swap_script(script):
@@ -1401,6 +1594,63 @@ class Segmented(tk.Canvas):
         self.coords(self.pill, seg * idx + 2, 2, seg * (idx + 1) - 2, self.h - 2)
         for i, item in enumerate(self.texts):
             self.itemconfig(item, fill=INK if i == idx else MUTED)
+
+
+class ToggleCheckbox(tk.Canvas):
+    """G#36/GH#64's update-log dialog needs a checkbox and this file has
+    never had one (docs/design.md "New minimal component") -- every other
+    control here (Button, Segmented, TabBar above) is already a plain
+    canvas shape rather than a native ttk/tk widget, so this follows the
+    same pattern instead of introducing the one native tk.Checkbutton in
+    an otherwise fully custom-drawn UI.
+
+    Unchecked: CARD fill, MUTED outline (not LINE -- LINE fails the WCAG
+    1.4.11 3:1 floor for a UI component here, MUTED clears it in both
+    themes, docs/design.md's contrast table). Checked: CARD_HI fill plus a
+    centered checkmark glyph in INK -- dual signaling (fill *and* glyph),
+    not fill alone, so the state still reads for a color-blind viewer.
+    Hover swaps the unchecked fill to CARD_HI for feedback; the checked
+    fill has nowhere further to go without a new color-manipulation helper
+    this file doesn't otherwise have, so it stays CARD_HI on hover too --
+    a smaller deviation from docs/design.md's "slightly darker shade" than
+    inventing a one-off darken() for a single hover microstate."""
+
+    def __init__(self, parent, variable, s, size=16):
+        px = int(size * s)
+        super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0,
+                         width=px, height=px, cursor="hand2", takefocus=1)
+        self.var = variable
+        self.px = px
+        self.box = self.create_rectangle(1, 1, px - 1, px - 1, fill=CARD, outline=MUTED)
+        self.check = self.create_text(px / 2, px / 2, text="✓", fill=INK,
+                                      font=("Segoe UI", int(8 * s), "bold"),
+                                      state="hidden")
+        self.focus_ring = self.create_rectangle(
+            0, 0, px, px, outline=ACCENT, width=2, dash=(2, 2), state="hidden")
+        self._hover = False
+        self.bind("<Enter>", lambda e: self._set_hover(True))
+        self.bind("<Leave>", lambda e: self._set_hover(False))
+        self.bind("<Button-1>", self._toggle)
+        self.bind("<Return>", self._toggle)
+        self.bind("<space>", self._toggle)
+        self.bind("<FocusIn>", lambda e: self.itemconfig(self.focus_ring, state="normal"))
+        self.bind("<FocusOut>", lambda e: self.itemconfig(self.focus_ring, state="hidden"))
+        self.var.trace_add("write", lambda *_a: self._paint())
+        self._paint()
+
+    def _set_hover(self, hover):
+        self._hover = hover
+        self._paint()
+
+    def _toggle(self, _event=None):
+        self.var.set(not self.var.get())
+        return "break"
+
+    def _paint(self):
+        checked = bool(self.var.get())
+        self.itemconfig(self.check, state="normal" if checked else "hidden")
+        fill = CARD_HI if (checked or self._hover) else CARD
+        self.itemconfig(self.box, fill=fill, outline=MUTED)
 
 
 class TabBar(tk.Canvas):
@@ -1957,6 +2207,47 @@ class AfkAutoclicker:
         self.right_held = False
         self.settings = {}
         self._pending = None
+        self._log_dialog = None        # the update-log Toplevel (G#36/GH#64),
+                                        # if one is currently open -- None
+                                        # otherwise. It IS a genuine child of
+                                        # root (tk.Toplevel(self.root, ...)),
+                                        # so _rebuild_ui()'s own teardown loop
+                                        # destroys it along with everything
+                                        # else -- round 2 (test-review.md
+                                        # Defect 1) found the previous claim
+                                        # here ("never rebuilt") was never
+                                        # actually tested and is false.
+                                        # _rebuild_ui() now captures this
+                                        # dialog's restorable state before
+                                        # its teardown loop runs and rebuilds
+                                        # it, in the new theme/scale, at its
+                                        # own tail; on_close() destroys it
+                                        # directly if still set.
+        self._log_dialog_ctx = None    # that dialog's own state (log path,
+                                        # decoded text, target version, the
+                                        # "show full paths" Variable, and
+                                        # the widgets its handlers touch) --
+                                        # a plain dict, not closures, so the
+                                        # Send/Dismiss/Open-folder/Copy-link
+                                        # handlers below can be ordinary
+                                        # bound methods. Replaced wholesale
+                                        # by every dialog (re)build, never
+                                        # mutated across one.
+        self._log_dialog_show_paths_var = None   # the SAME BooleanVar as
+                                        # ctx["show_paths_var"] -- stored
+                                        # here too, as a direct instance
+                                        # attribute, purely so
+                                        # _forget_traces()'s existing sweep
+                                        # (it walks vars(self) directly, not
+                                        # two levels into a dict) finds and
+                                        # clears its trace(s) on every
+                                        # rebuild. Without this, the ac-27
+                                        # lesson repeats: a trace still
+                                        # referencing destroyed widgets from
+                                        # the outgoing generation is a live
+                                        # reference an unrelated .set() call
+                                        # (or, eventually, cyclic GC running
+                                        # on any thread) can fire into.
         self._update_text = ("Check for updates", True, None)   # args of the
                                 # most recent _set_update_state() call, kept
                                 # current whether or not Settings is open --
@@ -2060,6 +2351,15 @@ class AfkAutoclicker:
         if saved is not None:
             self.hotkey = saved
             self.apply_hotkey()
+
+        # G#36/GH#64: checks the *previous* in-app update attempt's log, if
+        # any -- runs once, from __init__ only, never from _build_ui()/
+        # _rebuild_ui() (a theme/scale rebuild must not re-offer a prompt
+        # already dismissed/sent this launch). after_idle so the main
+        # window paints first; this never blocks startup and touches no
+        # network (only clicking Send via GitHub, inside the dialog itself,
+        # ever does).
+        self.root.after_idle(self._maybe_offer_log_report)
 
     def _apply_minsize(self, grow_only=False):
         """The tuned-default-size mechanism (#14, retuned by G#28/GH#48):
@@ -2361,6 +2661,22 @@ class AfkAutoclicker:
         try:
             self._persist()                    # flush any in-progress field edit
                                                 # before its widget is destroyed
+            # G#36/GH#64 round 2 (test-review.md Defect 1): the update-log
+            # dialog, if open, is a genuine child of root and would
+            # otherwise be silently destroyed by the teardown loop below,
+            # leaving self._log_dialog/_log_dialog_ctx as dangling
+            # references -- any later write to its "show full paths"
+            # Variable then raised an uncaught TclError into a destroyed
+            # widget. The app follows the *system* theme, so an OS dark/
+            # light switch can trigger this with nobody touching Settings.
+            # Captured as plain data (not widgets, not Variables) here,
+            # before anything is torn down, and rebuilt at this method's
+            # own tail -- never by re-running detection or re-triggering
+            # "ask once" (the log's own status/text/target_version are
+            # replayed exactly as captured, not looked up again).
+            log_dialog_restore = self._capture_log_dialog_restore_state()
+            if log_dialog_restore is not None:
+                self._close_log_dialog()
             for job in self._timers.values():
                 try:
                     self.root.after_cancel(job)
@@ -2384,6 +2700,8 @@ class AfkAutoclicker:
             # window is back on backlog.md, open.
             self._forget_traces()
             self._build_ui(self.s)
+            if log_dialog_restore is not None:
+                self._restore_log_dialog(log_dialog_restore)
         finally:
             self._rebuilding = False
             if self._rebuild_wanted:
@@ -3065,7 +3383,8 @@ class AfkAutoclicker:
                 self._ui(self._set_update_state, "Install folder is read-only", True, BAD)
                 return
             log_path = os.path.join(os.path.dirname(config_path()), "update.log")
-            script = write_swap_script(staged, target, sys.executable, log_path)
+            script = write_swap_script(staged, target, sys.executable, log_path,
+                                       target_version=tag)
         except ChecksumError as exc:
             # Say what happened. "Update failed" for a digest mismatch reads
             # like a network problem and invites a retry.
@@ -3089,6 +3408,319 @@ class AfkAutoclicker:
         self.update_button.set_enabled(enabled)
         if colour:
             self.version_label.config(text=text, fg=colour)
+
+    # ---------- update-log report dialog (G#36/GH#64) ----------
+
+    def _maybe_offer_log_report(self):
+        """The one startup check this feature adds: is there a previous
+        in-app update attempt's log lying around, and did it actually
+        finish? A no-op for "ok" (no log at all, or one that finished and
+        landed the expected version) -- see update_log_status().
+
+        The log's path is derived from self.store.path, not the bare
+        config_path() module function _install_worker itself calls --
+        identical in production (Store() with no override IS config_path()),
+        but this is the only way tests can point a whole AfkAutoclicker at
+        a temp settings directory (app.Store(self.config), the same
+        isolation UITestCase already uses) without this prompt ever
+        touching a real machine's actual settings directory."""
+        log_path = os.path.join(os.path.dirname(self.store.path), "update.log")
+        status = update_log_status(log_path)
+        if status == "ok":
+            return
+        log_text = read_update_log(log_path) or ""
+        target_version = _extract_target_version(log_text)
+        self._show_update_log_dialog(status, log_path, log_text, target_version)
+
+    def _capture_log_dialog_restore_state(self):
+        """A plain-data snapshot of the update-log dialog's own state --
+        not widgets, not Variables -- for _rebuild_ui() to recreate an
+        equivalent dialog after tearing the old one down for a theme/UI-
+        scale change (test-review.md round 2 Defect 1). None if no dialog
+        is currently open."""
+        ctx = self._log_dialog_ctx
+        if ctx is None:
+            return None
+        return {
+            "status": ctx["status"], "log_path": ctx["log_path"],
+            "log_text": ctx["log_text"], "target_version": ctx["target_version"],
+            "show_paths": bool(ctx["show_paths_var"].get()),
+            "fallback_url": ctx.get("url"),
+        }
+
+    def _restore_log_dialog(self, state):
+        """Rebuilds the update-log dialog from a snapshot
+        _capture_log_dialog_restore_state() took before the previous
+        generation was torn down. Never re-runs update_log_status() and
+        never re-triggers "ask once" -- the log's own status/text/
+        target_version are replayed exactly as captured, not looked up
+        again; if the log had already been renamed to .reported by the
+        time of this rebuild, there would be no captured state to restore
+        in the first place (a fresh update_log_status() call would have
+        nothing to find)."""
+        self._show_update_log_dialog(state["status"], state["log_path"],
+                                     state["log_text"], state["target_version"])
+        if state["show_paths"]:
+            self._log_dialog_ctx["show_paths_var"].set(True)
+        if state["fallback_url"] is not None:
+            self._show_log_fallback(state["fallback_url"])
+
+    def _show_update_log_dialog(self, status, log_path, log_text, target_version):
+        """Builds and shows the one-off Toplevel (docs/design.md "Dialog
+        appears"). Transient, not modal -- no wait_window() -- there is
+        nothing else demanding attention at launch (docs/spec.md "Where it
+        appears")."""
+        s = self.s
+        top = tk.Toplevel(self.root, bg=BG)
+        top.title("Update failed")
+        top.transient(self.root)
+        top.minsize(int(480 * s), int(300 * s))
+        top.geometry(f"{int(600 * s)}x{int(480 * s)}")
+
+        show_paths_var = tk.BooleanVar(value=False)   # unchecked by default
+                                                        # -> redacted by default
+        self._log_dialog = top
+        self._log_dialog_show_paths_var = show_paths_var   # see __init__'s
+                                                        # own comment on this
+                                                        # attribute
+        self._log_dialog_ctx = {
+            "status": status, "log_path": log_path, "log_text": log_text,
+            "target_version": target_version, "show_paths_var": show_paths_var,
+        }
+
+        top.protocol("WM_DELETE_WINDOW", self._on_log_dismiss)
+        top.bind("<Escape>", lambda e: self._on_log_dismiss())
+
+        body = tk.Frame(top, bg=BG)
+        body.pack(fill="both", expand=True,
+                  padx=int(CONTENT_PAD * s), pady=int(CONTENT_PAD * s))
+        self._log_dialog_ctx["body"] = body
+
+        tk.Label(body, text="Update failed", bg=BG, fg=INK, anchor="w",
+                font=("Segoe UI", int(14 * s), "bold")).pack(fill="x", pady=(0, int(8 * s)))
+
+        explanation = ("The last update didn't finish. Your clicker still "
+                      "works — this just notifies us of the failure."
+                      if status == "incomplete" else
+                      "The last update relaunched the old version. Your "
+                      "clicker still works — this just notifies us of the failure.")
+        tk.Label(body, text=explanation, bg=BG, fg=MUTED, anchor="w", justify="left",
+                wraplength=int(560 * s), font=("Segoe UI", int(9 * s))
+                ).pack(fill="x", pady=(0, int(12 * s)))
+
+        tk.Label(body, text="Preview of what will be sent to GitHub:", bg=BG, fg=MUTED,
+                anchor="w", font=("Segoe UI", int(9 * s))).pack(fill="x", pady=(0, int(4 * s)))
+
+        preview_frame = tk.Frame(body, bg=CARD, highlightthickness=1, highlightbackground=LINE)
+        preview_frame.pack(fill="both", expand=True, pady=(0, int(16 * s)))
+        # An explicit height, not tk.Text's own 24-row default: 24 rows of
+        # Consolas plus this frame's own padding requests more vertical
+        # space than the dialog has to give (confirmed the hard way -- an
+        # unbounded default height silently squeezed the checkbox/button
+        # rows below it down to 0px, still packed, never mapped, so no
+        # click ever reached them). 12 rows leaves headroom for the rest of
+        # the layout at the dialog's default 600x480 size; fill="both" +
+        # expand=True still lets it grow into any extra space the person
+        # resizes the window to.
+        preview = tk.Text(preview_frame, bg=BG, fg=INK, wrap="word", relief="flat",
+                          font=("Consolas", int(10 * s)), height=12,
+                          padx=int(CARD_PAD * s), pady=int(CARD_PAD * s))
+        scrollbar = tk.Scrollbar(preview_frame, command=preview.yview)
+        preview.config(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        preview.pack(side="left", fill="both", expand=True)
+        self._log_dialog_ctx["preview"] = preview
+
+        checkbox_row = tk.Frame(body, bg=BG)
+        checkbox_row.pack(fill="x", pady=(0, int(16 * s)))
+        checkbox = ToggleCheckbox(checkbox_row, show_paths_var, s)
+        checkbox.pack(side="left")
+        tk.Label(checkbox_row, text="Show full local paths", bg=BG, fg=INK,
+                font=("Segoe UI", int(9.5 * s))).pack(side="left", padx=(int(8 * s), 0))
+        show_paths_var.trace_add("write", lambda *_a: self._refresh_log_preview())
+
+        button_row = tk.Frame(body, bg=BG)
+        button_row.pack(fill="x")
+        fallback_row = tk.Frame(body, bg=BG)
+        self._log_dialog_ctx["button_row"] = button_row
+        self._log_dialog_ctx["fallback_row"] = fallback_row
+
+        send_btn = Button(button_row, "Send via GitHub", self._on_log_send, s,
+                          primary=True, width=120)
+        send_btn.pack(side="left")
+        dismiss_btn = Button(button_row, "Dismiss", self._on_log_dismiss, s, width=100)
+        dismiss_btn.pack(side="left", padx=(int(8 * s), 0))
+        open_btn = Button(button_row, "Open log folder", self._on_log_open_folder,
+                          s, width=130)
+        open_btn.pack(side="left", padx=(int(8 * s), 0))
+        self._log_dialog_ctx["send_button"] = send_btn
+        self._log_dialog_ctx["dismiss_button"] = dismiss_btn
+        self._log_dialog_ctx["open_button"] = open_btn
+
+        top.bind("<Return>", lambda e: self._on_log_send())
+        self._refresh_log_preview()
+        self._fit_log_dialog_to_content()
+
+    def _fit_log_dialog_to_content(self):
+        """Grows (never shrinks) the dialog to fit whatever it currently
+        contains. `top.geometry(f"{w}x{h}")` in _show_update_log_dialog
+        gives the dialog a sensible *initial* size (design's 600x480 mock)
+        -- but per Tk's own `wm geometry` semantics, that explicit size
+        call also switches this toplevel from automatic resize-to-content
+        to a fixed size for every geometry request after it. The fallback
+        row (an Entry plus 2 buttons, ~67px) is taller than the default
+        3-button row it replaces (~35px); without this, the extra ~32px is
+        silently clipped at the window's bottom edge (test-review.md round
+        2 Defect 2 -- reproduced live: body.winfo_reqheight() 510 vs the
+        pinned top.winfo_height() 500 at 100% scale). Called at the tail of
+        both _show_update_log_dialog (covers the ordinary case, and a
+        rebuild landing at a different UI scale) and _show_log_fallback
+        (covers the layout swap itself)."""
+        top, ctx = self._log_dialog, self._log_dialog_ctx
+        top.update_idletasks()
+        needed_h = ctx["body"].winfo_reqheight() + 2 * int(CONTENT_PAD * self.s)
+        if needed_h > top.winfo_height():
+            top.geometry(f"{top.winfo_width()}x{needed_h}")
+
+    def _current_log_report(self):
+        ctx = self._log_dialog_ctx
+        return build_issue_report(__version__, ctx["target_version"], ctx["log_text"],
+                                  redact=not ctx["show_paths_var"].get())
+
+    def _refresh_log_preview(self):
+        """Redaction must update the *visible* preview immediately, not
+        just future sends (docs/spec.md "Redaction correctness") -- bound
+        to show_paths_var's own write trace, so every checkbox click (and
+        the initial build) runs through this one path."""
+        ctx = self._log_dialog_ctx
+        if ctx is None:
+            return
+        title, body = self._current_log_report()
+        preview = ctx["preview"]
+        preview.config(state="normal")
+        preview.delete("1.0", "end")
+        preview.insert("1.0", f"{title}\n\n{body}")
+        preview.config(state="disabled")
+
+    def _mark_log_reported(self):
+        """The sole "seen" marker (docs/spec.md "Asking once, without new
+        settings state") -- no new Store key, just renaming the log itself.
+        Best-effort, same "not worth crashing over" posture as
+        Store.save(): a failed rename (e.g. a read-only settings dir) just
+        means the prompt reappears next launch, not a crash."""
+        log_path = self._log_dialog_ctx["log_path"]
+        try:
+            os.replace(log_path, log_path + ".reported")
+        except OSError:
+            pass
+
+    def _close_log_dialog(self):
+        """Tears down the dialog and, just as importantly, the trace(s) on
+        its "show full paths" Variable -- a Variable is not a widget, so
+        destroying the Toplevel below never touches them (same "outgoing
+        generation's traces" gap _forget_traces() exists for elsewhere in
+        this file). Left alone, that Variable -- still holding a live
+        reference to the ToggleCheckbox's own repaint callback and this
+        dialog's _refresh_log_preview, both now pointed at destroyed
+        widgets -- is exactly the ac-27 "trace outlives its widgets"
+        pattern: a later .set() call raises TclError into a destroyed
+        widget, and even with no such call, cyclic GC finalizing the
+        Variable off the main thread is its own separate failure mode.
+        Used by every path that ends this dialog's life: Dismiss, a
+        successful Send, and _rebuild_ui()'s pre-teardown cleanup."""
+        if self._log_dialog_show_paths_var is not None:
+            var = self._log_dialog_show_paths_var
+            for modes, cbname in var.trace_info():
+                var.trace_remove(modes, cbname)
+        if self._log_dialog is not None:
+            try:
+                self._log_dialog.destroy()
+            except tk.TclError:
+                pass
+        self._log_dialog = None
+        self._log_dialog_ctx = None
+        self._log_dialog_show_paths_var = None
+
+    def _on_log_dismiss(self):
+        """Dismiss, Escape, and the OS close button all funnel here (design
+        doc "Dialog dismissed") -- all three are a real, final "no" for
+        this attempt."""
+        self._mark_log_reported()
+        self._close_log_dialog()
+
+    def _on_log_open_folder(self):
+        """Deliberately does not mark the log as seen (docs/spec.md
+        acceptance criteria) -- the person can still Send/Dismiss the same
+        dialog afterward. Best-effort: a missing xdg-open/failed launcher
+        is not worth crashing the dialog over."""
+        folder = os.path.dirname(self._log_dialog_ctx["log_path"])
+        try:
+            if sys.platform == "win32":
+                os.startfile(folder)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except OSError:
+            pass
+
+    def _on_log_send(self):
+        title, body = self._current_log_report()
+        url = build_issue_url(title, body)
+        try:
+            opened = webbrowser.open(url)
+        except Exception:
+            opened = False
+        if not opened:
+            self._show_log_fallback(url)
+            return
+        self._mark_log_reported()
+        self._close_log_dialog()
+
+    def _show_log_fallback(self, url):
+        """webbrowser.open() returned False or raised (docs/spec.md
+        "Opening the browser") -- rather than silently failing, replace the
+        button row with the raw URL (read-only, selectable) plus a Copy
+        link button, so the person can still report by hand."""
+        s = self.s
+        ctx = self._log_dialog_ctx
+        ctx["url"] = url
+        ctx["button_row"].pack_forget()
+        fallback_row = ctx["fallback_row"]
+        for child in fallback_row.winfo_children():
+            child.destroy()
+
+        # Text inserted directly, then locked read-only -- not a
+        # textvariable=. A textvariable-linked readonly Entry's initial
+        # sync from the variable was observed to silently stay blank deep
+        # into a long test run (reproducible only after ~300 other tests'
+        # worth of accumulated Tk/Tcl state in the same process; never in
+        # isolation) with no root cause pinned down worth the risk of
+        # shipping -- inserting the text directly needs no variable, no
+        # trace, and no sync step at all, so there is nothing left for that
+        # failure mode to attach to.
+        entry = tk.Entry(fallback_row, fg=INK, relief="flat",
+                         highlightthickness=1, highlightbackground=LINE,
+                         font=("Consolas", int(9 * s)))
+        entry.insert(0, url)
+        entry.config(state="readonly", readonlybackground=BG)
+        entry.pack(fill="x", pady=(0, int(8 * s)))
+        actions = tk.Frame(fallback_row, bg=BG)
+        actions.pack(fill="x")
+        copy_btn = Button(actions, "Copy link", self._on_log_copy_link, s, width=100)
+        copy_btn.pack(side="left")
+        dismiss_btn = Button(actions, "Dismiss", self._on_log_dismiss, s, width=100)
+        dismiss_btn.pack(side="left", padx=(int(8 * s), 0))
+        fallback_row.pack(fill="x")
+        ctx["fallback_entry"] = entry
+        ctx["copy_button"] = copy_btn
+        ctx["fallback_dismiss_button"] = dismiss_btn
+        self._fit_log_dialog_to_content()
+
+    def _on_log_copy_link(self):
+        url = self._log_dialog_ctx.get("url", "")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(url)
 
     def _poll_games(self):
         # Weak, not self, and dropped before the blocking call: _window_
@@ -3483,6 +4115,14 @@ class AfkAutoclicker:
 
     def on_close(self):
         self._persist()
+        # The update-log dialog (G#36/GH#64), in whatever state it's
+        # currently in -- the ordinary preview or the browser-failed
+        # fallback, it's the same Toplevel either way. root.destroy() below
+        # would tear it down anyway, but going through _close_log_dialog()
+        # also clears its Variable's trace(s) (see that method's own
+        # docstring) rather than leaving them to outlive their widgets.
+        if self._log_dialog is not None:
+            self._close_log_dialog()
         # Pending after() callbacks fire into a destroyed interpreter and Tcl
         # reports them as "invalid command name". Cancel them first.
         for job in getattr(self, "_timers", {}).values():

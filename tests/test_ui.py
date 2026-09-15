@@ -10,6 +10,7 @@ import time
 import traceback
 import types
 import unittest
+import urllib.parse
 import weakref
 
 from . import context
@@ -4227,6 +4228,442 @@ class StartupHonoursSavedAppearance(CapturesCallbackExceptions, unittest.TestCas
                 except tk.TclError:
                     pass
         self._assert_no_callback_exceptions()
+
+
+@needs_display
+class UpdateLogPrompt(CapturesCallbackExceptions, unittest.TestCase):
+    """The startup dialog G#36/GH#64 adds: a one-off Toplevel offering to
+    report a previous in-app update attempt that didn't finish.
+
+    Not built on UITestCase: that class's own setUp() already constructs
+    self.ui before a test gets a chance to write update.log, and the
+    dialog's own after_idle(self._maybe_offer_log_report) job (scheduled
+    from __init__) needs the log to already be there by then."""
+
+    def setUp(self):
+        self.workdir = tempfile.mkdtemp()
+        self.config = os.path.join(self.workdir, "settings.json")
+        self.log_path = os.path.join(self.workdir, "update.log")
+        self.root = tk.Tk()
+        self._capture_callback_exceptions(self.root)
+        self.ui = None
+
+    def tearDown(self):
+        if self.ui is not None:
+            try:
+                self.ui.on_close()
+            except tk.TclError:
+                pass
+        gc.collect()
+        self._assert_no_callback_exceptions()
+
+    def _write_log(self, text):
+        with open(self.log_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def _build(self):
+        self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
+        # _maybe_offer_log_report is scheduled via after_idle in __init__;
+        # root.update() services pending idle jobs the same way
+        # UITestCase.settle() already relies on for the startup game scan.
+        self.root.update()
+
+    def test_no_dialog_when_no_log_exists(self):
+        self._build()
+        self.assertIsNone(self.ui._log_dialog)
+
+    def test_no_dialog_for_a_done_log_with_no_version_field(self):
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n"
+                        "2026-01-01 00:00:01 done\n")
+        self._build()
+        self.assertIsNone(self.ui._log_dialog)
+
+    def test_no_dialog_for_a_done_log_with_a_matching_version(self):
+        self._write_log(
+            f'2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c version="v{app.__version__}"\n'
+            "2026-01-01 00:00:01 done\n")
+        self._build()
+        self.assertIsNone(self.ui._log_dialog)
+
+    def test_dialog_appears_for_an_incomplete_log(self):
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n"
+                        "2026-01-01 00:00:01 wait finished after 1 iterations\n")
+        self._build()
+        self.assertIsNotNone(self.ui._log_dialog)
+        self.assertEqual(self.ui._log_dialog.title(), "Update failed")
+
+    def test_dialog_appears_for_a_wrong_version_log(self):
+        self._write_log(
+            '2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c version="v0.0.1"\n'
+            "2026-01-01 00:00:01 done\n")
+        self._build()
+        self.assertIsNotNone(self.ui._log_dialog)
+
+    def test_escape_dismisses_and_marks_the_log_reported(self):
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self._build()
+        # Under Xvfb (no window manager) a freshly created Toplevel never
+        # actually owns X input focus, so a generated <Escape> has nothing
+        # to route to without this -- same one-time focus_force() precedent
+        # UITestCase.setUp() already uses for the main window.
+        self.ui._log_dialog.focus_force()
+        self.root.update()
+        self.ui._log_dialog.event_generate("<Escape>")
+        self.root.update()
+        self.assertIsNone(self.ui._log_dialog)
+        self.assertFalse(os.path.exists(self.log_path))
+        self.assertTrue(os.path.exists(self.log_path + ".reported"))
+
+    def test_dismissed_log_does_not_reappear_on_a_later_launch(self):
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self._build()
+        self.ui._on_log_dismiss()
+        self.root.update()
+        self.ui.on_close()
+        self.ui = None       # already closed -- tearDown must not double-close it
+
+        root2 = tk.Tk()
+        self._capture_callback_exceptions(root2)
+        ui2 = app.AfkAutoclicker(root2, store=app.Store(self.config))
+        root2.update()
+        try:
+            self.assertIsNone(ui2._log_dialog)
+        finally:
+            try:
+                ui2.on_close()
+            except tk.TclError:
+                pass
+        self._assert_no_callback_exceptions()
+
+    def test_checkbox_toggles_redaction_in_the_preview_live(self):
+        home = os.path.expanduser("~")
+        self._write_log(
+            f'2026-01-01 00:00:00 start pid=1 staged="{home}/x" target="{home}/y" '
+            'relaunch="c" version="v0.7.0"\n'
+            "2026-01-01 00:00:01 copy exit code 1\n")
+        self._build()
+        ctx = self.ui._log_dialog_ctx
+
+        def preview_text():
+            return ctx["preview"].get("1.0", "end")
+
+        # Unchecked by default -> redacted by default.
+        self.assertNotIn(home, preview_text())
+        self.assertIn("~/x", preview_text())
+
+        ctx["show_paths_var"].set(True)
+        self.root.update()
+        self.assertIn(f"{home}/x", preview_text())
+
+        ctx["show_paths_var"].set(False)
+        self.root.update()
+        self.assertNotIn(home, preview_text())
+
+    def test_send_opens_the_browser_with_the_redacted_preview_and_marks_reported(self):
+        home = os.path.expanduser("~")
+        self._write_log(
+            f'2026-01-01 00:00:00 start pid=1 staged="{home}/x" target="{home}/y" '
+            'relaunch="c" version="v0.7.0"\n'
+            "2026-01-01 00:00:01 copy exit code 1\n")
+        self._build()
+        ctx = self.ui._log_dialog_ctx
+        # "end-1c", not "end": tk.Text.get() always appends one implicit
+        # trailing newline beyond whatever was actually inserted.
+        preview_text = ctx["preview"].get("1.0", "end-1c")
+
+        calls = []
+        orig_open = app.webbrowser.open
+        app.webbrowser.open = lambda url: calls.append(url) or True
+        try:
+            ctx["send_button"].event_generate("<Button-1>")
+            self.root.update()
+        finally:
+            app.webbrowser.open = orig_open
+
+        self.assertEqual(len(calls), 1)
+        url = calls[0]
+        self.assertLessEqual(len(url), 2000)
+        self.assertNotIn(home, url, "the raw home directory leaked into the sent URL")
+
+        query = url.split("?", 1)[1]
+        params = dict(pair.split("=", 1) for pair in query.split("&"))
+        decoded_title = urllib.parse.unquote_plus(params["title"])
+        decoded_body = urllib.parse.unquote_plus(params["body"])
+        self.assertEqual(f"{decoded_title}\n\n{decoded_body}", preview_text)
+
+        self.assertIsNone(self.ui._log_dialog)
+        self.assertTrue(os.path.exists(self.log_path + ".reported"))
+
+    def test_send_shows_the_fallback_when_the_browser_cannot_open(self):
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self._build()
+        ctx = self.ui._log_dialog_ctx
+        orig_open = app.webbrowser.open
+        app.webbrowser.open = lambda url: False
+        try:
+            ctx["send_button"].event_generate("<Button-1>")
+            self.root.update()
+        finally:
+            app.webbrowser.open = orig_open
+
+        self.assertIsNotNone(self.ui._log_dialog, "the dialog must stay open on failure")
+        self.assertIn("url", ctx)
+        self.assertEqual(ctx["fallback_entry"].get(), ctx["url"])
+        self.assertFalse(os.path.exists(self.log_path + ".reported"))
+
+    def test_send_shows_the_fallback_when_the_browser_raises(self):
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self._build()
+        ctx = self.ui._log_dialog_ctx
+        orig_open = app.webbrowser.open
+
+        def _raise(_url):
+            raise RuntimeError("no browser controller")
+        app.webbrowser.open = _raise
+        try:
+            ctx["send_button"].event_generate("<Button-1>")
+            self.root.update()
+        finally:
+            app.webbrowser.open = orig_open
+
+        self.assertIsNotNone(self.ui._log_dialog)
+        self.assertIn("copy_button", ctx)
+        self.assertFalse(os.path.exists(self.log_path + ".reported"))
+
+    def test_copy_link_copies_the_fallback_url_to_the_clipboard(self):
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self._build()
+        ctx = self.ui._log_dialog_ctx
+        orig_open = app.webbrowser.open
+        app.webbrowser.open = lambda url: False
+        try:
+            ctx["send_button"].event_generate("<Button-1>")
+            self.root.update()
+            ctx["copy_button"].event_generate("<Button-1>")
+            self.root.update()
+        finally:
+            app.webbrowser.open = orig_open
+        self.assertEqual(self.root.clipboard_get(), ctx["url"])
+
+    def test_open_log_folder_does_not_mark_the_log_reported(self):
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self._build()
+        calls = []
+        orig_popen = app.subprocess.Popen
+        had_startfile = hasattr(app.os, "startfile")
+        orig_startfile = getattr(app.os, "startfile", None)
+        app.subprocess.Popen = lambda *a, **k: calls.append(("popen",) + a)
+        app.os.startfile = lambda path: calls.append(("startfile", path))
+        try:
+            ctx = self.ui._log_dialog_ctx
+            ctx["open_button"].event_generate("<Button-1>")
+            self.root.update()
+        finally:
+            app.subprocess.Popen = orig_popen
+            if had_startfile:
+                app.os.startfile = orig_startfile
+            else:
+                del app.os.startfile
+
+        self.assertTrue(calls, "no file-manager call was made")
+        self.assertFalse(os.path.exists(self.log_path + ".reported"))
+        self.assertIsNotNone(self.ui._log_dialog)
+
+        # The same dialog session can still Dismiss afterward.
+        self.ui._on_log_dismiss()
+        self.root.update()
+        self.assertTrue(os.path.exists(self.log_path + ".reported"))
+
+    # ---------- round 2 (test-review.md): survives a theme/scale rebuild ----------
+
+    def test_appearance_change_preserves_the_open_dialog_and_checkbox_state(self):
+        # docs/test-review.md round 2 Defect 1: _rebuild_ui()'s teardown
+        # loop destroys every child of root, including this dialog -- a
+        # live repro of Settings -> Appearance (or an OS dark/light switch
+        # while the app follows "system") while the dialog is still open.
+        home = os.path.expanduser("~")
+        self._write_log(
+            f'2026-01-01 00:00:00 start pid=1 staged="{home}/x" target="{home}/y" '
+            'relaunch="c" version="v0.7.0"\n'
+            "2026-01-01 00:00:01 copy exit code 1\n")
+        self._build()
+        old_dialog = self.ui._log_dialog
+        old_ctx = self.ui._log_dialog_ctx
+        old_ctx["show_paths_var"].set(True)
+        self.root.update()
+
+        self.ui._apply_appearance("light")
+        self.root.update()
+
+        new_dialog = self.ui._log_dialog
+        new_ctx = self.ui._log_dialog_ctx
+        self.assertIsNotNone(new_dialog, "the dialog must still exist after a rebuild")
+        self.assertEqual(new_dialog.winfo_exists(), 1, "must be a live widget, not a stale reference")
+        self.assertIsNot(new_ctx, old_ctx, "a fresh dialog/ctx must have been rebuilt")
+        self.assertNotEqual(old_dialog, new_dialog)
+        toplevels = [w for w in self.root.winfo_children() if isinstance(w, tk.Toplevel)]
+        self.assertEqual(len(toplevels), 1,
+                         "exactly one dialog Toplevel must exist after the rebuild, "
+                         "not a leaked duplicate of the old, destroyed one")
+        self.assertTrue(new_ctx["show_paths_var"].get(),
+                        "the checked state must survive the rebuild")
+        self.assertIn(f"{home}/x", new_ctx["preview"].get("1.0", "end-1c"),
+                     "the preview must still show full paths after the rebuild")
+
+        # Toggling the (new, live) checkbox post-rebuild must not raise.
+        new_ctx["show_paths_var"].set(False)
+        self.root.update()
+        self.assertNotIn(home, new_ctx["preview"].get("1.0", "end-1c"))
+
+        # Send still works post-rebuild.
+        calls = []
+        orig_open = app.webbrowser.open
+        app.webbrowser.open = lambda url: calls.append(url) or True
+        try:
+            new_ctx["send_button"].event_generate("<Button-1>")
+            self.root.update()
+        finally:
+            app.webbrowser.open = orig_open
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(self.ui._log_dialog)
+        self.assertTrue(os.path.exists(self.log_path + ".reported"))
+
+    def test_a_stray_reference_to_the_pre_rebuild_ctx_does_not_raise(self):
+        # docs/test-review.md round 2 Defect 1's exact repro technique
+        # (theme_change_probe2.py): something that kept its own reference
+        # to the *pre-rebuild* ctx/Variable (a stale local, a leftover
+        # closure) must not raise when it later touches that reference --
+        # the whole point of clearing that Variable's traces before the
+        # widgets they touch are destroyed (_close_log_dialog()'s own
+        # docstring, the ac-27 "trace outlives its widgets" lesson).
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self._build()
+        stale_ctx = self.ui._log_dialog_ctx   # deliberately held past the rebuild
+
+        self.ui._apply_appearance("light")
+        self.root.update()
+
+        # The pre-rebuild ToggleCheckbox's own repaint trace is still
+        # registered on this stale Variable unless it was explicitly
+        # cleared -- setting it must not raise into the now-destroyed
+        # widget it used to repaint.
+        stale_ctx["show_paths_var"].set(True)
+        self.root.update()
+        self._assert_no_callback_exceptions()
+
+    def test_ui_scale_change_preserves_the_open_dialog_and_checkbox_state(self):
+        home = os.path.expanduser("~")
+        self._write_log(
+            f'2026-01-01 00:00:00 start pid=1 staged="{home}/x" target="{home}/y" '
+            'relaunch="c" version="v0.7.0"\n'
+            "2026-01-01 00:00:01 copy exit code 1\n")
+        self._build()
+        old_ctx = self.ui._log_dialog_ctx
+        old_ctx["show_paths_var"].set(True)
+        self.root.update()
+
+        self.ui._apply_ui_scale("130")
+        self.root.update()
+
+        new_dialog = self.ui._log_dialog
+        new_ctx = self.ui._log_dialog_ctx
+        self.assertIsNotNone(new_dialog)
+        self.assertEqual(new_dialog.winfo_exists(), 1)
+        self.assertTrue(new_ctx["show_paths_var"].get())
+        self.assertIn(f"{home}/x", new_ctx["preview"].get("1.0", "end-1c"))
+
+    def test_appearance_change_preserves_the_fallback_state_and_url(self):
+        self._write_log("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        self._build()
+        ctx = self.ui._log_dialog_ctx
+        orig_open = app.webbrowser.open
+        app.webbrowser.open = lambda url: False
+        try:
+            ctx["send_button"].event_generate("<Button-1>")
+            self.root.update()
+        finally:
+            app.webbrowser.open = orig_open
+        url_before = ctx["url"]
+        self.assertFalse(os.path.exists(self.log_path + ".reported"))
+
+        self.ui._apply_appearance("light")
+        self.root.update()
+
+        new_dialog = self.ui._log_dialog
+        new_ctx = self.ui._log_dialog_ctx
+        self.assertIsNotNone(new_dialog, "the dialog must survive the rebuild in the fallback state")
+        self.assertEqual(new_dialog.winfo_exists(), 1)
+        self.assertEqual(new_ctx.get("url"), url_before, "the fallback URL must be replayed unchanged")
+        self.assertIn("fallback_entry", new_ctx, "the fallback layout itself must be replayed")
+        self.assertEqual(new_ctx["fallback_entry"].get(), url_before)
+        # Never re-run detection / re-trigger "ask once": still not renamed.
+        self.assertFalse(os.path.exists(self.log_path + ".reported"))
+
+        # Copy link still works post-rebuild.
+        new_ctx["copy_button"].event_generate("<Button-1>")
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), url_before)
+
+    # ---------- round 2 (test-review.md): fallback fits at every scale ----------
+
+    def _assert_fallback_not_clipped(self, ui_scale):
+        workdir = tempfile.mkdtemp()
+        config = os.path.join(workdir, "settings.json")
+        log_path = os.path.join(workdir, "update.log")
+        with open(log_path, "w", encoding="utf-8") as fh:
+            fh.write("2026-01-01 00:00:00 start pid=1 staged=a target=b relaunch=c\n")
+        store = app.Store(config)
+        store.data["ui_scale"] = ui_scale
+        root = tk.Tk()
+        self._capture_callback_exceptions(root)
+        ui = app.AfkAutoclicker(root, store=store)
+        root.update()
+        ctx = ui._log_dialog_ctx
+        orig_open = app.webbrowser.open
+        app.webbrowser.open = lambda url: False
+        try:
+            ctx["send_button"].event_generate("<Button-1>")
+            root.update()
+        finally:
+            app.webbrowser.open = orig_open
+
+        dialog = ui._log_dialog
+        dialog.update_idletasks()
+        # "genuinely mapped first": an unmapped/not-yet-drawn widget's
+        # winfo_height() is unreliable (and differs across platforms) --
+        # this dialog is built, packed and update_idletasks()-flushed by
+        # this point, so winfo_ismapped() must already be true.
+        self.assertTrue(dialog.winfo_ismapped(), "dialog must be mapped before measuring geometry")
+        # A squeezed (clipped) widget is allocated LESS than it asked for
+        # -- pack() does not let a child overflow past its container's
+        # edge, it silently shrinks it instead (confirmed against
+        # docs/history's round-1 code: winfo_height() 25px vs
+        # winfo_reqheight() 35px for this exact button at 100% scale).
+        # Comparing root-relative bottom-edge coordinates instead would
+        # miss this: the squeezed widget's own reported bottom edge never
+        # exceeds the window's, only its *content* renders truncated.
+        for widget in (ctx["fallback_dismiss_button"], ctx["copy_button"], ctx["fallback_row"]):
+            self.assertGreaterEqual(
+                widget.winfo_height(), widget.winfo_reqheight(),
+                f"fallback content clipped at ui_scale={ui_scale}: "
+                f"{widget.winfo_height()}px allocated, {widget.winfo_reqheight()}px needed")
+        try:
+            ui.on_close()
+        except tk.TclError:
+            pass
+        self._assert_no_callback_exceptions()
+
+    def test_fallback_is_not_clipped_at_90_percent(self):
+        self._assert_fallback_not_clipped("90")
+
+    def test_fallback_is_not_clipped_at_100_percent(self):
+        self._assert_fallback_not_clipped("100")
+
+    def test_fallback_is_not_clipped_at_115_percent(self):
+        self._assert_fallback_not_clipped("115")
+
+    def test_fallback_is_not_clipped_at_130_percent(self):
+        self._assert_fallback_not_clipped("130")
 
 
 def tearDownModule():
