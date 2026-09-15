@@ -40,7 +40,7 @@ end-to-end pass clean on `main` at `0d6e784`. Report: `handoff/story-17-e2e.md`.
 ## Open
 
 Bugs and residue:
-- [x] **Fixed in 0.6.0 (G#35 / GH#63, PR #65).** Under `DETACHED_PROCESS` the swap
+- [x] **Fixed in 0.6.0 (G#35 / GH#63 — github: true, PR #65).** Under `DETACHED_PROCESS` the swap
       script stalled at its first `tasklist | find`; now `CREATE_NO_WINDOW`, `ping` for
       the wait, and a shipped `update.log`. Original report: **Windows: in-app Install
       closes the app and never comes back** (Leo,
@@ -91,44 +91,53 @@ Bugs and residue:
       rebuild-to-rebuild accumulation is fixed; the final generation's traces (a
       one-time leak, on every close, not a per-rebuild accumulation) are open again,
       same as before this ticket. Left open, narrowed to both windows.
-- [x] **Done 2026-09-15, PR #73 (combined with G#8/G#9 below).** G#5 / GH#7 — Applying
+- [x] **Done 2026-09-15, PR #73 (combined with G#8/G#9 below).** G#5 / GH#7 — github: true — Applying
       a hotkey crashes the process on macOS without Accessibility permission. Needed no
       code change: already fixed by the commit that introduced `macos_input_permitted()`.
-- [x] **Done 2026-09-15, PR #73.** G#8 / GH#10 — `registered_hotkey` claims a listener
+- [x] **Done 2026-09-15, PR #73.** G#8 / GH#10 — github: true — `registered_hotkey` claims a listener
       that is not running. Round 1 fixed the first-Apply case only; round 2 (caught by
       PR review, reproduced live) fixed a second Apply after an earlier successful one.
-- [x] **Done 2026-09-15, PR #74.** G#7 / GH#9 — `from_json` checks shape but not
+- [x] **Done 2026-09-15, PR #74.** G#7 / GH#9 — github: true — `from_json` checks shape but not
       vocabulary. Now `name in kb.Key.__members__`, char length 1..`MAX_CHAR_LEN` (8),
       non-bool vk in 0..`MAX_VK` (`0x1FFFFFFF`), and more than `MAX_CHORD` keys is
       rejected instead of truncated. `MAX_CHAR_LEN` is reasoned from pynput's darwin
       source, not a real Mac. Don't tighten `MAX_VK` to `0x0110FFFF`: XF86 media-key
       keysyms (`0x1008FFxx`) sit above that.
-- [ ] G#40 / GH#75 — macOS flake: `Sidebar.test_running_dot_and_follow` read `running`
+- [ ] G#40 / GH#75 — github: true — macOS flake: `Sidebar.test_running_dot_and_follow` read `running`
       as False on PR #74's first macOS leg (run 34989787219); the same commit's re-run
       was green. **Hit again on PR #76 (run 34996063044) — 2 of the last 7 macOS legs.** Suspected to be the same class as G#39: a periodic `_poll_games`
       scan landing inside the test's own `root.update()` after `settle()` only
       waited for the startup scan. Unconfirmed; details on the ticket.
-- [x] **Done 2026-09-15, PR #73.** G#9 / GH#11 — macOS input-permission guard: residue
+- [x] **Done 2026-09-15, PR #73.** G#9 / GH#11 — github: true — macOS input-permission guard: residue
       from the review of PR #4 (5 small items: `selftest()`'s unconditional listener
       construction, a load-bearing comment, a corrected darwin hint string, a
       previously-self-skipping darwin test now exercised via a `find_library` patch).
-- [x] **Done 2026-09-15, PR #76.** G#10 / GH#12 — Review residue: roadmap line, startup
+- [x] **Done 2026-09-15, PR #76.** G#10 / GH#12 — github: true — Review residue: roadmap line, startup
       ordering, test hygiene, stale counts. The startup-ordering gap had already closed
       (since `54a3b65`, `_build_ui()` runs `_sync_settings()` before the hotkey restore),
       so it is documented, not moved. The stale counts were already corrected on GitHub.
-- [x] **Done 2026-09-15, PR #77.** G#18 / GH#22 — Review residue from PR #21. The `bind_all`
+- [x] **Done 2026-09-15, PR #77.** G#18 / GH#22 — github: true — Review residue from PR #21. The `bind_all`
       comment landed with PR #30; the test clicks the sidebar's real "Add current game"
       `Button` (round 1 built a throwaway one, missing that the sidebar stays viewable).
-- [x] **Done 2026-09-15, PR #78.** G#21 / GH#32 — Review residue from the updater PRs. Hex check in
+- [x] **Done 2026-09-15, PR #78.** G#21 / GH#32 — github: true — Review residue from the updater PRs. Hex check in
       `fetch_checksums`; `_safe_names` docstring (zipfile strips `..` itself, tar was the
       real hole); update-check results carry `_check_seq` and land via main-thread gates
       (`self._pending` was written from the worker); `Store.save()` returns a bool and the
       Appearance pane shows one "Couldn't save settings" notice. Three rounds: a crash
       opening Settings while saves fail (painting mid-rebuild), then a macOS-only SIGTRAP
       from a test that started a real pynput listener.
-- [ ] G#41 / GH#79 — `Store.save` leaves `settings.json.tmp` behind when `os.replace` fails
+- [x] **Done 2026-09-15, PR #80.** G#22 / GH#33 — github: true — Warn when the Minecraft interval minus jitter drops
+      below 650 ms. The jitter row's hint becomes "Java sweeps may miss" (INK bold, 550–649 ms)
+      or "Java sweeps likely fail" (BAD bold, <550 ms). It sits in the jitter slot, not under
+      Interval, because the Minecraft Clicking pane has ~0–1 px spare at `WINDOW_MIN_H` on
+      Windows/macOS. Three rounds: placement/height (PR review), owner asked it to stand out
+      more, and a floor test that could not fail.
+- [ ] G#42 / GH#81 — github: true — The three older `WindowMinimumHeight` floor tests measure allocated, not
+      required, heights, so they cannot detect a clipped pane. They are the only guard on
+      `WINDOW_MIN_H = 620`. Use PR #80's reqheight+pady measure and sabotage-verify.
+- [ ] G#41 / GH#79 — github: true — `Store.save` leaves `settings.json.tmp` behind when `os.replace` fails
       (e.g. Windows file lock). Harmless, small; found by PR #78's review.
-- [x] **Done 2026-09-15, PR #72.** G#36 / GH#64 — Ask the person to send `update.log`
+- [x] **Done 2026-09-15, PR #72.** G#36 / GH#64 — github: true — Ask the person to send `update.log`
       (prefilled GitHub issue) when an in-app update didn't finish. Follow-up to G#35,
       which ships the log. Four review rounds: two design-doc contrast-arithmetic
       fixes, a theme/UI-scale change destroying the open dialog, the no-browser
@@ -137,8 +146,8 @@ Bugs and residue:
       command-injection finding — the GitHub release tag reached the swap script
       unvalidated, and a crafted tag could run a command. Fixed by validating the
       tag's shape before it's used at all.
-- [ ] G#4 / GH#6 — The click interval measures 25–40 % slow on the macOS CI runner. Needs a real Mac.
-- [ ] G#23 / GH#35 — macOS reports `_dpi_s` ~0.75, so the 90 % UI-scale step renders
+- [ ] G#4 / GH#6 — github: true — The click interval measures 25–40 % slow on the macOS CI runner. Needs a real Mac.
+- [ ] G#23 / GH#35 — github: true — macOS reports `_dpi_s` ~0.75, so the 90 % UI-scale step renders
       5 pt labels (6 pt at 100 %, which already ships). Not a regression; the spec's
       §3 assumption that `_dpi_s >= 1.0` was simply wrong about macOS. Decide whether
       to add the `fs(base, s)` floor across the ~20 font call sites, drop 90 % on
@@ -333,7 +342,7 @@ Two follow-ups from its review are below.
       undocumented invariant rather than a guaranteed one, and the coalescing
       machinery it belongs to is new (PR #49 round 5). Worth either cancelling it
       for symmetry or writing down why it does not need cancelling.
-- [x] **Done 2026-09-15, PR #68.** **G#37 / GH#66 — Pane content should sit directly under its tab bar, not in the middle of the
+- [x] **Done 2026-09-15, PR #68.** **G#37 / GH#66 — github: true — Pane content should sit directly under its tab bar, not in the middle of the
       page** (Leo, 2026-09-13, from screenshots of 0.5.0 on Windows, maximised). The
       Hotkey tab's Record/Apply card, the Clicking tab's cards and Settings →
       Appearance all float mid-page with a large empty band between the tabs and the
@@ -343,15 +352,15 @@ Two follow-ups from its review are below.
       change, not a bug, and check the window height floor (`WINDOW_MIN_H`) still
       holds with top alignment. The Macros tab branch (G#13, below) builds its
       settings on the same centered panes, so it needs the same change.
-- [ ] **G#38 / GH#67 — UI scale should follow the window size** (Leo, 2026-09-13). Today it's a
+- [ ] **G#38 / GH#67 — github: true — UI scale should follow the window size** (Leo, 2026-09-13). Today it's a
       fixed Settings choice (90/100/115/130%). Leo wants it to scale with the window.
       Open design questions for the spec: replace the manual choice or make it an
       "Auto" option next to it, what the reference size is, whether it steps or
       scales continuously, and how it interacts with `WINDOW_MIN_H`, the rail
       collapse threshold and the per-rebuild cost of `_rebuild_ui()` during a drag
       resize.
-- [ ] G#13 / GH#15 — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
-- [ ] G#12 / GH#14 — Calibration suite for the review agent. Rebase its branch first.
+- [ ] G#13 / GH#15 — github: true — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
+- [ ] G#12 / GH#14 — github: true — Calibration suite for the review agent. Rebase its branch first.
 
 Housekeeping:
 - [ ] **Clean up the remote branches** (Leo, 2026-09-13, from GitHub's branch list):
@@ -446,7 +455,7 @@ Housekeeping:
       proof it fixed both is what cost the second round. For anything resize-,
       mapping- or focus-driven, ask what a real WM would do that Xvfb will not, and
       treat CI as the only evidence.
-- [x] **Pipeline-doc references — resolved 2026-09-11** (G#25 / GH#38, PR #39).
+- [x] **Pipeline-doc references — resolved 2026-09-11** (G#25 / GH#38 — github: true, PR #39).
       The real count was 44, not 39 — the original grep omitted `implementation`.
       40 now resolve into `docs/history/`; 4 cite sections in documents overwritten
       before anyone archived them and are documented as unrecoverable, with the
@@ -533,7 +542,7 @@ releases**. Keep a second display for load loops — see Housekeeping.
 
 ## Session handoff — 2026-09-15 (continued)
 
-Main is at `691c42a` (item 1 merged since, PR #74 → `c142eee`; item 2, PR #76 → `c2db91d`; item 3, PR #77 → `c1c7977`; item 4, PR #78 → `ffe3fc3`; 0.7.0 cut from `b853890`). Everything below is queued, in the order to work it, one cycle
+Main is at `691c42a` (item 1 merged since, PR #74 → `c142eee`; item 2, PR #76 → `c2db91d`; item 3, PR #77 → `c1c7977`; item 4, PR #78 → `ffe3fc3`; item 5, PR #80 → `edd4975`; 0.7.0 cut from `b853890`). Everything below is queued, in the order to work it, one cycle
 at a time (product-manager → developer → reviewer → PR → independent PR review →
 merge), auto-continuing to the next after each merge unless told to stop:
 
@@ -557,7 +566,7 @@ merge), auto-continuing to the next after each merge unless told to stop:
    comment correction in `_safe_names` (zipfile has stripped `..` since 3.6.2, tar
    still needs the check); a test for the superseded-worker race in `check_update`;
    `Store.save()` swallowing `OSError` silently.
-5. **G#22 (Gitea only, no backlog entry existed before now) — warn when the
+5. ~~**G#22 / GH#33 (GitHub mirror existed all along) — warn when the~~ **Done, PR #80.**
    Minecraft interval minus jitter drops below 650 ms.** Real feature, needs a
    ux-designer pass: a muted hint under the Interval row below 650, bad-colour below
    550. Java only (Bedrock has no sweep cooldown).

@@ -276,3 +276,104 @@ required heights, and/or use `restart()` at the persisted scale the way
 row-height/floor coverage for the INK band, not only BAD, since BAD is not
 shown to be the worst case, and (3) fix `README.md:75`'s bold-threshold
 claim.
+
+## Round 3 (PR #80 round-3 diff, `git diff 37c1b2b 4f0a75d`)
+
+### Scope
+Round 3's own diff only: `tests/test_ui.py` (rewrite of
+`WindowMinimumHeight.test_sweep_hint_height_floor_minecraft_with_eating`,
+same location/name) and `README.md:75`. Checked against round 2's own two
+must-fixes and one should-fix (`docs/test-review.md`'s "Round 2" Findings
+#1/#2 above) and `docs/implementation.md`'s "Round 3" section, treated as a
+claim to re-derive, not a fact to trust. `afk_clicker.py` is untouched this
+round (confirmed: `git diff 37c1b2b 4f0a75d --stat` touches only
+`README.md`, `docs/implementation.md`, `docs/test-review.md`,
+`tests/test_ui.py`), so lenses 3/5/6 have nothing new to examine.
+
+Env: same venv/Xvfb `:99` as rounds 1-2. All probes/sabotage this round ran
+from in-process scratchpad scripts (never touching a repo file) —
+`git status --short` was clean before and after every probe, confirmed
+before writing this section.
+
+### Testing pass
+
+**Full suite, independently re-run:**
+```
+DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .
+Ran 414 tests in 73.198s
+OK (skipped=10)
+```
+Matches round 2's own baseline exactly (414 = same total; this round
+rewrote one existing test in place, added none).
+
+**The rewritten class alone:**
+```
+DISPLAY=:99 <venv>/bin/python -m unittest tests.test_ui.WindowMinimumHeight -v
+Ran 6 tests in 0.739s
+OK
+```
+
+| # | Scrutiny point (from dispatch) | Method | Result | Evidence |
+|---|---|---|---|---|
+| 1 | Pane assertion must actually fail under the reviewer's own round-2 sabotage, at both scales, for `SWEEP_HINT_BAD` and independently for `SWEEP_HINT_MUTED` | In-process monkeypatch (`app.SWEEP_HINT_BAD = app.SWEEP_HINT_BAD * 12`, then separately `SWEEP_HINT_MUTED * 12`), fresh module reimport each run, re-ran only `test_sweep_hint_height_floor_minecraft_with_eating` | pass — now discriminating | BAD×12: `(scale='90', band='bad')` → `AssertionError: 488 not less than or equal to 407`; `(scale='130', band='bad')` → `672 not less than or equal to 594`; `band='ink'` subTests in the same run stayed green. MUTED×12: mirror result, `(scale='90'/'130', band='ink')` fail at the identical 488/407 and 672/594 pair, `band='bad'` stays green. Matches `docs/implementation.md`'s claimed numbers exactly |
+| 2 | Passes cleanly on the real, unsabotaged code | Same harness, no monkeypatch | pass | `Ran 1 test in 0.205s — OK`, both scales, both bands |
+| 3 | Is the measure correct — right spacers excluded, `pady` read correctly in both int and tuple form, no hidden/unmapped child mis-counted, no false-failure risk on a genuinely non-overflowing pane | Read `_fill_pane()` (`afk_clicker.py:1930-2019`) and the Clicking-pane build (`afk_clicker.py:2988-3038`, `_select()`'s Eating pack/pack_forget at `:3517-3524`); live probe of `pack_info()["pady"]` shape for a tuple-pady, int-pady, and no-pady child | pass | `card()`'s shell canvas packs with no `pady` (`shell.pack(fill="x")`, `afk_clicker.py:1893`) and `eat_card.pack(fill="x", before=clicking_bottom)` also has none — both correctly contribute `0` via the test's `_pady_total`. `eat_section.pack(fill="x", pady=(int(14*s), int(6*s)), ...)` is the one tuple-pady child — live-probed `pack_info()["pady"]` returns a genuine Python `tuple` for a tuple-pady pack call, a plain `int` for a symmetric one, and `0` (also `int`) when unset; `_required_natural`'s `isinstance(pady, (tuple, list))` branch matches Tk's actual return shape exactly, not a guess. Direct-child set of `clicking_pane` is exactly `{clicking_top, cl-shell, eat_section, eat_card, clicking_bottom}`; the two spacers are excluded by identity (`c not in (top, bottom)`, same filter `_fill_pane()` itself uses), and `eat_section`/`eat_card` are excluded automatically via `winfo_ismapped()` on any non-Minecraft profile — not exercised by this Minecraft-only test, but confirmed by reading `_select()`'s `pack_forget()` branch. No child is double-counted or silently dropped. False-failure risk on real code: measured real-code `natural` (332px) exactly equals the old allocated-span measurement (332px) at 90% scale — the two measures only diverge once genuine clipping occurs, so this is not a new source of flakiness on a pane that genuinely fits, only a measure that also catches the case where it doesn't |
+| 4 | Each subtest genuinely sits at `int(WINDOW_MIN_H * ui.s)`, not a pre-restart size | Independent scratchpad script: fresh `Store`, `store.data["ui_scale"]="90"/"130"`, `store.save()`, fresh `tk.Tk()` + `AfkAutoclicker`, compare `root.winfo_height()`/`root.minsize()[1]` against `int(app.WINDOW_MIN_H * ui.s)` | pass | `90: ui.s=0.938…, root_h=581, minsize=(484, 581), expected=581` — both match; `130: ui.s=1.355…, root_h=840, minsize=(700, 840), expected=840` — both match. Identical to round 2's own independently-derived 581/840 pair |
+| 5 | `self.restart()` leaves no second Tk alive — two Tk processes on one display must never coexist | Read `UITestCase.restart()` (`tests/test_ui.py:162-166`: `self.ui.on_close()` runs, *then* a fresh `tk.Tk()` is created) and `on_close()`'s tail (`afk_clicker.py:4627`, `self.root.destroy()`); independent scratchpad script instantiated one `AfkAutoclicker`, called `on_close()`, confirmed the old root raises `TclError` on any further `winfo_*` call, only then created a second `tk.Tk()`/`AfkAutoclicker` and confirmed `tkinter._default_root is root2` | pass | Old root: `TclError: can't invoke "winfo" command: application has been destroyed` (i.e., genuinely gone, not merely hidden) before the second `Tk()` is ever constructed — `on_close()` is synchronous and completes fully (including `self.worker`/`self._poll_thread` `.join(timeout=2.0)`) before `restart()`'s next line runs, so there is no window where two roots are live |
+| 6 | README's new sentence is accurate: bold from <650, a stronger colour from <550, Java only, Minecraft profile only | Read `_paint_sweep_hint()` (`afk_clicker.py:3582-3624`) and `Row.set_hint`/`restore_hint` (`afk_clicker.py:2227-2244`); the actual call site `self.jitter_row.set_hint(text, colour, bold=True)` (`afk_clicker.py:3620`) fires for *both* the INK (550-649 ms) and BAD (<550 ms) bands, and `restore_hint()` (`:2244`, `bold=False`) is the only place using the regular weight | pass | `README.md:75`'s new wording — "…wird ab 650 ms fett hervorgehoben und wechselt ab 550 ms zusätzlich auf eine auffälligere Farbe…" ("becomes bold below 650 ms, and additionally switches to a more conspicuous colour below 550 ms") — matches the code exactly: both bands are unconditionally bold, only the colour (`INK` vs `BAD`) escalates at 550 ms. The "Java"-naming and the two threshold numbers were already correct and untouched this round |
+
+The suite passes and every specific scrutiny point in the dispatch was
+independently re-derived, not assumed from `docs/implementation.md`'s own
+account — no test fails this round, so this proceeded to a review pass.
+
+### Regression check
+414/414 (`OK, skipped=10`), independently re-run — identical to round 2's own
+total; this round rewrote one existing test in place and touched no other
+test, so no new test count to reconcile and no regression surface beyond the
+one method actually changed.
+
+### Spec coverage
+Both of round 2's must-fixes are now demonstrably closed: the pane assertion
+provably fails under the exact sabotage that previously slipped through it
+(scrutiny #1 above), at both scale steps, for both constants independently —
+this is the "criterion present, named, green — but not actually tested" gap
+round 2 flagged against Decision D, and it is now actually tested, not merely
+claimed to be. The should-fix README wording is also independently confirmed
+correct against the real bold/colour behaviour (scrutiny #6). No acceptance
+criterion in `docs/spec.md` or `docs/design.md` is newly uncovered by this
+round's rewrite — the row-height-vs-static invariant this test always
+carried is unchanged and still asserted for both bands.
+
+The three pre-existing sibling floor tests sharing the identical allocated-
+span blind spot (`test_tallest_pane_still_fits_at_the_floor`, its
+`_reverse_order` variant, and `_at_worst_case_compound_scale`) remains
+correctly out of scope for this round — the dispatch's own instruction was
+investigate-only, it was ticketed (G#42/GH#81) rather than silently
+absorbed, and `git diff 37c1b2b 4f0a75d` confirms none of the three was
+touched here. Re-litigating that investigation is not repeated in this
+round's review since nothing about it changed in this diff.
+
+### Findings
+None. No must-fix, no should-fix, no nit surfaced this round — the
+`_pady_total`/`_required_natural` helpers are small, local to this one test
+method, correctly reproduce Tk's own tuple-vs-int `pack_info()["pady"]`
+shape (verified live, not assumed), and introduce no new abstraction beyond
+what this single test needs.
+
+### Overall verdict
+**Approve.**
+
+Both of round 2's must-fixes are independently re-verified fixed, with fresh
+evidence gathered this session rather than trust in `docs/implementation.md`'s
+own account: the pane assertion now genuinely fails under a 12x sabotage of
+either `SWEEP_HINT_BAD` or `SWEEP_HINT_MUTED`, at both the 90% and 130% scale
+floors, while passing cleanly on real code; the `restart()`-at-persisted-
+scale technique is confirmed to actually reach `int(WINDOW_MIN_H * ui.s)` at
+each step rather than a stale pre-restart size; and no second Tk instance is
+ever alive at once during a restart. The should-fix README wording is
+independently confirmed to match the real bold/colour behaviour. The full
+suite remains green at 414/414 (`skipped=10`), identical to round 2's own
+baseline. Nothing in this round's diff exceeds its stated scope (test file
+plus one README sentence; `afk_clicker.py` untouched), and the correctly-
+out-of-scope sibling-test investigation was left alone as instructed. No
+further round needed for PR #80.
