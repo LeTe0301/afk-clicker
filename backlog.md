@@ -237,7 +237,7 @@ Two follow-ups from its review are below.
       undocumented invariant rather than a guaranteed one, and the coalescing
       machinery it belongs to is new (PR #49 round 5). Worth either cancelling it
       for symmetry or writing down why it does not need cancelling.
-- [ ] **Pane content should sit directly under its tab bar, not in the middle of the
+- [ ] **G#37 / GH#66 — Pane content should sit directly under its tab bar, not in the middle of the
       page** (Leo, 2026-09-13, from screenshots of 0.5.0 on Windows, maximised). The
       Hotkey tab's Record/Apply card, the Clicking tab's cards and Settings →
       Appearance all float mid-page with a large empty band between the tabs and the
@@ -247,7 +247,7 @@ Two follow-ups from its review are below.
       change, not a bug, and check the window height floor (`WINDOW_MIN_H`) still
       holds with top alignment. The Macros tab branch (G#13, below) builds its
       settings on the same centered panes, so it needs the same change.
-- [ ] **UI scale should follow the window size** (Leo, 2026-09-13). Today it's a
+- [ ] **G#38 / GH#67 — UI scale should follow the window size** (Leo, 2026-09-13). Today it's a
       fixed Settings choice (90/100/115/130%). Leo wants it to scale with the window.
       Open design questions for the spec: replace the manual choice or make it an
       "Auto" option next to it, what the reference size is, whether it steps or
