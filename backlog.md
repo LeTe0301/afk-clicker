@@ -90,7 +90,17 @@ Bugs and residue:
 - [x] **Done 2026-09-15, PR #73.** G#8 / GH#10 — `registered_hotkey` claims a listener
       that is not running. Round 1 fixed the first-Apply case only; round 2 (caught by
       PR review, reproduced live) fixed a second Apply after an earlier successful one.
-- [ ] G#7 / GH#9 — `from_json` checks shape but not vocabulary.
+- [x] **Done 2026-09-15, PR #74.** G#7 / GH#9 — `from_json` checks shape but not
+      vocabulary. Now `name in kb.Key.__members__`, char length 1..`MAX_CHAR_LEN` (8),
+      non-bool vk in 0..`MAX_VK` (`0x1FFFFFFF`), and more than `MAX_CHORD` keys is
+      rejected instead of truncated. `MAX_CHAR_LEN` is reasoned from pynput's darwin
+      source, not a real Mac. Don't tighten `MAX_VK` to `0x0110FFFF`: XF86 media-key
+      keysyms (`0x1008FFxx`) sit above that.
+- [ ] G#40 / GH#75 — macOS flake: `Sidebar.test_running_dot_and_follow` read `running`
+      as False on PR #74's first macOS leg (run 34989787219); the same commit's re-run
+      was green. Suspected to be the same class as G#39: a periodic `_poll_games`
+      scan landing inside the test's own `root.update()` after `settle()` only
+      waited for the startup scan. Unconfirmed; details on the ticket.
 - [x] **Done 2026-09-15, PR #73.** G#9 / GH#11 — macOS input-permission guard: residue
       from the review of PR #4 (5 small items: `selftest()`'s unconditional listener
       construction, a load-bearing comment, a corrected darwin hint string, a
@@ -503,11 +513,11 @@ releases**. Keep a second display for load loops — see Housekeeping.
 
 ## Session handoff — 2026-09-15 (continued)
 
-Main is at `691c42a`. Everything below is queued, in the order to work it, one cycle
+Main is at `691c42a` (item 1 merged since, PR #74 → `c142eee`). Everything below is queued, in the order to work it, one cycle
 at a time (product-manager → developer → reviewer → PR → independent PR review →
 merge), auto-continuing to the next after each merge unless told to stop:
 
-1. **G#7 / GH#9 — `from_json` checks shape but not vocabulary.** Ticket text is
+1. ~~**G#7 / GH#9 — `from_json` checks shape but not vocabulary.**~~ **Done, PR #74.** Ticket text is
    essentially the spec already: `hasattr(kb.Key, name)` accepts non-key attributes
    (should be `name in kb.Key.__members__`); an empty `char` slides through to a
    `"Key None"` label; a bool `vk` (`isinstance(True, int)` is `True`) becomes
