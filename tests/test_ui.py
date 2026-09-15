@@ -1199,11 +1199,21 @@ class VerticalFill(UITestCase):
 
     def test_short_tab_gains_margin_on_a_tall_window(self):
         # Hotkey (one card) is the default active tab -- the shortest pane,
-        # and the one with the most leftover space to absorb.
+        # and the one with the most leftover space to absorb. G#37/GH#66
+        # (FILL_TOP_SHARE=0.0): content hugs the tab bar, so the top spacer
+        # sits at its unavoidable 1px max(1, ...) floor and the pane's
+        # entire real leftover space collects in the bottom spacer instead
+        # -- proof the dead band is being consumed now lives in `bottom`,
+        # not `top`.
         self._tall_window()
-        _, top, bottom = self.ui._pane_fills["hotkey"]
-        self.assertGreater(top.winfo_height(), 0)
-        self.assertGreater(bottom.winfo_height(), 0)
+        pane, top, bottom = self.ui._pane_fills["hotkey"]
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                   - min(c.winfo_y() for c in kids))
+        extra = max(0, pane.winfo_height() - natural)
+        self.assertLessEqual(top.winfo_height(), 1)
+        self.assertGreaterEqual(bottom.winfo_height(), extra - 1)
 
     def test_top_and_bottom_spacers_sum_to_the_real_leftover_space(self):
         # True-by-construction: measured the same way _fill_pane() itself
@@ -1222,7 +1232,7 @@ class VerticalFill(UITestCase):
         self.assertEqual(top.winfo_height() + bottom.winfo_height(),
                          pane.winfo_height() - natural)
 
-    def test_floor_case_still_splits_symmetrically_with_no_clipping(self):
+    def test_floor_case_still_fits_with_no_clipping(self):
         # Deviation from docs/spec.md's acceptance criterion #1 (see
         # docs/implementation.md): that criterion assumed minh (690 * s,
         # tuned by docs/history/ac-14-design.md for the OLD single page
@@ -1240,9 +1250,20 @@ class VerticalFill(UITestCase):
         # derivation, not ~148px. What this test actually proves is the
         # invariant this feature IS responsible for at the floor:
         # _fill_pane() absorbs whatever leftover genuinely exists -- never
-        # more, so never clipping -- split symmetrically, computed the same
-        # way _fill_pane() itself computes it (true by construction, not a
-        # fixed pixel bound).
+        # more, so never clipping -- computed the same way _fill_pane()
+        # itself computes it (true by construction, not a fixed pixel
+        # bound).
+        #
+        # G#37/GH#66 (FILL_TOP_SHARE=0.0): renamed from
+        # "..._splits_symmetrically_with_no_clipping" and the split-ratio
+        # assertion replaced -- this box's own floor leftover for the
+        # tallest pane (Clicking+Eating, Minecraft) measures ~70px here,
+        # well outside the extra-in-{0,1} range docs/spec.md's floor-
+        # invariant proof worked through (that proof used the Windows-CI-
+        # tuned boundary value, not this platform's actual floor slack), so
+        # a real, non-floored top/bottom pair is exercised: top pinned to
+        # its 1px floor, bottom absorbing the rest, same sum-fits-exactly
+        # invariant as before, no longer a symmetric split.
         self.ui._select("minecraft")
         self.ui._set_content_tab("clicking")
         self.root.update()
@@ -1265,9 +1286,10 @@ class VerticalFill(UITestCase):
                    - min(c.winfo_y() for c in kids))
         extra = max(0, pane.winfo_height() - natural)
         self.assertEqual(top.winfo_height() + bottom.winfo_height(), max(2, extra))
-        self.assertLessEqual(abs(top.winfo_height() - bottom.winfo_height()), 1)
+        self.assertLessEqual(top.winfo_height(), 1)
+        self.assertGreaterEqual(bottom.winfo_height(), extra - 1)
 
-    def test_floor_case_still_splits_symmetrically_with_no_clipping_reverse_order(self):
+    def test_floor_case_still_fits_with_no_clipping_reverse_order(self):
         # Same invariant as the sibling test above, reverse order: the
         # Clicking tab clicked first while still on the default Global
         # profile (no Eating card packed yet), THEN Minecraft selected --
@@ -1280,6 +1302,8 @@ class VerticalFill(UITestCase):
         # instead of re-guessing; round 4 acted on that trace (WINDOW_MIN_H
         # raised from 560 to 620, plus _fill_pane()'s own clamp/recovery
         # hardening) and restores the real assertions below.
+        #
+        # G#37/GH#66: same rename/assertion swap as the sibling test above.
         self.ui._set_content_tab("clicking")
         self.ui._select("minecraft")
         self.root.update()
@@ -1290,82 +1314,85 @@ class VerticalFill(UITestCase):
                    - min(c.winfo_y() for c in kids))
         extra = max(0, pane.winfo_height() - natural)
         self.assertEqual(top.winfo_height() + bottom.winfo_height(), max(2, extra))
-        self.assertLessEqual(abs(top.winfo_height() - bottom.winfo_height()), 1)
+        self.assertLessEqual(top.winfo_height(), 1)
+        self.assertGreaterEqual(bottom.winfo_height(), extra - 1)
         self.assertTrue(top.winfo_ismapped())
         self.assertTrue(bottom.winfo_ismapped())
 
     def test_switching_tabs_recomputes_each_panes_own_margin(self):
         # Fill is computed per pane, not per page: Clicking's own content is
         # taller than Hotkey's, so its leftover -- and therefore its
-        # margin -- must be smaller.
+        # margin -- must be smaller. G#37/GH#66 (FILL_TOP_SHARE=0.0): the
+        # top spacer is pinned to its 1px floor on every pane regardless of
+        # content height, so the margin that actually varies now lives in
+        # the bottom spacer -- read that instead. Assertion direction is
+        # unchanged: Hotkey's own leftover is still bigger than Clicking's.
         self._tall_window()
-        _, hotkey_top, _ = self.ui._pane_fills["hotkey"]
-        hotkey_margin = hotkey_top.winfo_height()
+        _, _, hotkey_bottom = self.ui._pane_fills["hotkey"]
+        hotkey_margin = hotkey_bottom.winfo_height()
         self.ui._set_content_tab("clicking")
         self.root.update()
-        _, clicking_top, _ = self.ui._pane_fills["clicking"]
-        clicking_margin = clicking_top.winfo_height()
+        _, _, clicking_bottom = self.ui._pane_fills["clicking"]
+        clicking_margin = clicking_bottom.winfo_height()
         self.assertGreater(hotkey_margin, clicking_margin)
 
     def test_toggling_eating_recomputes_the_clicking_panes_margin(self):
         # The one case with no natural <Configure> trigger (Empirical
         # grounding #2): toggling eat_section/eat_card's own pack state
         # never fires a <Configure> on clicking_pane, so only _select()'s
-        # own explicit, guarded call can ever recompute this.
+        # own explicit, guarded call can ever recompute this. G#37/GH#66
+        # (FILL_TOP_SHARE=0.0): the top spacer is pinned to its 1px floor
+        # either way, so read the bottom spacer instead -- same direction
+        # (without_eating > with_eating).
         self._tall_window()
         self.ui._set_content_tab("clicking")
         self.root.update()
         self.ui._select("minecraft")   # Eating shows -- margin shrinks
         self.root.update()
-        _, top, _ = self.ui._pane_fills["clicking"]
-        with_eating = top.winfo_height()
+        _, _, bottom = self.ui._pane_fills["clicking"]
+        with_eating = bottom.winfo_height()
         self.ui._select("global")      # Eating hides -- margin grows
         self.root.update()
-        without_eating = top.winfo_height()
+        without_eating = bottom.winfo_height()
         self.assertGreater(without_eating, with_eating)
 
     def test_hidden_tabs_own_margin_does_not_desync_the_visible_one(self):
         # The self._content_tab == "clicking" guard in _select()
-        # (afk_clicker.py:2566) exists to stop a game switch from
+        # (afk_clicker.py:2936) exists to stop a game switch from
         # recomputing Clicking's OWN margin off the pane's geometry while
         # it's unmapped -- stale-but-plausible on X11, 0/1 on Windows, wrong
-        # either way -- not to protect Hotkey's spacers, which _fill_pane()
-        # structurally can never touch when called with the "clicking"
-        # tuple. Round 1 of this test asserted on Hotkey's spacers, which
-        # stayed put no matter what the guard did (a prior review caught
-        # this: it passed even with the guard deleted).
+        # either way.
         #
-        # This version seeds a genuine value for Clicking's own top spacer
-        # while Clicking is actually visible, hides it, then switches games
-        # (toggling Eating inside the now-hidden pane) with Hotkey active.
-        # The bottom spacer is deliberately not asserted on here: switching
-        # profiles also re-packs eat_section/eat_card `before=clicking_bottom`
-        # (afk_clicker.py:2551-2557), which can itself shrink the
-        # already-packed bottom spacer through pack's ordinary space
-        # allocation -- a real effect, but not the guarded one. The top
-        # spacer is packed before any of that and is only ever touched by
-        # _fill_pane() itself, so it's the one value that isolates the
-        # guard: with the guard doing its job, it cannot change while the
-        # pane stays unmapped, on any platform's unmapped-widget behavior.
+        # G#37/GH#66 (FILL_TOP_SHARE=0.0) breaks this test's prior
+        # geometry-inference technique structurally: the top spacer is
+        # pinned to its 1px floor regardless of whether the guard fires, so
+        # an assertEqual/assertNotEqual against a seeded top value can never
+        # discriminate guard-present from guard-removed. The bottom spacer
+        # was already known (docs/history/ac-24-f4-implementation.md,
+        # "Round 2") to move for an unrelated reason -- _select()'s own
+        # `eat_section.pack(before=clicking_bottom)` re-pack, which runs
+        # whether or not the fill guard fires -- so it was never a safe
+        # signal either, even under the old split.
+        #
+        # Replacement: spy directly on self.ui._request_pane_fill instead
+        # of inferring from geometry -- this tests the guard's own actual
+        # condition (does it ask for a "clicking" fill while the pane is
+        # hidden?) and is immune to FILL_TOP_SHARE's value entirely.
         self._tall_window()
-        self.ui._set_content_tab("clicking")
-        self.root.update()
-        _, top, _bottom = self.ui._pane_fills["clicking"]
-        seeded_top = top.winfo_height()
-
         self.ui._set_content_tab("hotkey")
         self.root.update()
         self.assertFalse(self.ui._pane_fills["clicking"][0].winfo_ismapped())
 
+        calls = []
+        original = self.ui._request_pane_fill
+        self.ui._request_pane_fill = lambda key: (calls.append(key), original(key))[1]
         self.ui._select("minecraft")   # toggles Eating on inside the hidden pane
         self.root.update()
-        self.assertEqual(top.winfo_height(), seeded_top)
+        self.assertNotIn("clicking", calls)   # guard suppressed the request entirely
 
-        # And the pane isn't left stale forever: once genuinely visible
-        # again, its margin reflects the now-showing Eating card.
         self.ui._set_content_tab("clicking")
         self.root.update()
-        self.assertNotEqual(top.winfo_height(), seeded_top)
+        self.assertIn("clicking", calls)      # and it isn't stuck stale forever
 
     def test_live_resize_drag_updates_margin_without_a_rebuild(self):
         # Proves this feature never touches _request_rebuild()/
@@ -1376,8 +1403,8 @@ class VerticalFill(UITestCase):
         # The margin assertion is checked true-by-construction against the
         # pane's own actually-granted geometry after the drag, the same way
         # test_top_and_bottom_spacers_sum_to_the_real_leftover_space and
-        # test_floor_case_still_splits_symmetrically_with_no_clipping above
-        # measure it -- not directionally against a "before" baseline.
+        # test_floor_case_still_fits_with_no_clipping above measure it --
+        # not directionally against a "before" baseline.
         # geometry() is a request, not a guarantee: on Windows CI's
         # constrained runners the WM clamped the final requested height
         # below the height "before" was captured at, so the spacer

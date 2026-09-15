@@ -218,11 +218,20 @@ COLLAPSED_BADGE_D = 28   # collapsed-badge diameter -- big enough to read one
     # dynamically off the canvas's own w/h, so this needs no separate
     # per-scale fit-check.
 
-FILL_TOP_SHARE = 0.5   # story #24 feature 4: fraction of a pane's own
+FILL_TOP_SHARE = 0.0   # story #24 feature 4: fraction of a pane's own
     # leftover vertical space given to its top spacer, the rest to its
-    # bottom spacer. 0.5 (centering) minimizes the largest single dead
-    # band -- see docs/design.md's "Key design decision" for why every
-    # other split leaves a bigger empty band on a single-card pane.
+    # bottom spacer. Was 0.5 (centering), which minimized the largest
+    # single dead band -- see docs/design.md's "Key design decision" for
+    # why every other split leaves a bigger empty band on a single-card
+    # pane. G#37/GH#66 (Leo's 2026-09-13 feedback on 0.5.0 screenshots)
+    # reverses that call: centering left every pane's content floating
+    # mid-page with a large dead band above it, which reads as "broken
+    # layout" rather than "balanced". 0.0 pins the top spacer to its
+    # unavoidable 1px max(1, ...) floor so content starts right below the
+    # tab bar, and pushes all of a pane's leftover space into the bottom
+    # spacer instead -- see docs/spec.md's "Why the floor invariant is
+    # provably unaffected" for why this does not change WINDOW_MIN_H's
+    # own floor behavior.
 
 
 def selftest():
