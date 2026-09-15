@@ -566,3 +566,227 @@ git status --short
 Orchestrator correction, before this round started — untouched by this
 round's own work.) No scratch file was left in the repo tree; the
 sabotage-verification worktree was removed after use.
+
+---
+
+## Round 3 (PR #80 round-2 review, `docs/test-review.md` "Round 2" +
+`pr80-round2-review.md` — CHANGES REQUESTED)
+
+### Summary
+Round 2's review found the new floor test
+(`WindowMinimumHeight.test_sweep_hint_height_floor_minecraft_with_eating`)
+present, named correctly, green — but structurally unable to catch the
+exact overflow it exists to guard against, plus a should-fix README
+inaccuracy. This round fixes both, and separately investigates (without
+fixing) whether the three pre-existing sibling floor tests share the same
+blind spot, as requested.
+
+### Changes by file
+
+#### `tests/test_ui.py`
+- **`test_sweep_hint_height_floor_minecraft_with_eating`**
+  (`tests/test_ui.py:~1170-1263`), rewritten in place, same location, same
+  method name:
+  - **New pane measurement.** The old `natural` was `max(child bottom) -
+    min(child top)` over each mapped non-spacer child's *allocated*
+    `winfo_y()`/`winfo_height()`. Replaced with a sum of each mapped
+    non-spacer child's own `winfo_reqheight()` plus its pack `pady` (read
+    via `pack_info()`, summing both sides of a 2-tuple or doubling a bare
+    int) — i.e. the *required* space pack() would need to lay every child
+    out untouched, the same accounting `_fill_pane()`'s own docstring
+    insists on for the identical reason (a bare reqheight sum silently
+    drops real pack()-consumed pady). Compared against the same
+    `pane.winfo_height()` (available) as before. Spacers are excluded from
+    the sum exactly as they were from the old span (`c not in (top,
+    bottom)`), so their own intentional shrink-to-fit behavior is not
+    counted against the pane.
+  - **Fresh instance per scale step**, not `_apply_ui_scale()` mid-test:
+    `self.ui.store.data["ui_scale"] = scale; self.ui.store.save(); ui =
+    self.restart()`, the exact technique
+    `RowValueColumn.test_ui_scale_row_never_overflows_its_card_at_any_scale_step`
+    (`tests/test_ui.py:~1735-1759`) already established for the identical
+    anti-pattern (`_apply_minsize(grow_only=True)` never shrinks, so a
+    mid-test scale-down leaves the window at its larger pre-existing size).
+    Each scale step now asserts `self.root.winfo_height() ==
+    int(app.WINDOW_MIN_H * ui.s)` (and the same on `minsize()[1]`) before
+    doing anything else, so the subTest is proven to have actually reached
+    that scale step's genuine floor, not merely assumed to.
+  - **Both bands, not only BAD.** Measured live: at 90% scale, INK ("Java
+    sweeps may miss") uses 123px of a 131px wraplength vs. BAD ("Java
+    sweeps likely fail") at 120px — INK is the *tighter* fit despite three
+    fewer characters, because of where its words break. The rewritten test
+    loops `(("bad", "500"), ("ink", "649"))` inside each scale step's
+    `subTest`, asserting the pane-fit and the row-height-vs-static
+    invariants for each band independently, rather than assuming BAD is
+    the worse case.
+
+### Key decisions / tradeoffs
+- **`winfo_reqheight() + pack_info()["pady"]` per child, not a full
+  reimplementation of `_fill_pane()`'s own span logic.** `_fill_pane()`
+  itself deliberately measures allocated span (its own docstring explains
+  why — it needs a number that's translation-invariant in the spacers'
+  *current* height, for a live-resize recompute). The test's job is
+  different: it needs a number that reflects what the pane's content
+  *actually requires*, independent of whatever pack() was forced to give
+  up to make it fit — the two measurements answer different questions on
+  purpose, so reusing `_fill_pane()`'s own logic verbatim would have
+  reproduced the same blindness in the test that measures its result.
+- **Sabotage-proving both `SWEEP_HINT_BAD` and `SWEEP_HINT_MUTED`
+  independently**, not just one. Since the test now loops both bands,
+  either constant's inflation needed to be shown to fail only the
+  matching band's subTest, not silently pass because the other band's
+  iteration happened to still fit — confirmed below.
+- **Did not touch the three pre-existing sibling tests.** Per the
+  dispatch's explicit instruction, investigated whether they share this
+  round's blind spot but left them exactly as written; findings recorded
+  under "Known limitations / follow-up" for the orchestrator to ticket.
+
+### Deviations from spec / design
+None. This round is entirely a response to `docs/test-review.md`'s
+"Round 2" CHANGES REQUESTED verdict and `pr80-round2-review.md`'s
+must-fix/should-fix findings — no new product behavior, no design
+decision revisited.
+
+### Sabotage-verify performed this session
+All via in-process monkeypatch scripts run against `afk_clicker`/
+`tests.test_ui` imported as modules, scratchpad-only, never written to a
+repo file; deleted immediately after use. `git status --short` before and
+after each showed no repo file touched by the probes themselves (only the
+two intended edits below, plus the reviewer's own pre-existing uncommitted
+`docs/test-review.md` "Round 2" section).
+
+**The new pane assertion, sabotaged with the reviewer's own exact
+mechanism** (`app.SWEEP_HINT_BAD = app.SWEEP_HINT_BAD * 12`, matching
+`pr80-round2-review.md` verbatim), re-running only the rewritten test:
+```
+FAIL: ... (scale='90', band='bad')
+  AssertionError: 488 not less than or equal to 407
+FAIL: ... (scale='130', band='bad')
+  AssertionError: 672 not less than or equal to 594
+```
+The **pane** assertion itself (`self.assertLessEqual(natural,
+pane.winfo_height())`) now fails, at both scale steps — not merely the
+row-height half, which was already known to fail before this round. The
+`band='ink'` subTests in the same run stayed green (as they should — only
+the BAD band's text was sabotaged).
+
+Repeated with `app.SWEEP_HINT_MUTED = app.SWEEP_HINT_MUTED * 12` (leaving
+`SWEEP_HINT_BAD` real): the mirror result —
+```
+FAIL: ... (scale='90', band='ink')
+  AssertionError: 488 not less than or equal to 407
+FAIL: ... (scale='130', band='ink')
+  AssertionError: 672 not less than or equal to 594
+```
+— confirming the INK band's own coverage is equally load-bearing, not
+just present.
+
+**Confirmed against the real, unsabotaged code**, both constants at their
+real values, the full rewritten test passes cleanly at both scale steps
+and both bands (see "Full suite result" below) — the new measure is
+discriminating in both directions, not merely stricter.
+
+**Underlying numbers, read directly** (not sabotaged), confirming why the
+old measure could never have caught this: real code, scale 90%, BAD band
+— `pane.winfo_height()` (avail) 407px; the old allocated-span `natural`
+332px; the new required-sum `natural` also 332px (no clipping occurring
+on real code, so the two measures agree exactly when nothing is actually
+overflowing). Under the reviewer's 12x `SWEEP_HINT_BAD` sabotage at the
+same scale: allocated-span `natural` stayed at 406px (still `<=` 407,
+still "passing"), while the Eating card's canvas was independently
+confirmed squeezed to 56px allocated vs. 125px still-required — the
+required-sum `natural` for the same scenario is 475px, correctly `>`
+407px.
+
+### Investigate, don't fix: the three pre-existing sibling floor tests
+Sabotaged in-process (never touching a repo file) by monkeypatching
+`app.Row.__init__` so the Eating card's "Eat every" row is built with an
+artificially long hint string (`"SABOTAGE " * 80`), inflating that row's
+`winfo_reqheight()` well past what the pane can actually hold at the
+tightest scale steps these three tests exercise. This targets the Eating
+card specifically because these three tests build one long before the
+sweep-hint feature exists in their own scenario — `SWEEP_HINT_BAD`/
+`_MUTED` never enter their code path at all (none of the three touches
+the jitter row's band state), so sabotaging those two constants would not
+have reached them; a different lever was needed to actually inflate this
+pane's own required content for their specific test setup.
+
+Direct, side-by-side measurement (scratchpad probe, not committed) at
+each of the three tests' own exact widget-construction sequence:
+
+| Test | allocated `natural` | avail | required `natural` | Verdict on the old (allocated) assertion |
+|---|---|---|---|---|
+| `test_tallest_pane_still_fits_at_the_floor` | 454 | 455 | 932 | passes (blind) |
+| `test_tallest_pane_still_fits_at_the_floor_reverse_order` | 454 | 455 | 932 | passes (blind) |
+| `test_tallest_pane_still_fits_at_worst_case_compound_scale` | 520 | 521 | 610 | passes (blind) |
+
+Then ran the actual three tests, unmodified, under this same sabotage via
+`unittest`:
+```
+test_tallest_pane_still_fits_at_the_floor ... ok
+test_tallest_pane_still_fits_at_the_floor_reverse_order ... FAIL
+  AssertionError: 0 is not true   (self.assertTrue(bottom.winfo_ismapped()))
+test_tallest_pane_still_fits_at_worst_case_compound_scale ... ok
+```
+**Result: all three share the identical blind spot the round-2 review
+found in the sweep-hint floor test.** Each one's own `natural <=
+pane.winfo_height()` assertion silently passes under a sabotage that
+provably causes ~470-480px of real, required content to be squeezed into
+~455-521px of available room — the allocated-span measurement always
+comes in at (or one pixel under) the pane's available height, by
+construction of how Tk's packer clips an overflowing child, never above
+it. `..._reverse_order` is the one test of the three that happens to
+*fail* under this sabotage, but not because its height assertion caught
+anything: it fails on its own separate, unrelated
+`self.assertTrue(bottom.winfo_ismapped())` check (the bottom spacer gets
+unmapped entirely once the packer runs out of room), which the other two
+tests don't have. Strip that one line out mentally and all three would go
+green under a sabotage that clips ~200-475px of real content. Not
+changed, per the dispatch's instruction — left exactly as written, for
+the orchestrator to ticket.
+
+### Full suite result (this session, final state)
+```
+DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .
+Ran 414 tests in 73.176s
+
+OK (skipped=10)
+```
+Same count as round 2 (414 = round 2's own total; this round rewrote one
+existing test in place rather than adding a new one). Same skip count.
+Pre-existing `ResourceWarning`s from `tests/test_updater.py`'s unclosed
+temp files are unchanged from prior rounds' own notes.
+
+```
+DISPLAY=:99 <venv>/bin/python -m unittest tests.test_ui.WindowMinimumHeight -v
+Ran 6 tests in 0.732s
+
+OK
+```
+
+### `README.md`
+`README.md:75`'s Random-jitter row sentence previously read (translated)
+"...gives way to a warning below 650 ms, and becomes bold from 550 ms..."
+— implying only the <550 ms band is bold. Live-probed in round 2 (and
+re-confirmed unchanged this round): the 550-649 ms band is already
+`{Segoe UI} 8 bold`, identical weight to the <550 ms band; only the
+no-band static text is regular weight. Reworded to: "...weicht dieser
+Text einer fett hervorgehobenen Warnung, sobald Intervall minus Jitter
+unter 650 ms sinkt, und wechselt ab 550 ms zusätzlich auf eine
+auffälligere Farbe, weil dann der Java-Sword-Sweep wahrscheinlich
+ausbleibt." — bold starts at 650 ms, and 550 ms is now described as an
+additional colour escalation, matching the actual `INK`/`BAD` behavior.
+
+### Verification of scope
+```
+git status --short
+ M README.md
+ M docs/test-review.md
+ M tests/test_ui.py
+```
+`docs/test-review.md`'s modification is the reviewer's own pre-existing
+uncommitted "Round 2" section (present before this round started, per the
+dispatch) — not edited by this round's own work, and not committed here.
+Only `README.md` and `tests/test_ui.py` were touched, matching the
+dispatch's must-fix/should-fix scope exactly; no scratch file was left in
+the repo tree.

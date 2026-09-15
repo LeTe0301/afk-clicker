@@ -1168,45 +1168,93 @@ class WindowMinimumHeight(UITestCase):
         self.assertLessEqual(natural, pane.winfo_height())
 
     def test_sweep_hint_height_floor_minecraft_with_eating(self):
-        # G#22/GH#33 PR #80 review, lens 7 BLOCKER: the sweep warning adds
-        # new content to exactly this pane (Clicking+Eating, Minecraft),
-        # the one the tests above already establish sits at essentially a
-        # 0-1px margin on Windows CI. docs/design.md Revision 2 (Decision
-        # A2) moved the warning into the jitter row's own already-reserved
-        # hint slot specifically so it can never grow the pane -- this
-        # proves the floor invariant at the two scale steps that matter,
-        # worst-case (BAD, bold) band active, and that the row itself never
-        # grows past its own static-hint height doing it.
+        # G#22/GH#33 PR #80 round 2 review (docs/test-review.md "Round 2",
+        # lens 7 BLOCKER, carried to round 3): this test's first shape
+        # measured `natural` the same way the sibling floor tests above do
+        # -- each mapped non-spacer child's *allocated* winfo_y()/
+        # winfo_height(). That's blind to the exact clipping it exists to
+        # catch: when the pane genuinely runs short, pack() silently
+        # shrinks whichever card is packed last (the Eating card's canvas
+        # here) below its own required size to absorb the overflow, rather
+        # than ever letting the allocated span exceed the pane's fixed
+        # height -- confirmed live: baseline Eating canvas 125px allocated
+        # == 125px required; under a 12x-inflated SWEEP_HINT_BAD, 56px
+        # allocated vs. still-125px required, 69px of real content silently
+        # clipped, invisible to that measurement. This version instead sums
+        # each mapped non-spacer child's own winfo_reqheight() plus its pack
+        # pady (read via pack_info(), the same accounting _fill_pane()'s own
+        # docstring in afk_clicker.py insists on for exactly this reason --
+        # a reqheight-only sum silently drops real pack()-consumed pady)
+        # against the pane's available height. Verified this stays
+        # discriminating: sabotaging either SWEEP_HINT_BAD or
+        # SWEEP_HINT_MUTED to 12x its real length makes this assertion fail
+        # at both 90% and 130% (for the sabotaged band only), while the real,
+        # unsabotaged code passes at both scale steps and both bands.
+        #
+        # Also unlike the sibling tests: a fresh instance per scale step, at
+        # the persisted scale, not `_apply_ui_scale()` on the one window
+        # `setUp()` already built --
+        # RowValueColumn.test_ui_scale_row_never_overflows_its_card_at_any_scale_step's
+        # own comment explains why: `_apply_minsize(grow_only=True)` never
+        # shrinks, so a mid-test scale-down would leave the window (and this
+        # pane's available height) at the larger, ~100%-scale size, passing
+        # for the wrong reason exactly where the fit is tightest. The
+        # window's own height is asserted against `WINDOW_MIN_H` at each
+        # step to prove the true floor was actually reached, not assumed.
+        #
+        # And both warning bands, not only BAD: measured live at 90% scale,
+        # INK ("Java sweeps may miss") is the *tighter* fit against the
+        # row's wraplength (123px used of 131px) than BAD ("Java sweeps
+        # likely fail", 120px used) despite being three characters shorter,
+        # purely because of where its words break -- BAD is not established
+        # to be the worse case, so this test no longer assumes it is.
+        def _pady_total(widget):
+            pady = widget.pack_info().get("pady", 0)
+            if isinstance(pady, (tuple, list)):
+                return int(pady[0]) + int(pady[1])
+            return 2 * int(pady)
+
+        def _required_natural(pane, top, bottom):
+            kids = [c for c in pane.winfo_children()
+                    if c.winfo_ismapped() and c not in (top, bottom)]
+            return sum(c.winfo_reqheight() + _pady_total(c) for c in kids)
+
         for scale in ("90", "130"):
             with self.subTest(scale=scale):
-                self.ui._apply_ui_scale(scale)
-                self.root.update()
-                self.ui._select("minecraft")
-                self.ui._set_content_tab("clicking")
-                self.root.update()
+                self.ui.store.data["ui_scale"] = scale
+                self.ui.store.save()
+                ui = self.restart()
 
-                self.ui.click_ms.var.set("500")   # effective 500 < 550: BAD, bold
-                self.ui.jitter_ms.var.set("0")
-                self.root.update()
+                # Prove this subTest actually reached the genuine floor at
+                # this scale step, rather than the pre-restart window size.
+                expected_h = int(app.WINDOW_MIN_H * ui.s)
+                self.assertEqual(self.root.winfo_height(), expected_h)
+                self.assertEqual(self.root.minsize()[1], expected_h)
 
-                pane, top, bottom = self.ui._pane_fills["clicking"]
-                pane.update_idletasks()
-                kids = [c for c in pane.winfo_children()
-                        if c.winfo_ismapped() and c not in (top, bottom)]
-                natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
-                           - min(c.winfo_y() for c in kids))
-                self.assertLessEqual(natural, pane.winfo_height())
+                for band, click_ms in (("bad", "500"), ("ink", "649")):
+                    with self.subTest(scale=scale, band=band):
+                        ui._select("minecraft")
+                        ui._set_content_tab("clicking")
+                        self.root.update()
+                        ui.click_ms.var.set(click_ms)
+                        ui.jitter_ms.var.set("0")
+                        self.root.update()
 
-                warning_h = self.ui.jitter_row.winfo_reqheight()
+                        pane, top, bottom = ui._pane_fills["clicking"]
+                        pane.update_idletasks()
+                        natural = _required_natural(pane, top, bottom)
+                        self.assertLessEqual(natural, pane.winfo_height())
 
-                # Same values, no band: back to the static descriptive
-                # hint at the same scale -- the row must not have grown to
-                # show the warning.
-                self.ui.click_ms.var.set("650")
-                self.ui.jitter_ms.var.set("0")
-                self.root.update()
-                static_h = self.ui.jitter_row.winfo_reqheight()
-                self.assertLessEqual(warning_h, static_h)
+                        warning_h = ui.jitter_row.winfo_reqheight()
+
+                        # Same values, no band: back to the static
+                        # descriptive hint at the same scale -- the row
+                        # must not have grown to show the warning.
+                        ui.click_ms.var.set("650")
+                        ui.jitter_ms.var.set("0")
+                        self.root.update()
+                        static_h = ui.jitter_row.winfo_reqheight()
+                        self.assertLessEqual(warning_h, static_h)
 
 
 class RailCollapse(UITestCase):
