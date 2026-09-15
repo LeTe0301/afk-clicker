@@ -267,6 +267,12 @@ jobs:
             Download the archive for your system, unpack it anywhere and run it.
             No Python needed. The program updates itself from then on.
 
+            **Updating on Windows from 0.5.0 or earlier:** the in-app Install in
+            those versions closes the program without replacing it. Once, by hand:
+            close the program, unpack this release into your existing folder and
+            replace the files. Your settings are kept, and in-app updates work
+            from here on.
+
             | System | File |
             |---|---|
             | Windows 10/11 | `Clickwork-windows-x64.zip` |
