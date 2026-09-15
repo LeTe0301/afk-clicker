@@ -914,6 +914,40 @@ class NumBoxFocus(UITestCase):
         self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
         self.assertEqual(self.ui.current, "minecraft")
 
+    def _find_add_game_button(self):
+        def walk(widget):
+            if isinstance(widget, app.Button) and widget.command == self.ui.add_current_game:
+                return widget
+            for child in widget.winfo_children():
+                found = walk(child)
+                if found is not None:
+                    return found
+            return None
+        found = walk(self.ui.side)
+        self.assertIsNotNone(found, "no matching Button found for add_current_game")
+        return found
+
+    def test_a_button_still_runs_its_command(self):
+        # "Add current game" is packed into the sidebar (self.side), a
+        # sibling of the Hotkey/Clicking tab toggle rather than a child of
+        # it, so it stays viewable while the Clicking pane is shown. Found
+        # by its bound command rather than its label -- the label reads "+"
+        # instead while the rail is collapsed.
+        button = self._find_add_game_button()
+        original_command = button.command
+        clicked = []
+        button.command = lambda: clicked.append(1)
+        try:
+            self.focus_and_settle(self.ui.click_ms)
+            self.pump_until(lambda: button.winfo_viewable(), timeout=1.0)
+            self.assertTrue(button.winfo_viewable(), "the button never became viewable")
+            button.event_generate("<Button-1>", x=2, y=2)
+            self.root.update()
+            self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
+            self.assertEqual(clicked, [1])
+        finally:
+            button.command = original_command
+
     def test_starting_from_a_background_thread_drops_focus(self):
         # The real hotkey callback runs on the pynput listener thread, never
         # the Tk main thread -- prove the same is true here.
