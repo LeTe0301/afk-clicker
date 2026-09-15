@@ -237,6 +237,47 @@ class Persistence(unittest.TestCase):
                 self.assertIsNone(app.Hotkey.from_json({"keys": [[name, None, None]]}))
         self.assertIsNotNone(app.Hotkey.from_json({"keys": [["f6", None, None]]}))
 
+    def test_non_member_class_attributes_are_rejected(self):
+        # kb.Key is an Enum class, so hasattr(kb.Key, name) said yes to mro,
+        # __class__, __init__, _member_map_, __module__ -- everything
+        # Enum/object supplies, not just real key names. Membership in
+        # __members__ is the actual vocabulary check.
+        for name in ("mro", "__class__", "__init__", "_member_map_", "__module__"):
+            with self.subTest(name=name):
+                self.assertIsNone(app.Hotkey.from_json({"keys": [[name, None, None]]}))
+
+    def test_char_length_bounds_reject_empty_and_oversized(self):
+        # bool("") is False, so an empty char slid through into a rendered
+        # "Key None" label; an unbounded char rendered a 200-char string
+        # verbatim into the same label.
+        self.assertIsNone(app.Hotkey.from_json({"keys": [[None, None, ""]]}))
+        self.assertIsNone(app.Hotkey.from_json({"keys": [[None, None, "x" * 200]]}))
+        # A single non-ASCII code point and a short composed cluster
+        # (combining acute accent + base letter, 2 code points -- the
+        # darwin dead-key/compose case MAX_CHAR_LEN exists for) both still
+        # round-trip.
+        self.assertIsNotNone(app.Hotkey.from_json({"keys": [[None, None, "ä"]]}))
+        self.assertIsNotNone(app.Hotkey.from_json({"keys": [[None, None, "́a"]]}))
+
+    def test_boolean_and_out_of_range_vk_are_rejected(self):
+        # isinstance(True, int) is True -- bool is an int subclass, so a
+        # range check alone would accept True/False as vk 1/0.
+        self.assertIsNone(app.Hotkey.from_json({"keys": [[None, True, None]]}))
+        self.assertIsNone(app.Hotkey.from_json({"keys": [[None, False, None]]}))
+        self.assertIsNone(app.Hotkey.from_json({"keys": [[None, -1, None]]}))
+        self.assertIsNone(app.Hotkey.from_json({"keys": [[None, 0x20000000, None]]}))
+        self.assertIsNotNone(app.Hotkey.from_json({"keys": [[None, 0x1FFFFFFF, None]]}))
+
+    def test_chord_longer_than_max_is_rejected_not_truncated(self):
+        # A restored 4-key chord silently trimmed to 3 fires on any 3 of the
+        # 4 keys the user actually recorded -- strictly easier to trigger
+        # than the saved combination, so this must reject, not truncate.
+        four = [["f6", 1, None], ["f7", 2, None], ["f8", 3, None], ["f9", 4, None]]
+        self.assertIsNone(app.Hotkey.from_json({"keys": four}))
+        restored = app.Hotkey.from_json({"keys": four[:app.MAX_CHORD]})
+        self.assertIsNotNone(restored)
+        self.assertEqual(len(restored.keys), app.MAX_CHORD)
+
     def test_unhashable_modifiers_do_not_raise(self):
         # `m not in _MOD_ORDER` hashes m. A list or a dict in "mods" raised
         # TypeError out of __init__ and the window never opened -- a damaged
@@ -277,6 +318,17 @@ class Persistence(unittest.TestCase):
             "char wrong type": {"keys": [[None, None, 5]]},
             "entry all null": {"keys": [[None, None, None]]},
             "unknown key name": {"keys": [["no_such_key", None, None]]},
+            "chord too long": {"keys": [["f6", 1, None], ["f7", 2, None],
+                                         ["f8", 3, None], ["f9", 4, None]]},
+            "vk is bool": {"keys": [[None, True, None]]},
+            "vk out of range": {"keys": [[None, -1, None]]},
+            "char empty": {"keys": [[None, None, ""]]},
+            "char too long": {"keys": [[None, None, "x" * 200]]},
+            # Distinct from "unknown key name" above: "mro" is a real
+            # attribute hasattr(kb.Key, name) said yes to, not a plain
+            # missing string -- it isolates the __members__ guard from the
+            # membership check a bogus string would already have failed.
+            "name is non-member attribute": {"keys": [["mro", None, None]]},
         }
         for label, blob in cases.items():
             with self.subTest(case=label):
