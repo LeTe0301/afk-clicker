@@ -127,17 +127,17 @@ All text pairings verified via WCAG relative-luminance formula (`L = 0.2126 * R_
 
 | Element | Dark theme | Light theme | WCAG floor | Notes |
 |---|---|---|---|---|
-| **Notice text** BAD on CARD | 5.81:1 | 5.17:1 | 4.5 (AA text) | Exceeds ✓ |
+| **Notice text** BAD on CARD | 5.22:1 | 5.11:1 | 4.5 (AA text) | Exceeds ✓ |
 
 **Dark theme calculation**:
 - BAD `#f06262` → RGB (240, 98, 98) → L ≈ 0.310
 - CARD `#1c1f23` → RGB (28, 31, 35) → L ≈ 0.012
-- Contrast = (0.310 + 0.05) / (0.012 + 0.05) ≈ 5.81:1
+- Contrast = (0.310 + 0.05) / (0.012 + 0.05) ≈ 5.22:1
 
 **Light theme calculation**:
 - BAD `#cc3527` → RGB (204, 53, 39) → L ≈ 0.153
 - CARD `#ffffff` → RGB (255, 255, 255) → L = 1.0
-- Contrast = (1.0 + 0.05) / (0.153 + 0.05) ≈ 5.17:1
+- Contrast = (1.0 + 0.05) / (0.153 + 0.05) ≈ 5.11:1
 
 Both exceed the 4.5:1 AA text threshold.
 
@@ -159,8 +159,8 @@ The notice appears **only** in the Settings → Appearance pane, not:
 ## Accessibility & platform notes
 
 ### Color contrast
-- Dark theme BAD on CARD: **5.81:1** (exceeds AA 4.5:1 for text) ✓
-- Light theme BAD on CARD: **5.17:1** (exceeds AA 4.5:1 for text) ✓
+- Dark theme BAD on CARD: **5.22:1** (exceeds AA 4.5:1 for text) ✓
+- Light theme BAD on CARD: **5.11:1** (exceeds AA 4.5:1 for text) ✓
 - BAD color is the same token used for "Install folder is read-only" (`_set_update_state`, `afk_clicker.py:3480`), establishing visual consistency for error states.
 
 ### Keyboard navigation
@@ -204,7 +204,7 @@ The notice is implemented as:
 | Notice clears once a save succeeds again | Label is `pack_forget()`'d when `self._save_failed` becomes False |
 | No re-paint on repeated failures | `_note_save()` returns early if state hasn't changed; label stays on-screen without refresh |
 | Exact wording names the problem and consequence | "Couldn't save settings — changes won't be kept after closing" follows existing error-message tone ("Install folder is read-only") and names cause + consequence |
-| Colour passes WCAG AA in both themes | BAD on CARD: 5.81:1 dark, 5.17:1 light (both exceed 4.5:1 AA) ✓ |
+| Colour passes WCAG AA in both themes | BAD on CARD: 5.22:1 dark, 5.11:1 light (both exceed 4.5:1 AA) ✓ |
 | Font and size match existing conventions | Segoe UI 9.5pt regular, same as Row labels; scales with `s` like all other text |
 | Placement within existing card, no new layout | Packed below UI scale Row, reuses card's horizontal padding and `wraplength` logic |
 | Wraps without clipping at 90% scale and narrow window | `wraplength=int(CARD_INNER_W * s)` ensures text wraps safely at any supported `s` (90%–130%) and window width (480px+) |
@@ -225,7 +225,7 @@ The notice is implemented as:
 
 6. **Font and spacing follow existing Row conventions**: Typography and layout reuse the Row label pattern (Segoe UI 9.5pt, `wraplength`, padding), ensuring visual and functional consistency with Theme/UI scale controls.
 
-7. **Contrast exceeds AA in both themes**: Dark and light theme pairings both exceed the 4.5:1 AA text floor (5.81:1 and 5.17:1 respectively), ensuring readability for users with low vision.
+7. **Contrast exceeds AA in both themes**: Dark and light theme pairings both exceed the 4.5:1 AA text floor (5.22:1 and 5.11:1 respectively), ensuring readability for users with low vision.
 
 ## References
 
@@ -239,3 +239,5 @@ The notice is implemented as:
 ## Orchestrator correction (before build)
 
 The wording changed from "Config directory is read-only — settings won't be saved" to **"Couldn't save settings — changes won't be kept after closing"**. `Store.save()` catches any `OSError`: read-only directory, disk full, permission denied, a locked file on Windows. The code doesn't know which one happened, so naming "read-only" would sometimes be false. The updater's "Install folder is read-only" is not a precedent here, because that message comes from a specific check. The new text still names what went wrong and what it means, per `docs/CODING-GUIDELINES.md`. The Wrapping note's "8pt" was a slip; the font is 9.5pt scaled, as specified under Font. `pack_forget()` when hidden means the card grows or shrinks by one label on a state change. That is acceptable, because the state changes rarely.
+
+**Contrast figures corrected after merge:** recomputed from the `THEMES` hex values, `BAD` on `CARD` is 5.22:1 dark (`#f06262` on `#1c1f23`) and 5.11:1 light (`#cc3527` on `#ffffff`). The originally stated 5.81/5.17 were wrong. Both still clear 4.5:1, so the conclusion is unchanged. The intermediate luminance lines above carry the old arithmetic. Also, the notice repaints from `_build_ui()`'s tail, not `_build_settings()`'s.

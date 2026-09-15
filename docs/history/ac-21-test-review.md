@@ -426,3 +426,165 @@ reachable code path in this app at all. The review pass found no must-fix,
 no should-fix, and one nit (a pre-existing, out-of-scope design-doc wording
 inaccuracy). This build cycle is done — hands back to product-manager for
 the next iteration.
+
+## Round 3
+
+Scope: `git diff f04fc60 91f410d` — a test-only change to
+`tests/test_ui.py`'s `SaveFailureNotice.test_every_save_call_site_can_trigger_the_notice`
+(`via_apply_hotkey` subtest only) plus a new "Round 3" section in
+`docs/implementation.md`, in response to CI run 35013166754 aborting
+(`Trace/BPT trap: 5`) on macOS only. This dispatch does the testing pass and
+the review pass together, since PR #78's substantive diff (`f04fc60`) already
+carries a round-2 approval above plus a posted PR review verdict of `MERGE` —
+not repeated here.
+
+### Testing pass (round 3)
+
+1. **Does the stub fully prevent any real listener start on every path
+   `apply_hotkey()` takes in this subtest, and does anything downstream read
+   an attribute the stub lacks?**
+   Traced `apply_hotkey()` (`afk_clicker.py:4188-4218`): the only places
+   anything in this codebase touches `self.hk_listener` after `apply_hotkey()`
+   sets it are `.stop()` at `afk_clicker.py:4193` (the "clear a leftover
+   listener" guard at the top of `apply_hotkey()` itself) and `.stop()` at
+   `afk_clicker.py:4418-4419` (`on_close()`, which `UITestCase.tearDown()`
+   calls unconditionally — `tests/test_ui.py:85-97`). `_StubHotkeyWatcher`
+   (`tests/test_ui.py:3195-3204`) implements both `start()` and `stop()` as
+   no-ops, and its `__init__(self, hotkey, callback)` matches the real
+   `HotkeyWatcher.__init__` signature (`afk_clicker.py:568`) that
+   `apply_hotkey()` calls it with. Since `via_apply_hotkey` is the *last*
+   trigger in the `triggers` list (`tests/test_ui.py:3216-3217`) and its own
+   `finally` restores `app.HotkeyWatcher` before the subTest loop's
+   `self.root.update()`/`_fix_saves()` even run, no other subtest or
+   `tearDown()` call can ever see the patched *class* — only the already-live
+   stub *instance* sitting in `self.ui.hk_listener`, and that instance's
+   `.stop()` is exactly what `on_close()` calls. Confirmed no other
+   `hk_listener.` read exists anywhere in `afk_clicker.py` (`grep -n
+   hk_listener afk_clicker.py` → lines 2281, 2454 (comment), 4192-4194,
+   4200 (comment), 4207-4210, 4418-4419 — only `.stop()`/`is None`/
+   assignment, nothing else). **No gap. Confirmed independently, not taken
+   on the developer's word.**
+
+2. **Does anything else changed in this cycle's tests start a real listener,
+   call `capture_hotkey`, or touch `HotkeyWatcher`/`kb.Listener`/`mouse` on
+   darwin?**
+   `git diff 7d49f83 -- tests/` touches only `tests/test_ui.py` (this one
+   subtest) and `tests/test_updater.py` (two unrelated additions: a
+   non-hex-digit checksum-rejection case at `tests/test_updater.py:173-186`,
+   and a doc-comment clarifying an existing zip-traversal test at
+   `tests/test_updater.py:289-293` — no listener, no thread, no new
+   behavior). `grep -n "Listener\|capture_hotkey\|HotkeyWatcher\|mouse\." `
+   against that diff hits only the six lines inside `via_apply_hotkey`
+   itself. Confirmed independently — the developer's claim holds.
+
+3. **Does the stub still exercise the save?**
+   Proved this via an in-process monkeypatch from a scratchpad script
+   (`prove_stub_r3.py`, run from `DISPLAY=:99`, deleted immediately after —
+   never touched a repo file):
+   - Positive: poisoned the *real* `afk_clicker.HotkeyWatcher.start` to raise
+     `AssertionError("real HotkeyWatcher.start() was called")`, then ran
+     `test_every_save_call_site_can_trigger_the_notice` directly via
+     `unittest.TestLoader().loadTestsFromName(...)`. **Result: `OK`** — the
+     poisoned real `start()` was never reached, because `via_apply_hotkey`'s
+     stub replaces the class `apply_hotkey()` looks up before it ever
+     constructs one.
+   - Negative control: same poison, but called `apply_hotkey()` directly on a
+     freshly-built `AfkAutoclicker` with *no* stub in place. Result:
+     `apply_hotkey()` returned normally with `_save_failed=False` and
+     `hk_listener=None` — the poison fired and was swallowed by
+     `apply_hotkey()`'s own `except Exception` clause
+     (`afk_clicker.py:4209-4212`), confirming `_note_save()` is never reached
+     down that path and thus that patching `macos_input_permitted` alone (the
+     initially-considered alternative) could never have exercised the save
+     either — and confirming this proof harness is measuring something real,
+     not a tautology.
+
+4. **Full suite**, pynput 1.7.7 venv, `DISPLAY=:99 <venv>/bin/python -m
+   unittest discover -s tests -t .`:
+   ```
+   Ran 388 tests in 101.165s
+   OK (skipped=10)
+   ```
+   Matches the developer's reported 388/skipped=10 exactly, and matches
+   round 2's own count — this round changes how one existing subtest is
+   exercised, adding no new test. (Pre-existing `ResourceWarning`s from
+   `tests/test_updater.py` for a handful of unclosed temp-file handles are
+   unrelated to this diff — present before this cycle, not touched by it —
+   and do not affect the `OK` result.)
+
+No test failures, no regressions. Proceeding to the review pass.
+
+### Review pass (round 3)
+
+Per `docs/REVIEW-PROTOCOL.md`, only three of the ten lenses apply to a
+test-only diff this narrow; the rest are **N/A — no production code, no
+new dependency, no new untrusted input, no naming/shadowing, no roadmap
+item touched by this diff.**
+
+- **Ticket fidelity — PASS.** The diff does exactly what the CI failure
+  demanded: stub `HotkeyWatcher` for the one subtest that reaches it,
+  restore in `finally`, touch nothing else. `docs/implementation.md`'s
+  Round 3 section accurately describes the diff; no scope creep (verified
+  via `git status --short` → only `tests/test_ui.py` modified, per
+  `docs/implementation.md`'s own "Scope check").
+
+- **Tests — PASS.** Verified point 3 above satisfies the protocol's "does
+  the test actually fail if you revert the fix" bar via the poison/negative-
+  control pair rather than a literal repo revert (a literal revert would
+  reproduce the macOS-only `SIGTRAP`, which cannot be reproduced on this
+  Linux runner at all — the poison technique is the available substitute and
+  demonstrates the same causal fact: the real `start()` is unreached with the
+  stub, reached-and-swallowed without it). The stub also correctly keeps
+  `_note_save()`'s call reachable on every platform rather than skipping the
+  whole subtest on darwin, preserving coverage of the spec's "all five call
+  sites" acceptance criterion (`docs/test-review.md` round 1's own note,
+  restated in `docs/implementation.md`'s Round 3 rationale) instead of
+  trading it away for CI stability.
+
+- **Cross-platform behaviour — PASS, with the caveat the developer already
+  states.** The fix cannot be exercised on the actual failing platform in
+  this environment (no macOS runner available here) — `docs/implementation.md`
+  says so plainly rather than implying coverage that doesn't exist. What
+  *can* be confirmed statically holds: the stub's `start()`/`stop()` are
+  no-ops regardless of OS, so no platform-specific branch inside
+  `HotkeyWatcher.__init__`/`start()` (which constructs a real `kb.Listener`,
+  `afk_clicker.py:576`) is ever reached from this subtest on any platform,
+  which is precisely the mechanism that was aborting the process on macOS.
+  Linux CI (this run) and the developer's prior windows/ubuntu-green runs
+  give no reason to doubt the same holds on macOS CI; it is not independently
+  provable in this environment, and calling it fully verified would overstate
+  what was actually checked.
+
+Everything else — Correctness (no production logic changed), Threading/Tk
+safety (no off-main-thread Tk access introduced or moved), Naming/shadowing
+(no new names outside the local `_StubHotkeyWatcher`, which does not
+shadow anything), Untrusted input (none), Tech stack conformance (no new
+dependency), Comments/documentation (the `via_apply_hotkey` comment states
+the *why* — cross-references `HotkeyPersistence`'s own class comment rather
+than restating the code — consistent with `CODING-GUIDELINES.md`), Roadmap
+(nothing on `ROADMAP.md` touched by a CI-only fix) — **N/A, nothing in this
+diff to examine under that lens.**
+
+### Findings (round 3)
+
+No must-fix. No should-fix. No nit.
+
+### Overall verdict (round 3)
+
+**Approve.**
+
+The stub closes the macOS abort at its actual mechanism (a real
+`kb.Listener` construction/start inside `apply_hotkey()`), independently
+re-derived rather than taken on the developer's word: every `hk_listener.`
+read after this subtest runs is `.stop()`, which the stub implements;
+no other test in this cycle touches `HotkeyWatcher`/`Listener`/
+`capture_hotkey`; and an in-process poison-and-negative-control pair proves
+both that the stub is genuinely load-bearing (test still passes with the
+real `start()` poisoned) and that the alternative the developer considered
+and rejected (patching `macos_input_permitted` alone) would not have worked
+either (the poison fires and is silently swallowed without the stub, before
+ever reaching `_note_save()`). Full suite: 388/388, `OK (skipped=10)`,
+matching round 2 exactly with no new test and no regression. No scratch
+file was left in the repo (`git status --short` clean before and after this
+pass). This build cycle is done — hands back to product-manager for the
+next iteration.

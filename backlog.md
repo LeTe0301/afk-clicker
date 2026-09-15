@@ -11,6 +11,13 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
+**0.7.0 released 2026-09-15** (`v0.7.0` from `d008ad5`, run 34995512574): the update-log
+prompt (PR #72), top-aligned panes (PR #68), the macOS Accessibility-permission fixes
+(PR #73), saved-hotkey vocabulary validation (PR #74), the G#39 flake mitigation (PR #70).
+`release/0.7.0` is merged back into `main` (`63b06f2`). Leo's own Windows copy was on 0.5.0,
+whose in-app Install cannot work (G#35); he was pointed at the one-time manual unzip.
+The first real in-app Windows update (0.6.0+ → next release) is still unverified.
+
 **0.6.0 released 2026-09-15** (`v0.6.0` from `0d83eef`, run 34931395022): the
 Clickwork name (PR #61), the Loop icon (PR #62) and the Windows install-update fix
 (PR #65, G#35). `release/0.5.0` and `release/0.6.0` are both merged back into `main`.
@@ -112,7 +119,15 @@ Bugs and residue:
 - [x] **Done 2026-09-15, PR #77.** G#18 / GH#22 — Review residue from PR #21. The `bind_all`
       comment landed with PR #30; the test clicks the sidebar's real "Add current game"
       `Button` (round 1 built a throwaway one, missing that the sidebar stays viewable).
-- [ ] G#21 / GH#32 — Review residue from the updater PRs: a hex check in `fetch_checksums`, the zip comment, the superseded-worker race test, and `Store.save` swallowing `OSError`.
+- [x] **Done 2026-09-15, PR #78.** G#21 / GH#32 — Review residue from the updater PRs. Hex check in
+      `fetch_checksums`; `_safe_names` docstring (zipfile strips `..` itself, tar was the
+      real hole); update-check results carry `_check_seq` and land via main-thread gates
+      (`self._pending` was written from the worker); `Store.save()` returns a bool and the
+      Appearance pane shows one "Couldn't save settings" notice. Three rounds: a crash
+      opening Settings while saves fail (painting mid-rebuild), then a macOS-only SIGTRAP
+      from a test that started a real pynput listener.
+- [ ] G#41 / GH#79 — `Store.save` leaves `settings.json.tmp` behind when `os.replace` fails
+      (e.g. Windows file lock). Harmless, small; found by PR #78's review.
 - [x] **Done 2026-09-15, PR #72.** G#36 / GH#64 — Ask the person to send `update.log`
       (prefilled GitHub issue) when an in-app update didn't finish. Follow-up to G#35,
       which ships the log. Four review rounds: two design-doc contrast-arithmetic
@@ -518,7 +533,7 @@ releases**. Keep a second display for load loops — see Housekeeping.
 
 ## Session handoff — 2026-09-15 (continued)
 
-Main is at `691c42a` (item 1 merged since, PR #74 → `c142eee`; item 2, PR #76 → `c2db91d`; item 3, PR #77 → `c1c7977`; 0.7.0 cut from `b853890`). Everything below is queued, in the order to work it, one cycle
+Main is at `691c42a` (item 1 merged since, PR #74 → `c142eee`; item 2, PR #76 → `c2db91d`; item 3, PR #77 → `c1c7977`; item 4, PR #78 → `ffe3fc3`; 0.7.0 cut from `b853890`). Everything below is queued, in the order to work it, one cycle
 at a time (product-manager → developer → reviewer → PR → independent PR review →
 merge), auto-continuing to the next after each merge unless told to stop:
 
@@ -538,7 +553,7 @@ merge), auto-continuing to the next after each merge unless told to stop:
 3. ~~**G#18 / GH#22 — missing Button click-away test**~~ **Done, PR #77.**, plus a one-sentence comment on
    `_maybe_drop_focus` noting `root.bind_all("<Button-1>", ...)` is interpreter-wide
    (fires in every future `Toplevel`, including the G#36 dialog).
-4. **G#21 / GH#32 — updater hardening residue.** A hex check in `fetch_checksums`; a
+4. ~~**G#21 / GH#32 — updater hardening residue.**~~ **Done, PR #78.** A hex check in `fetch_checksums`; a
    comment correction in `_safe_names` (zipfile has stripped `..` since 3.6.2, tar
    still needs the check); a test for the superseded-worker race in `check_update`;
    `Store.save()` swallowing `OSError` silently.
@@ -572,5 +587,5 @@ been closed despite the work being merged days-to-hours earlier, because GitHub'
 "Closes #N" only closes GitHub's own mirror, never the Gitea original. **Check this
 every time a PR merges** — Gitea needs its own explicit close.
 
-**0.6.0 remains the latest release.** `main` has PRs #68/#70/#72/#73 beyond it,
+**0.7.0 was released later on 2026-09-15** (see top of file). Before that: `main` had PRs #68/#70/#72/#73 beyond 0.6.0,
 none cut into a version. Always ask Leo before cutting a release.
