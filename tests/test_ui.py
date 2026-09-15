@@ -2002,9 +2002,11 @@ class HotkeyPersistence(UITestCase):
         self.ui.hotkey = hotkey(set(), [kb.Key.f6])
         self.ui.apply_hotkey()
         self.ui.on_close()
-        data = json.load(open(self.config))
+        with open(self.config) as f:
+            data = json.load(f)
         data["hotkey"] = {"keys": "garbage"}
-        json.dump(data, open(self.config, "w"))
+        with open(self.config, "w") as f:
+            json.dump(data, f)
         self.root = tk.Tk()
         self.ui = app.AfkAutoclicker(self.root, store=app.Store(self.config))
         self.root.update()
@@ -2012,7 +2014,8 @@ class HotkeyPersistence(UITestCase):
 
     def test_nothing_is_saved_when_no_hotkey_was_applied(self):
         self.ui.on_close()
-        self.assertIsNone(json.load(open(self.config)).get("hotkey"))
+        with open(self.config) as f:
+            self.assertIsNone(json.load(f).get("hotkey"))
 
     def test_no_listener_is_started_without_permission(self):
         # The guard, exercised directly rather than only on a Mac. Applying

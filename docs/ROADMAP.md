@@ -15,6 +15,11 @@ Until both are settled, the version stays in `0.x`.
       dropped, and a saved Minecraft `click_ms` of exactly 510 becomes 650.
       Whatever versioned migration comes first must run **before** that
       shape filter, or it will discard old-format data as if it were corrupt.
+      The `hotkey` field (PR #4) is the first value `settings.json` carries
+      with its own shape and vocabulary, validated on load by
+      `Hotkey.from_json`. Both directions are safe unversioned today:
+      an older file simply lacks the key, and an unreadable blob degrades
+      to no hotkey through `from_json`.
 - [x] **Update integrity.** The updater downloads over HTTPS and executes the
       result. It now verifies the archive against the release's `SHA256SUMS`
       before extracting anything, refuses a release that publishes none, and
