@@ -237,7 +237,7 @@ Two follow-ups from its review are below.
       undocumented invariant rather than a guaranteed one, and the coalescing
       machinery it belongs to is new (PR #49 round 5). Worth either cancelling it
       for symmetry or writing down why it does not need cancelling.
-- [ ] **G#37 / GH#66 — Pane content should sit directly under its tab bar, not in the middle of the
+- [x] **Done 2026-09-15, PR #68.** **G#37 / GH#66 — Pane content should sit directly under its tab bar, not in the middle of the
       page** (Leo, 2026-09-13, from screenshots of 0.5.0 on Windows, maximised). The
       Hotkey tab's Record/Apply card, the Clicking tab's cards and Settings →
       Appearance all float mid-page with a large empty band between the tabs and the
