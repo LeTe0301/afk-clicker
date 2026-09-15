@@ -244,3 +244,97 @@ All four contrast figures above are wrong: the luminance arithmetic is off. Reco
 | BAD `#cc3527` on CARD `#ffffff` (light) | **5.11:1** |
 
 All four still clear 4.5:1 for small text, so no design decision changes. The same BAD-on-CARD pair was recomputed identically for G#21 (`docs/history/ac-21-design.md`).
+
+---
+
+## Revision 2 — Placement, styling, and height constraint (2026-09-15)
+
+### Context
+
+The PR review blocked on height: the hint under the Interval row adds ~3 px to the Clicking pane's natural height, causing content clipping on Windows/macOS at `WINDOW_MIN_H = 620`. Linux/Xvfb has ~72 px spare; Windows/macOS have 0–1 px. Additionally, Leo reported the MUTED band doesn't stand out visually from the jitter row's static descriptive hint ("spreads the rhythm so it is not exact"), both currently rendered in the same MUTED color and regular weight.
+
+### Decision A: Placement — Choose A2
+
+**Placement A2: Show the warning in the jitter row's existing hint slot, replacing "spreads the rhythm so it is not exact" while a band is active and restoring it otherwise.**
+
+**Rationale:**
+- **Height-neutral by construction**: The jitter row's hint space is already reserved and packed. The sweep hints ("Java sweeps may miss" 21 chars, "Java sweeps likely fail" 24 chars) are much shorter than the jitter hint (40 chars, wraps to 2 lines at s=1 per test precedent `RowValueColumn.test_random_jitter_hint_wraps_instead_of_overlapping_the_control`). At any scale and font size, the sweep hints fit in equal or fewer lines than the jitter hint — zero height growth when swapping.
+- **Avoids WINDOW_MIN_H bump**: No change to the window floor, which affects every profile and every user. Cannot measure Windows impact from Linux (substituted font vs Segoe UI metrics); raising the floor requires Windows CI proof, and any 2-line wrap would double the penalty.
+- **Semantically honest**: The warning condition depends on both Interval AND jitter (`max(50, click_ms - jitter_ms)`), so placing the warning in the jitter row's hint slot highlights jitter's contribution to the problem, making the relationship transparent.
+- **Simpler implementation**: Modify the jitter row to dynamically show either the descriptive hint or the sweep warning, rather than adding a second hint below Interval and then handling height reflows at the edge of the window floor.
+
+**Deviation from spec**: The original spec (docs/spec.md §5) states placement "under the **Interval** row's own label column." This revision moves it to the jitter row's hint slot instead. Ticket-level scope remains on the Interval/jitter condition, not the label placement; the visual location change is a height trade-off forced by the window-floor constraint.
+
+**Rejected alternatives:**
+- **A1 (Keep under Interval, raise WINDOW_MIN_H)**: Every profile's window grows (620 → 623 minimum, higher if text wraps to 2 lines at scale extremes). Affects entire user base. Cannot measure the actual Windows cost from Linux (Xvfb uses substituted fonts, not Segoe UI). A 2-line wrap at any scale step doubles the height penalty; avoiding that requires validation at all four scale steps (90%, 100%, 115%, 130%) on Windows CI.
+- **A3 (Other height-neutral options)**: Icon next to Interval label, banner at pane top, inline warning in value column — all less clean than reusing the established hint-under-label pattern already in use at jitter.
+
+### Decision B: Styling — Bold MUTED / Bold BAD
+
+**Styling decision**: 
+- **MUTED band (550–649 ms)**: MUTED color `#9299a3` (dark) / `#596170` (light), **bold** weight (Segoe UI 8pt bold)
+- **BAD band (<550 ms)**: BAD color `#f06262` (dark) / `#cc3527` (light), **bold** weight (Segoe UI 8pt bold)
+- **Jitter hint (always shown)**: MUTED color, **regular** weight (unchanged from current)
+
+**Rationale:**
+- **Makes sweep hints visually distinct from the jitter hint**: Both hints were MUTED color + regular weight, making them indistinguishable in the label column. Bold adds visual weight without requiring a new color token, making the sweep warnings (shorter, warnings in tone) clearly separate from the descriptive text (longer, neutral tone).
+- **Preserves color semantics**: MUTED = caution advisory, BAD = error signal. No new tokens needed. Existing established usage throughout the file (e.g., `_set_status()` at `afk_clicker.py:4107-4118` uses MUTED/OK/BAD for the same purpose).
+- **Bold does not change line count at any scale**: "Java sweeps may miss" (21 chars) and "Java sweeps likely fail" (24 chars) are very short. Even in bold, Segoe UI 8pt:
+  - At s=0.9 (wraplength 126 px, font 7.2 pt bold): fits comfortably (~108–110 px estimated for bold, vs 126 px available)
+  - At s=1.0 (wraplength 140 px, font 8 pt bold): fits comfortably (~120–125 px estimated, vs 140 px available)
+  - At s=1.3 (wraplength 182 px, font 10.4 pt bold): no constraint
+- **Contrast remains passing AA**: WCAG 4.5:1 (AA) is the floor for small text. Bold does not change color values, only weight:
+  - MUTED bold on CARD: 5.76:1 (dark) / 6.23:1 (light) — same as regular weight, exceeds 4.5:1
+  - BAD bold on CARD: 5.22:1 (dark) / 5.11:1 (light) — same as regular weight, exceeds 4.5:1
+
+### Decision C: Copy — No change
+
+**Keep exactly**: "Java sweeps may miss" (MUTED band) and "Java sweeps likely fail" (BAD band). Placement change does not require rewording.
+
+### Decision D: Test requirement — Floor invariant for Minecraft+Eating
+
+Add a new acceptance test named `test_sweep_hint_height_floor_minecraft_with_eating` to `tests/test_ui.py`, mirroring the existing `WindowMinimumHeight` tests (circa line 1135). The test must:
+
+1. **Setup**: Select Minecraft profile, confirm Eating section is shown (via the `"eating": True` profile key)
+2. **Trigger worst-case band**: Set Interval=500, jitter=0 (effective minimum 500 < 550, BAD band active)
+3. **Force edge-case scales**: Run the assertion at both s=0.9 and s=1.3 (extremes of the four UI-scale steps)
+4. **Assert floor invariant**: Measure `self.clicking_pane.winfo_reqheight()` after forcing the layout, and assert it is ≤ available height (derived the same way the existing floor tests do: `WINDOW_MIN_H` minus the static window chrome and the Hotkey/Eating/Appearance/Updates panes' space). Use `self.root.update()` to settle layout before measurement.
+5. **Purpose**: This runs on Windows/macOS CI, where the floor is real (0–1 px spare) and clipping is observable. Linux cannot catch this because Xvfb's substituted fonts leave ~72 px slack, hiding measurement errors.
+6. **Acceptance**: The natural height must never exceed available height at the floor on any platform or scale step. A violation blocks CI, requiring either the hint to shrink or WINDOW_MIN_H to grow — keeping the height invariant enforcement local to this feature rather than scattered across rebuild and pane-fill logic.
+
+### Contrast arithmetic (Revision 2 validation)
+
+Re-verified that bold does not change luminance (color), only stroke weight:
+
+| Pair | L_dark | L_light | Ratio dark | Ratio light | Passes AA |
+|---|---|---|---|---|---|
+| MUTED bold `#9299a3` on CARD `#1c1f23` | 0.3399 | — | 5.76:1 | — | ✓ |
+| MUTED bold `#596170` on CARD `#ffffff` | — | 0.1379 | — | 6.23:1 | ✓ |
+| BAD bold `#f06262` on CARD `#1c1f23` | 0.2959 | — | 5.22:1 | — | ✓ |
+| BAD bold `#cc3527` on CARD `#ffffff` | — | 0.1754 | — | 5.11:1 | ✓ |
+
+All four pairings pass the 4.5:1 threshold for small text (8pt hints). No change to the original contrast analysis; luminance is unchanged by font weight.
+
+### Summary of Revision 2
+
+- **Placement**: Moved from under Interval row to jitter row's dynamic hint slot (height-neutral, avoids WINDOW_MIN_H bump)
+- **Styling**: Both sweep hints now bold (MUTED color for caution, BAD color for error) to stand out visually from regular-weight jitter hint
+- **Copy**: Unchanged
+- **Testing**: New floor invariant test on Minecraft profile with Eating shown, at edge-case scales, ensures pane height never exceeds available space at WINDOW_MIN_H
+- **Ticket deviation**: Placement change noted; spec 5 stated "under Interval," revision places it in jitter row's hint slot instead, justified by window-floor constraint
+
+## Orchestrator correction to Revision 2 — the "may miss" band's colour
+
+Revision 2's placement (A2, the jitter row's hint slot) stands. So do the copy and the floor test. **The "may miss" band uses `INK` + bold, not `MUTED` + bold.**
+
+Why: the owner asked for the muted band to *stand out more*. Revision 2 rejected `INK` on the grounds that "MUTED = caution", but that isn't what `MUTED` means in this codebase. It is the plain secondary-text colour: every static row hint ("0 means never"), the `NumBox` unit labels, the sidebar's "GAMES" header, and the "not detected" game state (`afk_clicker.py:~1860, 2205, 2237, 2668, 2903`). A warning in grey bold still reads as secondary text, one weight heavier.
+
+`INK` bold reads as "this matters". `BAD` bold remains visibly the stronger of the two bands by colour, so the ordering holds.
+
+| Band | Colour + weight | Dark on CARD `#1c1f23` | Light on CARD `#ffffff` |
+|---|---|---|---|
+| 550–649 ms "Java sweeps may miss" | `INK` bold (`#e4e7ea` / `#161a22`) | **13.32:1** | **17.43:1** |
+| < 550 ms "Java sweeps likely fail" | `BAD` bold (`#f06262` / `#cc3527`) | **5.22:1** | **5.11:1** |
+| no band: "spreads the rhythm so it is not exact" | `MUTED` regular (unchanged) | 5.76:1 | 6.23:1 |
+
+Ratios were recomputed with the WCAG relative-luminance formula from the literal `THEMES` hex values. Revision 2's INK figures (12.96 / 15.19) were wrong. Weight doesn't change the line count differently for either colour; the floor test (D) is the real check on Windows/macOS CI.

@@ -258,3 +258,311 @@ git status --short
 No file outside `afk_clicker.py`/`tests/test_ui.py` was touched
 (`docs/implementation.md` itself is this document); no scratch file was left
 in the repo tree.
+
+---
+
+## Round 2 (PR #80 review + `docs/design.md` Revision 2 + its Orchestrator
+correction)
+
+### Summary
+PR #80's review blocked on cross-platform height: the hint under the
+**Interval** row added new content to exactly the pane (Clicking+Eating,
+Minecraft) whose height floor was already tuned to a measured 1px margin on
+Windows CI, with no re-derivation and no test at the floor with the hint
+visible. `docs/design.md` Revision 2 (Decision A2) moved the warning into
+the **jitter row's own, already-reserved hint slot** instead of a new
+widget under Interval: while a band is active, that slot shows the warning
+(bold); otherwise it shows its original static text, "spreads the rhythm so
+it is not exact", in `MUTED` regular, byte-for-byte as before. A later
+Orchestrator correction to Revision 2 fixed the 550-649 ms band's colour to
+`INK` bold (not `MUTED` bold as Revision 2 first proposed) — `MUTED` is this
+codebase's plain secondary-text colour, so a warning in it would still read
+as secondary text one weight heavier; `INK` bold reads as "this matters",
+and `BAD` bold (<550 ms) stays the visibly stronger of the two by colour.
+
+### Changes by file
+
+#### `afk_clicker.py`
+- **`Row`** (~line 2187-2245): `mutable_hint=True` no longer builds a bare,
+  empty, unpacked label for a row with no static `hint=` (nothing needs
+  that shape any more — the Interval row lost `mutable_hint` entirely).
+  Instead, `mutable_hint=True` is now paired with a static `hint=` string
+  (the jitter row's own): the label is built once, then immediately shown
+  via the new `restore_hint()` at construction, so the row starts in its
+  original static state. Every plain `hint=` site with no `mutable_hint=`
+  (auto-stop) falls through to the untouched `elif hint:` branch,
+  byte-for-byte the same code as before this feature ever existed.
+  - `set_hint(text, colour, bold=False)` (new `bold` parameter): retexts,
+    recolours, and reweights the font via a fresh `("Segoe UI", size,
+    weight)` tuple, then packs (the hint is never actually unpacked any
+    more — see `clear_hint()`'s removal below).
+  - `restore_hint()` (new): back to this Row's construction-time static
+    hint, `MUTED` and regular weight. Reads the bare module-level `MUTED`
+    global *at call time*, not a value captured at construction or at
+    `set_hint()` time, so a theme rebuild's repaint (which always runs
+    after `set_active_theme()` has already reassigned it) picks up the new
+    palette.
+  - `clear_hint()` removed: nothing calls it any more, since round 2's
+    hint slot is never hidden, only swapped between two texts.
+- **Clicking pane build** (~line 2977-2988): `self.interval_row = Row(cl,
+  "Interval", s)` — back to a plain `Row` with no hint capability at all,
+  as it was before G#22 ever existed. The jitter row is now kept as
+  `self.jitter_row = Row(cl, "Random jitter", s, hint="spreads the rhythm
+  so it is not exact", mutable_hint=True)` (previously a throwaway local
+  `r`), and `self.jitter_ms`'s `NumBox` is built into
+  `self.jitter_row.control`.
+- **`_note_sweep_hint`** (~line 3557-3586): unchanged shape (still records
+  `self._sweep_hint_pending` from `_persist()`'s own `values`, still
+  deferred-paints around `self._rebuilding`), except the 550-649 ms band's
+  colour tuple is now `(SWEEP_HINT_MUTED, INK)` instead of
+  `(SWEEP_HINT_MUTED, MUTED)` — the Orchestrator correction's own fix.
+  `SWEEP_HINT_MUTED`/`SWEEP_HINT_BAD` (the copy strings) are unchanged;
+  only the colour paired with the first one changed.
+- **`_paint_sweep_hint`** (~line 3588-3617): now targets
+  `self.jitter_row` instead of `self.interval_row`, calls
+  `set_hint(text, colour, bold=True)` for an active band or
+  `restore_hint()` otherwise (never `clear_hint()`, which no longer
+  exists), and renamed the transition-tracking attribute
+  `self._sweep_hint_visible` → `self._sweep_band_active` (see "Key
+  decisions" below for why the old name stopped fitting). The
+  `_request_pane_fill("clicking")` call is still guarded on an actual
+  band-active/inactive transition, not every keystroke, and still only
+  fires while the Clicking tab is visible — round 2 did **not** remove
+  this guard, because the restored static text can still be 2 lines while
+  the warning is 1 (docs/design.md Revision 2's own wrap-fit argument), so
+  the row's height genuinely still changes on a transition.
+  - **New guard, found and fixed this round, not requested by the task
+    brief**: `if self._settings_open: return`, mirroring
+    `_paint_save_notice()`'s own guard in the opposite direction. Root
+    cause: `self.jitter_row` only exists in the content tree, which is
+    torn down (and not rebuilt) while Settings is showing
+    (`_build_ui()`'s `if self._settings_open:` branch never calls
+    `_build_content()`) — so a call landing here while Settings is open
+    (concretely: `on_close()`'s own unconditional `_persist()` call, with
+    Settings left open by an earlier test step) retexts an already-
+    destroyed widget. Round 1 never hit this: its "hidden" state used
+    `clear_hint()` → `pack_forget()`, which Tk tolerates silently on a
+    destroyed widget (confirmed empirically: `pack forget` on a gone
+    window is a no-op, unlike `configure`, which raises
+    `TclError: invalid command name ...`). Round 2's "always show
+    something, never hidden" design means even the "no band" path now
+    calls `restore_hint()` → `set_hint()` → `.config()`, which does not
+    tolerate a stale widget — surfacing a latent gap that existed in both
+    rounds' designs. Caught by the pre-existing
+    `RowValueColumn.test_ui_scale_row_never_overflows_its_card_at_any_scale_step`
+    regressing (it leaves Settings open across a `restart()`/`on_close()`
+    boundary while sitting on the Global profile, so band state is always
+    `None`); fixed with this guard, verified the regression is gone (see
+    "Full suite result" below), and no round-2 test needed to be weakened
+    to make it pass.
+- **`AfkAutoclicker.__init__`** (~line 2336-2351): `_sweep_hint_pending`'s
+  comment updated for the new meaning (`None` = static text showing, not
+  "hidden"); `_sweep_hint_visible` renamed to `_sweep_band_active` with an
+  updated comment.
+- **`_build_ui()`'s tail** (~line 2745-2755): comment updated to say
+  `self.jitter_row` instead of `self.interval_row`; the call itself
+  (`self._paint_sweep_hint()`) is unchanged.
+
+#### `README.md`
+Added one sentence to the **Random jitter** row of the settings table
+(`README.md:75`), in the existing German voice, describing the new
+Minecraft-only warning behaviour and its 650 ms / 550 ms thresholds — the
+round-1 review's "README wasn't updated" concern, closed for the feature as
+it now actually behaves (jitter row, not Interval row).
+
+#### `tests/test_ui.py`
+- **`MinecraftSweepHint`** (rewritten in place, same location): every
+  assertion now reads `self.ui.jitter_row.hint_label` instead of
+  `self.ui.interval_row.hint_label`, via a `_hint()` helper returning
+  `(text, colour, bold)` instead of `(text, colour)` or `None` — there is
+  no more "hidden" state to represent as `None`; a `_static()` helper
+  returns the expected static-text tuple for the "no band" case. Renamed
+  throughout for the "band" vocabulary (`test_no_hint_at_650...` →
+  `test_no_band_at_650_with_zero_jitter_shows_static_text`,
+  `test_muted_hint_at_649` → `test_ink_bold_band_at_649`, etc.) to match
+  round 2's actual behaviour rather than round 1's hide/show framing.
+  Three genuinely new tests, not just renames:
+  - `test_survives_theme_change_while_ink_band_visible` — the
+    Orchestrator correction's own concern: `INK` (unlike `BAD`) has a
+    materially different value per theme (`#e4e7ea` dark / `#161a22`
+    light), so this is the one test that would silently pass if the paint
+    ever captured a stale colour instead of re-reading the module global
+    fresh (the sibling BAD-band test can't catch this, since `BAD`'s value
+    happens to be theme-independent in neither direction that a stale
+    capture would expose — both round 1 and round 2 already had a BAD
+    variant; only the INK one is new).
+  - `test_interval_row_has_no_hint_capability_anymore` — asserts
+    `self.ui.interval_row.hint_label is None` and that its label column
+    holds exactly one child (the main label), proving the capability
+    removal the task explicitly asked for ("remove capability that
+    nothing uses anymore").
+  - `test_jitter_hint_defaults_to_the_static_text_with_no_band` — the
+    restore-to-default path in isolation (Minecraft, no band), a case
+    round 1 never needed a dedicated test for since "hidden" and "no
+    static text to restore" were the same state.
+  - `test_row_mutable_hint_is_additive_and_starts_hidden` →
+    `test_row_mutable_hint_is_additive_and_restorable`: exercises the new
+    `Row(..., hint=..., mutable_hint=True)` shape end to end — starts
+    showing the default text, `set_hint(..., bold=True)` overrides it,
+    `restore_hint()` brings the default back — in isolation, no
+    `AfkAutoclicker` involved.
+  - `test_existing_static_hints_are_unaffected` narrowed to auto-stop only
+    (the one row that's still a plain, untouched static `hint=` site);
+    jitter's own default rendering is covered by
+    `test_jitter_hint_defaults_to_the_static_text_with_no_band` instead,
+    since it's no longer "just a static hint", it's the jitter row's
+    *restored* state.
+- **`WindowMinimumHeight.test_sweep_hint_height_floor_minecraft_with_eating`**
+  (new, placed directly after `test_tallest_pane_still_fits_at_worst_case_compound_scale`,
+  mirroring its own span-measurement technique exactly): at 90% and 130%
+  UI scale, Minecraft profile, Eating shown, forces the worst-case BAD
+  band (`click_ms=500, jitter_ms=0`) and asserts the Clicking pane's
+  natural height (same `max(child bottom) - min(child top)` span
+  measurement the sibling floor tests use) is `<=` its allocated height at
+  each scale step, then resets to `click_ms=650, jitter_ms=0` (static text
+  restored) at the same scale and asserts the jitter row's own
+  `winfo_reqheight()` with the warning shown was `<=` its height with the
+  static text shown — the second half of docs/design.md Revision 2's
+  height-neutral-or-shorter claim, checked directly rather than assumed.
+
+### Key decisions / tradeoffs
+- **`Row.restore_hint()` reads the bare `MUTED` global at call time, not a
+  captured value.** Same reasoning `_note_sweep_hint()`'s own INK/BAD
+  choice already relies on (see round 1's "Key decisions" for the
+  `_note_save`/`_paint_save_notice` precedent this mirrors): every rebuild
+  path calls `set_active_theme()` before the paint that reads these
+  globals runs, so a plain bare-name lookup inside a method body, executed
+  fresh each time it's called, is sufficient — no theme reference needs to
+  be threaded onto `self` or `Row` anywhere, consistent with how every
+  other widget in this file already reads `BG`/`CARD`/`INK`/... as module
+  globals.
+- **`_paint_sweep_hint()`'s new `self._settings_open` guard is a fix to a
+  latent gap this round's own design change exposed, not a requirement
+  copied from the task brief.** The task brief listed round 1's
+  guarantees to keep (`_rebuilding`, paint at `_build_ui()`'s tail,
+  profile-key-driven behaviour) but did not anticipate that swapping
+  `clear_hint()`/`pack_forget()` for `restore_hint()`/`set_hint()`/
+  `.config()` would turn a silently-tolerated stale-widget touch into a
+  hard crash. Root-caused via `systematic-debugging` (traced the actual
+  `TclError` back through `_rebuild_ui()`'s settings-branch skip of
+  `_build_content()`, rather than papering over the one failing test with
+  a try/except) and fixed with the same guard shape this file already
+  uses for the symmetric case (`_paint_save_notice()`'s own
+  `self._settings_open and self._settings_tab == "appearance"` check).
+- **`clear_hint()` removed outright, not deprecated/kept-for-compatibility.**
+  Round 2's design makes the jitter row's hint slot permanently visible
+  (never hidden, only retexted), so nothing in this file or its tests
+  calls it any more — keeping a dead method around would be exactly the
+  "capability nothing uses" the task asked to remove.
+- **`_sweep_hint_pending`/`_sweep_band_active` naming and comments updated,
+  not just the jitter-row wiring.** `None` used to mean "hint hidden"; it
+  now means "no band active, static text showing" — a real semantic
+  change worth documenting at the attribute, not just inferable from the
+  paint method's body.
+
+### Deviations from spec / design
+None beyond what `docs/design.md` Revision 2 and its Orchestrator
+correction already document and justify (the Interval→jitter-row placement
+change, and the MUTED→INK colour fix) — both are design-level decisions
+this round implements as written, not developer-introduced deviations. The
+`self._settings_open` guard above is a bug fix necessitated by the design
+change, not a deviation from it: nothing in `docs/design.md` says the hint
+slot may crash while Settings is open, and the guard is the minimal fix
+that keeps every one of round 1's stated guarantees (listed in the task
+brief) intact.
+
+### Known limitations
+- Carried from round 1, still true: the 650 ms / 550 ms cut points are the
+  spec's own interpretation of the ticket's two cited numbers, not a
+  re-measurement of Minecraft's cooldown table this session.
+- The floor test's two scale steps (90%, 130%) do not exercise the
+  documented worst-case *compound* scale (`_dpi_s=0.75` × 90%, the same
+  combination `test_tallest_pane_still_fits_at_worst_case_compound_scale`
+  covers) with the sweep band active. Not added here because the task's
+  own Decision D and item 4 both specify "90% and 130% UI scale" plainly,
+  not the compound case — and the jitter row's warning text is shorter
+  than what it replaces at every scale step already proven by the
+  height-comparison half of the same test, so the compound case is
+  expected to hold by the same argument, just not independently asserted.
+
+### How to verify locally
+Same environment as round 1 (venv + Xvfb `:99`):
+```
+DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .
+```
+
+#### This round's own tests
+```
+DISPLAY=:99 <venv>/bin/python -m unittest tests.test_ui.MinecraftSweepHint -v
+# 25 tests, OK (22 round-1 tests, renamed/rewired for the jitter row +
+# INK, plus 3 new)
+
+DISPLAY=:99 <venv>/bin/python -m unittest tests.test_ui.WindowMinimumHeight -v
+# 6 tests, OK (5 pre-existing + the new floor test)
+```
+
+### Sabotage-verify performed this session
+Both via in-process monkeypatch scripts run against `afk_clicker`/
+`tests.test_ui` imported as modules, scratchpad-only, never written to a
+repo file; deleted immediately after use. Confirmed via `git status
+--short` before and after that no repo file was touched by either.
+
+**The new floor test** — monkeypatched `app.SWEEP_HINT_BAD` to
+`"Java sweeps likely fail " * 12`, re-ran
+`test_sweep_hint_height_floor_minecraft_with_eating`:
+```
+AssertionError: 178 not less than or equal to 48      (scale='90')
+AssertionError: 232 not less than or equal to 62      (scale='130')
+```
+Confirms the height-comparison half of the test (warning height <= static
+height) catches an inflated warning at both scale steps.
+
+**The restore-to-static-text path** — monkeypatched `app.Row.restore_hint`
+to a no-op, re-ran the three tests that depend on it:
+```
+test_band_clears_live_on_the_very_keystroke_that_fixes_it: FAIL
+  ('Java sweeps may miss', '#e4e7ea', True) != ('spreads the rhythm so it is not exact', '#9299a3', False)
+test_band_restored_to_static_on_global_and_reshown_on_return_to_minecraft: FAIL
+  ('Java sweeps likely fail', '#f06262', True) != ('spreads the rhythm so it is not exact', '#9299a3', False)
+test_jitter_hint_defaults_to_the_static_text_with_no_band: FAIL
+  ('', '#000000', False) != ('spreads the rhythm so it is not exact', '#9299a3', False)
+```
+Confirms restoring the jitter row's static text on leaving a band,
+switching to Global, and on plain no-band construction are all genuinely
+exercised by these tests, not vacuously true.
+
+### Full suite result (this session, final state)
+```
+DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .
+Ran 414 tests in 73.357s
+
+OK (skipped=10)
+```
+414 = round 1's 410 + 4 new tests this round
+(`test_survives_theme_change_while_ink_band_visible`,
+`test_interval_row_has_no_hint_capability_anymore`,
+`test_jitter_hint_defaults_to_the_static_text_with_no_band`,
+`test_sweep_hint_height_floor_minecraft_with_eating`). Same skip count as
+round 1. The pre-existing `ResourceWarning`s (`tests/test_updater.py`) are
+unrelated to this diff, same as round 1's own note.
+
+Also independently confirmed (before making the fix) that
+`RowValueColumn.test_ui_scale_row_never_overflows_its_card_at_any_scale_step`
+passes unmodified against the round-1 commit `df1d136` in a throwaway
+detached worktree, and only started failing after this round's jitter-row
+rewiring — pinning the regression to this round's own change rather than a
+pre-existing flake, before writing the `self._settings_open` guard that
+fixes it.
+
+### Verification of scope
+```
+git status --short
+ M README.md
+ M afk_clicker.py
+ M docs/implementation.md
+ M tests/test_ui.py
+```
+(`docs/design.md` was already modified, with Revision 2 and its
+Orchestrator correction, before this round started — untouched by this
+round's own work.) No scratch file was left in the repo tree; the
+sabotage-verification worktree was removed after use.

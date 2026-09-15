@@ -1167,6 +1167,47 @@ class WindowMinimumHeight(UITestCase):
                    - min(c.winfo_y() for c in kids))
         self.assertLessEqual(natural, pane.winfo_height())
 
+    def test_sweep_hint_height_floor_minecraft_with_eating(self):
+        # G#22/GH#33 PR #80 review, lens 7 BLOCKER: the sweep warning adds
+        # new content to exactly this pane (Clicking+Eating, Minecraft),
+        # the one the tests above already establish sits at essentially a
+        # 0-1px margin on Windows CI. docs/design.md Revision 2 (Decision
+        # A2) moved the warning into the jitter row's own already-reserved
+        # hint slot specifically so it can never grow the pane -- this
+        # proves the floor invariant at the two scale steps that matter,
+        # worst-case (BAD, bold) band active, and that the row itself never
+        # grows past its own static-hint height doing it.
+        for scale in ("90", "130"):
+            with self.subTest(scale=scale):
+                self.ui._apply_ui_scale(scale)
+                self.root.update()
+                self.ui._select("minecraft")
+                self.ui._set_content_tab("clicking")
+                self.root.update()
+
+                self.ui.click_ms.var.set("500")   # effective 500 < 550: BAD, bold
+                self.ui.jitter_ms.var.set("0")
+                self.root.update()
+
+                pane, top, bottom = self.ui._pane_fills["clicking"]
+                pane.update_idletasks()
+                kids = [c for c in pane.winfo_children()
+                        if c.winfo_ismapped() and c not in (top, bottom)]
+                natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
+                           - min(c.winfo_y() for c in kids))
+                self.assertLessEqual(natural, pane.winfo_height())
+
+                warning_h = self.ui.jitter_row.winfo_reqheight()
+
+                # Same values, no band: back to the static descriptive
+                # hint at the same scale -- the row must not have grown to
+                # show the warning.
+                self.ui.click_ms.var.set("650")
+                self.ui.jitter_ms.var.set("0")
+                self.root.update()
+                static_h = self.ui.jitter_row.winfo_reqheight()
+                self.assertLessEqual(warning_h, static_h)
+
 
 class RailCollapse(UITestCase):
     """The sidebar collapsing to an icon-only rail below a width threshold
@@ -1760,11 +1801,16 @@ class RowValueColumn(UITestCase):
 
 
 class MinecraftSweepHint(UITestCase):
-    """G#22/GH#33 (docs/spec.md, docs/design.md): a conditional hint under
-    the Interval row, Minecraft-profile-only, that warns when
-    click_ms - jitter_ms (floored at 50) drops below DEFAULT_CLICK_MS
-    (MUTED, 550-649) or MIN_SWEEP_BAD_MS (BAD, <550). Read-only display --
-    never blocks or clamps click_ms/jitter_ms."""
+    """G#22/GH#33 (docs/spec.md, docs/design.md): a conditional warning,
+    Minecraft-profile-only, that replaces the jitter row's own static hint
+    when click_ms - jitter_ms (floored at 50) drops below DEFAULT_CLICK_MS
+    (INK bold, 550-649) or MIN_SWEEP_BAD_MS (BAD bold, <550) -- round 2
+    (docs/design.md Revision 2, Decision A2) moved the warning out from
+    under the Interval row into the jitter row's already-reserved hint
+    slot, height-neutral by construction. Read-only display -- never
+    blocks or clamps click_ms/jitter_ms."""
+
+    STATIC_HINT = "spreads the rhythm so it is not exact"
 
     def _set_interval(self, click_ms, jitter_ms, profile="minecraft"):
         self.ui._set_content_tab("clicking")
@@ -1775,10 +1821,12 @@ class MinecraftSweepHint(UITestCase):
         self.root.update()
 
     def _hint(self):
-        label = self.ui.interval_row.hint_label
-        if not label.winfo_ismapped():
-            return None
-        return label.cget("text"), label.cget("fg")
+        label = self.ui.jitter_row.hint_label
+        return (label.cget("text"), label.cget("fg"),
+                "bold" in label.cget("font"))
+
+    def _static(self):
+        return (self.STATIC_HINT, app.MUTED, False)
 
     # ---- profile-conditionality (data-driven "min_sweep_ms" key) ----
 
@@ -1792,33 +1840,33 @@ class MinecraftSweepHint(UITestCase):
 
     # ---- thresholds, both boundaries ----
 
-    def test_no_hint_at_650_with_zero_jitter(self):
+    def test_no_band_at_650_with_zero_jitter_shows_static_text(self):
         self._set_interval(650, 0)
-        self.assertIsNone(self._hint())
+        self.assertEqual(self._hint(), self._static())
 
-    def test_muted_hint_at_649(self):
+    def test_ink_bold_band_at_649(self):
         self._set_interval(649, 0)
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_MUTED, app.MUTED))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_MUTED, app.INK, True))
 
-    def test_muted_hint_at_550_boundary_is_inclusive(self):
+    def test_ink_bold_band_at_550_boundary_is_inclusive(self):
         self._set_interval(600, 50)   # effective 550
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_MUTED, app.MUTED))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_MUTED, app.INK, True))
 
-    def test_bad_hint_at_549(self):
+    def test_bad_bold_band_at_549(self):
         self._set_interval(600, 51)   # effective 549
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD, True))
 
-    def test_bad_hint_at_500(self):
+    def test_bad_bold_band_at_500(self):
         self._set_interval(500, 0)
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD, True))
 
-    def test_bad_hint_floored_at_50_never_negative_or_garbage(self):
+    def test_bad_bold_band_floored_at_50_never_negative_or_garbage(self):
         self._set_interval(100, 500)   # effective floored at 50
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD, True))
 
     # ---- Global/custom never show it ----
 
-    def test_global_profile_never_shows_hint_at_any_numbers(self):
+    def test_global_profile_never_shows_the_band_at_any_numbers(self):
         self.ui._set_content_tab("clicking")
         self.ui._select("global")
         self.root.update()
@@ -1827,9 +1875,9 @@ class MinecraftSweepHint(UITestCase):
                 self.ui.click_ms.var.set(str(click_ms))
                 self.ui.jitter_ms.var.set(str(jitter_ms))
                 self.root.update()
-                self.assertIsNone(self._hint())
+                self.assertEqual(self._hint(), self._static())
 
-    def test_custom_profile_never_shows_hint_at_any_numbers(self):
+    def test_custom_profile_never_shows_the_band_at_any_numbers(self):
         self.ui._set_content_tab("clicking")
         self.ui._add_game("Some Other Game")
         self.root.update()
@@ -1838,7 +1886,7 @@ class MinecraftSweepHint(UITestCase):
                 self.ui.click_ms.var.set(str(click_ms))
                 self.ui.jitter_ms.var.set(str(jitter_ms))
                 self.root.update()
-                self.assertIsNone(self._hint())
+                self.assertEqual(self._hint(), self._static())
 
     # ---- invalid/empty text falls back the same way _num() always does ----
 
@@ -1847,41 +1895,41 @@ class MinecraftSweepHint(UITestCase):
         self.ui.click_ms.var.set("")
         self.root.update()
         # _num()'s fallback is profile["defaults"]["click_ms"] == 650, so
-        # effective = max(50, 650 - 0) = 650 -> no hint, not a crash/garbage
-        # value.
-        self.assertIsNone(self._hint())
+        # effective = max(50, 650 - 0) = 650 -> static text, not a
+        # crash/garbage value.
+        self.assertEqual(self._hint(), self._static())
 
     def test_invalid_interval_text_falls_back_to_profile_default(self):
         self._set_interval(500, 0)
         self.ui.click_ms.var.set("not a number")
         self.root.update()
-        self.assertIsNone(self._hint())
+        self.assertEqual(self._hint(), self._static())
 
     # ---- live updates, no focus-out needed ----
 
-    def test_hint_disappears_live_on_the_very_keystroke_that_fixes_it(self):
+    def test_band_clears_live_on_the_very_keystroke_that_fixes_it(self):
         self._set_interval(600, 51)   # BAD
-        self.assertIsNotNone(self._hint())
+        self.assertNotEqual(self._hint(), self._static())
         self.ui.click_ms.var.set("650")
         self.ui.jitter_ms.var.set("0")
         self.root.update()
-        self.assertIsNone(self._hint())
+        self.assertEqual(self._hint(), self._static())
 
     # ---- profile switch away and back ----
 
-    def test_hint_hidden_on_global_and_restored_on_return_to_minecraft(self):
+    def test_band_restored_to_static_on_global_and_reshown_on_return_to_minecraft(self):
         self._set_interval(600, 51)   # BAD
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD, True))
         self.ui._select("global")
         self.root.update()
-        self.assertIsNone(self._hint())
+        self.assertEqual(self._hint(), self._static())
         self.ui._select("minecraft")
         self.root.update()
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD, True))
 
-    # ---- pane fill on an actual visibility transition, not every keystroke ----
+    # ---- pane fill on an actual band transition, not every keystroke ----
 
-    def test_pane_fill_requested_only_on_visibility_transition(self):
+    def test_pane_fill_requested_only_on_band_transition(self):
         # No root.update() anywhere in this test, deliberately: a real
         # geometry change also fires the Clicking pane's own <Configure>-
         # bound _request_pane_fill("clicking") (afk_clicker.py:~2950),
@@ -1891,45 +1939,59 @@ class MinecraftSweepHint(UITestCase):
         # _note_sweep_hint()/_paint_sweep_hint(), synchronously and in-line,
         # so the spy below sees exactly this feature's own calls and
         # nothing from the wider event loop.
-        self._set_interval(650, 0)   # hidden, baseline
+        self._set_interval(650, 0)   # static text, baseline
         calls = []
         original = self.ui._request_pane_fill
         self.ui._request_pane_fill = \
             lambda key: (calls.append(key), original(key))[1]
 
-        self.ui.click_ms.var.set("640")   # hidden -> shown (MUTED): a transition
+        self.ui.click_ms.var.set("640")   # static -> INK band: a transition
         self.assertEqual(calls.count("clicking"), 1)
 
         calls.clear()
-        self.ui.jitter_ms.var.set("100")  # still shown, MUTED -> BAD: no transition
+        self.ui.jitter_ms.var.set("100")  # still active, INK -> BAD: no transition
         self.assertEqual(calls.count("clicking"), 0)
 
         calls.clear()
-        self.ui.click_ms.var.set("650")   # effective 550 (jitter still 100): still shown
+        self.ui.click_ms.var.set("650")   # effective 550 (jitter still 100): still active
         self.assertEqual(calls.count("clicking"), 0)
 
         calls.clear()
-        self.ui.jitter_ms.var.set("0")    # effective 650: shown -> hidden, a transition
+        self.ui.jitter_ms.var.set("0")    # effective 650: active -> static, a transition
         self.assertEqual(calls.count("clicking"), 1)
 
     # ---- no-crash-and-still-correct: rebuild triggers (orchestrator correction) ----
 
-    def test_survives_theme_change_while_hint_visible(self):
+    def test_survives_theme_change_while_bad_band_visible(self):
         self._set_interval(600, 51)   # BAD
         self.ui._apply_appearance("light")
         self.root.update()
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD, True))
         self.ui._apply_appearance("dark")
         self.root.update()
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD, True))
 
-    def test_survives_ui_scale_change_while_hint_visible(self):
+    def test_survives_theme_change_while_ink_band_visible(self):
+        # The orchestrator correction's own concern: INK (unlike BAD) has a
+        # genuinely different value per theme (#e4e7ea dark / #161a22
+        # light), so this is the one that would silently pass if the paint
+        # ever captured a stale colour instead of re-reading the module
+        # global fresh.
+        self._set_interval(649, 0)   # INK bold
+        self.ui._apply_appearance("light")
+        self.root.update()
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_MUTED, app.INK, True))
+        self.ui._apply_appearance("dark")
+        self.root.update()
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_MUTED, app.INK, True))
+
+    def test_survives_ui_scale_change_while_band_visible(self):
         self._set_interval(600, 51)   # BAD
         self.ui._apply_ui_scale("130")
         self.root.update()
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD, True))
 
-    def test_survives_opening_and_closing_settings_while_hint_visible(self):
+    def test_survives_opening_and_closing_settings_while_band_visible(self):
         self._set_interval(600, 51)   # BAD
         self.ui._show_settings()
         self.root.update()
@@ -1937,23 +1999,24 @@ class MinecraftSweepHint(UITestCase):
         # Round 2's own regression tests.
         self.ui._select(self.ui.current, persist=False)
         self.root.update()
-        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD))
+        self.assertEqual(self._hint(), (app.SWEEP_HINT_BAD, app.BAD, True))
 
     def test_survives_startup_with_minecraft_already_the_saved_selection(self):
         self._set_interval(600, 51)   # BAD, and persists "selected": "minecraft"
         ui = self.restart()
         ui._set_content_tab("clicking")
         self.root.update()
-        label = ui.interval_row.hint_label
+        label = ui.jitter_row.hint_label
         self.assertTrue(label.winfo_ismapped())
         self.assertEqual(label.cget("text"), app.SWEEP_HINT_BAD)
         self.assertEqual(label.cget("fg"), app.BAD)
+        self.assertIn("bold", label.cget("font"))
 
     # ---- geometry: same wrap/no-overlap property as the jitter precedent ----
 
     def test_hint_wraps_at_the_same_wraplength_and_does_not_overlap_the_control(self):
         self._set_interval(500, 0)   # BAD, visible
-        row = self.ui.interval_row
+        row = self.ui.jitter_row
         text = row.grid_slaves(row=0, column=0)[0]
         _label, hint = text.winfo_children()
         self.assertIs(hint, row.hint_label)
@@ -1961,34 +2024,49 @@ class MinecraftSweepHint(UITestCase):
         self.root.update()
         self.assertLessEqual(
             hint.winfo_rootx() + hint.winfo_width(),
-            self.ui.click_ms.winfo_rootx())
+            self.ui.jitter_ms.winfo_rootx())
+
+    # ---- Interval row lost the mutable-hint capability nothing uses now ----
+
+    def test_interval_row_has_no_hint_capability_anymore(self):
+        self.assertIsNone(self.ui.interval_row.hint_label)
+        text = self.ui.interval_row.grid_slaves(row=0, column=0)[0]
+        self.assertEqual(len(text.winfo_children()), 1)   # just the main label
 
     # ---- Row's additive mutable-hint capability, and existing static hints ----
 
     def test_existing_static_hints_are_unaffected(self):
-        jitter_text = self.ui.jitter_ms.master.master.grid_slaves(
-            row=0, column=0)[0].winfo_children()[1]
-        self.assertEqual(jitter_text.cget("text"),
-                          "spreads the rhythm so it is not exact")
-        self.assertEqual(jitter_text.cget("fg"), app.MUTED)
         autostop_text = self.ui.autostop_min.master.master.grid_slaves(
             row=0, column=0)[0].winfo_children()[1]
         self.assertEqual(autostop_text.cget("text"), "0 means never")
+        self.assertEqual(autostop_text.cget("fg"), app.MUTED)
 
-    def test_row_mutable_hint_is_additive_and_starts_hidden(self):
-        row = app.Row(self.root, "Test", 1.0, mutable_hint=True)
+    def test_jitter_hint_defaults_to_the_static_text_with_no_band(self):
+        self._set_interval(650, 0)   # no band
+        self.assertEqual(self._hint(), self._static())
+
+    def test_row_mutable_hint_is_additive_and_restorable(self):
+        row = app.Row(self.root, "Test", 1.0, hint="default text",
+                      mutable_hint=True)
         row.pack()
         self.root.update()
         self.assertIsNotNone(row.hint_label)
-        self.assertFalse(row.hint_label.winfo_ismapped())
-        row.set_hint("hello", app.BAD)
-        self.root.update()
         self.assertTrue(row.hint_label.winfo_ismapped())
-        self.assertEqual(row.hint_label.cget("text"), "hello")
-        self.assertEqual(row.hint_label.cget("fg"), app.BAD)
-        row.clear_hint()
+        self.assertEqual(row.hint_label.cget("text"), "default text")
+        self.assertEqual(row.hint_label.cget("fg"), app.MUTED)
+        self.assertNotIn("bold", row.hint_label.cget("font"))
+
+        row.set_hint("warning!", app.BAD, bold=True)
         self.root.update()
-        self.assertFalse(row.hint_label.winfo_ismapped())
+        self.assertEqual(row.hint_label.cget("text"), "warning!")
+        self.assertEqual(row.hint_label.cget("fg"), app.BAD)
+        self.assertIn("bold", row.hint_label.cget("font"))
+
+        row.restore_hint()
+        self.root.update()
+        self.assertEqual(row.hint_label.cget("text"), "default text")
+        self.assertEqual(row.hint_label.cget("fg"), app.MUTED)
+        self.assertNotIn("bold", row.hint_label.cget("font"))
 
     def test_row_without_mutable_hint_has_no_hint_label(self):
         row = app.Row(self.root, "Test", 1.0)
