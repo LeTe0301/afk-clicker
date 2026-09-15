@@ -72,7 +72,7 @@ Der **Hotkey gilt global**, für alle Spiele derselbe.
 | Feld | Bedeutung |
 |---|---|
 | **Interval** | Abstand zwischen zwei Klicks. 650 ms deckt Javas volle Sword-Sweep-Aufladung ab (12 Ticks / 600 ms) plus einen Tick Puffer. |
-| **Random jitter** | Streut das Intervall, damit der Rhythmus nicht exakt gleichmäßig ist. |
+| **Random jitter** | Streut das Intervall, damit der Rhythmus nicht exakt gleichmäßig ist. Bei Minecraft weicht dieser Text einer fett hervorgehobenen Warnung, sobald Intervall minus Jitter unter 650 ms sinkt, und wechselt ab 550 ms zusätzlich auf eine auffälligere Farbe, weil dann der Java-Sword-Sweep wahrscheinlich ausbleibt. |
 | **Auto-stop** | Hält nach N Minuten von selbst an. 0 heißt nie. |
 | **Mouse button** | Links, rechts oder mittig. |
 | **Pause & eat** | Klicken aussetzen, rechte Maustaste halten bis das Essen durch ist, weitermachen. Nur bei Linksklick sinnvoll, deshalb greift es auch nur dort. |
