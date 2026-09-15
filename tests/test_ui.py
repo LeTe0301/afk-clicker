@@ -359,6 +359,55 @@ class CorruptConfig(UITestCase):
         self.assertIsInstance(app.Store(self.config).data.get("games"), dict)
 
 
+class StoreSaveResult(unittest.TestCase):
+    """G#21/GH#32 item 4: Store.save() used to swallow every OSError with a
+    bare `except OSError: pass`, returning None either way -- every one of
+    its five call sites had no way to tell a successful write from a
+    silently failed one. Now it returns True/False; nothing about the
+    on-disk write itself (still atomic via os.replace, still starts from
+    defaults on a corrupt file) changes. No UI/Tk fixture needed here --
+    Store has no knowledge of the UI, and this only exercises its own
+    return value (tests/test_ui.py:DetectOsTheme's monkeypatch-and-restore
+    style, no unittest.mock)."""
+
+    def setUp(self):
+        self.path = os.path.join(tempfile.mkdtemp(), "settings.json")
+
+    def test_a_successful_save_returns_true(self):
+        store = app.Store(self.path)
+        self.assertTrue(store.save())
+        with open(self.path, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        self.assertEqual(on_disk["appearance"], "system")
+
+    def test_a_failed_save_returns_false_and_does_not_raise(self):
+        store = app.Store(self.path)
+        original_replace = app.os.replace
+
+        def raising_replace(*a, **kw):
+            raise OSError("read-only filesystem")
+
+        app.os.replace = raising_replace
+        try:
+            self.assertFalse(store.save())
+        finally:
+            app.os.replace = original_replace
+
+    def test_put_game_returns_saves_own_result(self):
+        store = app.Store(self.path)
+        self.assertTrue(store.put_game("global", {"click_ms": 700}))
+
+        def raising_replace(*a, **kw):
+            raise OSError("nope")
+
+        original_replace = app.os.replace
+        app.os.replace = raising_replace
+        try:
+            self.assertFalse(store.put_game("global", {"click_ms": 800}))
+        finally:
+            app.os.replace = original_replace
+
+
 class StoreMigration(UITestCase):
     """
     The old 510 ms default auto-saved itself the first time Minecraft was
@@ -2964,6 +3013,197 @@ class UIScaleStore(UITestCase):
         self.assertEqual(ui.s, ui._dpi_s)
 
 
+class SaveFailureNotice(UITestCase):
+    """G#21/GH#32 item 4 (docs/spec.md, docs/design.md): Store.save() now
+    reports success/failure instead of swallowing every OSError silently,
+    and AfkAutoclicker surfaces a single, non-repeating, non-blocking
+    notice in Settings -> Appearance the first time a save actually fails,
+    clearing it the next time one succeeds. Every save is simulated by
+    monkeypatching app.os.replace to raise OSError (this repo's monkeypatch-
+    -and-restore style, no unittest.mock, no real filesystem permission
+    bits -- tests/test_ui.py:StoreSaveResult uses the same seam)."""
+
+    def _break_saves(self):
+        original_replace = app.os.replace
+
+        def raising_replace(*a, **kw):
+            raise OSError("read-only filesystem")
+
+        app.os.replace = raising_replace
+        return original_replace
+
+    def _fix_saves(self, original_replace):
+        app.os.replace = original_replace
+
+    def test_notice_appears_in_the_appearance_pane_on_a_failed_save(self):
+        self.ui._show_settings()
+        self.root.update()
+        original = self._break_saves()
+        try:
+            self.ui._apply_appearance("light")
+            self.root.update()
+        finally:
+            self._fix_saves(original)
+        self.assertTrue(self.ui.save_failed_label.winfo_ismapped())
+        self.assertEqual(
+            self.ui.save_failed_label.cget("text"),
+            "Couldn't save settings — changes won't be kept after closing")
+
+    def test_no_repaint_on_a_second_consecutive_failure(self):
+        # Tests the property _note_save() exists for (docs/CODING-
+        # GUIDELINES.md "Tests": test the property, not the plumbing), not
+        # the widget: a run of keystroke-driven failures while a directory
+        # stays read-only must not repaint after the first one.
+        calls = {"n": 0}
+        original_paint = self.ui._paint_save_notice
+
+        def counting_paint():
+            calls["n"] += 1
+            original_paint()
+
+        self.ui._paint_save_notice = counting_paint
+        try:
+            self.ui._note_save(False)
+            self.ui._note_save(False)
+            self.ui._note_save(False)
+        finally:
+            self.ui._paint_save_notice = original_paint
+        self.assertEqual(calls["n"], 1,
+                         "a second/third consecutive failure repainted the notice")
+
+    def test_notice_clears_once_a_save_succeeds_again(self):
+        self.ui._show_settings()
+        self.root.update()
+        original = self._break_saves()
+        try:
+            self.ui._apply_appearance("light")
+            self.root.update()
+        finally:
+            self._fix_saves(original)
+        self.assertTrue(self.ui.save_failed_label.winfo_ismapped())
+
+        self.ui._apply_appearance("dark")   # a real save, now unpatched
+        self.root.update()
+        self.assertFalse(self.ui.save_failed_label.winfo_ismapped())
+
+    def test_notice_survives_a_rebuild_triggered_by_the_failing_save_itself(self):
+        # docs/spec.md's own edge case: _apply_appearance's failed save is
+        # what triggers _request_rebuild()/_rebuild_ui() -- the notice must
+        # still be showing in the freshly-rebuilt Appearance pane once that
+        # same rebuild finishes, not just before it started.
+        self.ui._show_settings()
+        self.root.update()
+        old_label = self.ui.save_failed_label
+        original = self._break_saves()
+        try:
+            self.ui._apply_appearance("light")   # queues after_idle(self._rebuild_ui)
+            self.root.update()                   # runs the queued rebuild
+        finally:
+            self._fix_saves(original)
+        self.assertFalse(old_label.winfo_exists(),
+                         "test needs the rebuild to actually have run")
+        self.assertTrue(self.ui._settings_open)
+        self.assertEqual(self.ui._settings_tab, "appearance")
+        self.assertTrue(self.ui.save_failed_label.winfo_ismapped(),
+                        "the notice must survive the rebuild its own failure caused")
+
+    def test_notice_is_not_shown_while_a_different_settings_tab_is_active(self):
+        self.ui._show_settings()
+        self.ui._set_settings_tab("updates")
+        self.root.update()
+        original = self._break_saves()
+        try:
+            self.ui._apply_appearance("light")
+            self.root.update()
+        finally:
+            self._fix_saves(original)
+        self.assertFalse(self.ui.save_failed_label.winfo_ismapped())
+        self.ui._set_settings_tab("appearance")
+        self.root.update()
+        self.assertTrue(self.ui.save_failed_label.winfo_ismapped(),
+                        "opening Appearance later must still show the remembered failure")
+
+    def test_no_crash_the_first_time_settings_is_ever_opened_after_a_save_already_failed(self):
+        # test-review.md round 1, Defect 1, Path A: no Settings pane has
+        # ever been built this session, so self.save_failed_label does not
+        # exist yet. _show_settings() sets self._settings_open = True and
+        # then calls _rebuild_ui(), whose own leading self._persist() call
+        # (flushing any in-progress field edit) fails here -- before
+        # _build_settings() (reached later in the same _rebuild_ui() call)
+        # ever creates the label. Must not raise, and the notice must be
+        # visible in the freshly-built Appearance pane once _show_settings()
+        # returns.
+        original = self._break_saves()
+        try:
+            self.ui._show_settings()
+            self.root.update()
+        finally:
+            self._fix_saves(original)
+        self.assertTrue(self.ui.save_failed_label.winfo_ismapped())
+
+    def test_no_crash_reopening_settings_after_a_save_fails_while_settings_is_closed(self):
+        # test-review.md round 1, Defect 1, Path B: Settings is opened once
+        # (creating the label), then closed -- the close rebuilds without a
+        # Settings pane, destroying that label, but self.save_failed_label
+        # still points at the now-dead widget. A save then fails while
+        # Settings stays closed, and reopening Settings must not touch the
+        # destroyed widget via the same leading _persist() flush.
+        self.ui._show_settings()
+        self.root.update()
+        old_label = self.ui.save_failed_label
+        self.ui._select(self.ui.current, persist=False)   # closes Settings
+        self.root.update()
+        self.assertFalse(old_label.winfo_exists(),
+                         "test needs closing Settings to actually destroy the label")
+        original = self._break_saves()
+        try:
+            self.ui._show_settings()
+            self.root.update()
+        finally:
+            self._fix_saves(original)
+        self.assertTrue(self.ui.save_failed_label.winfo_ismapped())
+
+    def test_every_save_call_site_can_trigger_the_notice(self):
+        # docs/spec.md acceptance criterion: all five of Store.save()'s call
+        # sites route through _note_save() -- verified by triggering a
+        # failure via each in turn.
+        self.ui._show_settings()
+        self.root.update()
+
+        def via_apply_appearance():
+            self.ui._apply_appearance("light")
+
+        def via_apply_ui_scale():
+            self.ui._apply_ui_scale("115")
+
+        def via_select_persist():
+            self.ui._select("minecraft", persist=True)
+
+        def via_persist():
+            self.ui._select("minecraft", persist=False)
+            self.ui._persist()
+
+        def via_apply_hotkey():
+            self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f9])
+            self.ui.apply_hotkey()
+
+        triggers = [via_apply_appearance, via_apply_ui_scale, via_select_persist,
+                   via_persist, via_apply_hotkey]
+        for trigger in triggers:
+            with self.subTest(trigger=trigger.__name__):
+                self.ui._save_failed = False
+                self.ui._paint_save_notice()
+                original = self._break_saves()
+                try:
+                    trigger()
+                    self.root.update()
+                finally:
+                    self._fix_saves(original)
+                self.assertTrue(
+                    self.ui._save_failed,
+                    f"{trigger.__name__} did not route its save through _note_save()")
+
+
 class UIScale(UITestCase):
     """The Settings page's second Appearance-card Row (docs/history/ac-17-f4-spec.md, story
     #17 Feature 4): self.s becomes DPI x the chosen step, applied through
@@ -3457,7 +3697,8 @@ class SettingsUpdates(UITestCase):
         app.is_newer = lambda tag, current=app.__version__: True
         app.pick_asset = lambda rel: rel["assets"][0]
         try:
-            worker = threading.Thread(target=self.ui._check_worker, daemon=True)
+            worker = threading.Thread(
+                target=self.ui._check_worker, args=(self.ui._check_seq,), daemon=True)
             worker.start()
             worker.join(timeout=2)
             self.pump_until(lambda: self.ui.settings_item.has_update)
@@ -3480,7 +3721,8 @@ class SettingsUpdates(UITestCase):
         app.is_newer = lambda tag, current=app.__version__: True
         app.pick_asset = lambda rel: rel["assets"][0]
         try:
-            worker = threading.Thread(target=self.ui._check_worker, daemon=True)
+            worker = threading.Thread(
+                target=self.ui._check_worker, args=(self.ui._check_seq,), daemon=True)
             worker.start()
             worker.join(timeout=2)
             self.pump_until(lambda: self._button_text() == "Install v9.9.9")
@@ -3492,6 +3734,192 @@ class SettingsUpdates(UITestCase):
         self.assertTrue(self.ui.settings_item.has_update)
         self.assertIsNotNone(self.ui._pending)
         self.assertEqual(self.ui._pending[0], "v9.9.9")
+
+
+class AnOlderCheckResultDoesNotOverwriteANewerOne(UITestCase):
+    """G#21/GH#32 item 3: two overlapping check_update() calls (unreachable
+    today through the one button -- "Checking…" disables it before the
+    worker even starts -- but reachable by any direct caller that bypasses
+    the button, same as this file's own direct _check_worker() calls a few
+    classes up) could previously let an older worker's result land after a
+    newer check has already resolved, overwriting self._pending/the offer
+    state with a stale release.
+
+    Closed the same way G#39/GH#69 closed the identical shape for
+    _poll_games()/_apply_scan() (see AnOlderScanResultDoesNotOverwriteA
+    NewerOne below): each check_update() call stamps a monotonically
+    increasing sequence number (self._check_seq), and the main-thread gate
+    (_apply_check) drops any result whose sequence is older than the
+    newest check already started, before ever touching self._pending/
+    self._offer_update().
+
+    Drives this through the REAL check_update()/_check_worker() path (not
+    hand-made sequence numbers), with a controllable latest_release that
+    blocks the first (older) check until explicitly released, so the
+    ordering -- older check starts, newer check starts and lands first,
+    older check is released and lands last -- is deterministic rather than
+    a timing gamble. threading.Thread itself is wrapped (restored in
+    finally) purely to get a joinable handle back for each check_update()
+    call, since -- unlike _poll_games(), which keeps self._poll_thread --
+    check_update() does not stash its own worker thread anywhere."""
+
+    def test_an_orphaned_older_check_landing_later_is_dropped(self):
+        entered_first = threading.Event()
+        release_first = threading.Event()
+        calls = {"n": 0}
+        old_release = {"tag_name": "v8.0.0",
+                       "assets": [{"name": "Clickwork-linux-x86_64.tar.gz"}]}
+        new_release = {"tag_name": "v9.9.9",
+                       "assets": [{"name": "Clickwork-linux-x86_64.tar.gz"}]}
+
+        def fake_latest_release(timeout=10):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                entered_first.set()
+                release_first.wait(5)
+                return old_release
+            return new_release
+
+        created = []
+        original_thread_cls = app.threading.Thread
+
+        class _TrackingThread(original_thread_cls):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                created.append(self)
+
+        original_latest, original_is_newer, original_pick = \
+            app.latest_release, app.is_newer, app.pick_asset
+        app.latest_release = fake_latest_release
+        app.is_newer = lambda tag, current=app.__version__: True
+        app.pick_asset = lambda rel: rel["assets"][0]
+        app.threading.Thread = _TrackingThread
+        try:
+            self.ui.check_update()         # starts the older check (seq 1)
+            thread_a = created[-1]
+            self.assertTrue(
+                entered_first.wait(5),
+                "older check never reached latest_release")
+            self.ui.check_update()         # starts the newer check (seq 2),
+                                            # supersedes seq 1 the same way
+                                            # a second real click already
+                                            # would (check_update()'s own
+                                            # self._pending = None)
+            thread_b = created[-1]
+            self.assertIsNot(
+                thread_a, thread_b,
+                "test needs check_update() to actually start a second "
+                "worker to exercise the overlapping-checks scenario")
+            thread_b.join(5)
+            self.assertFalse(thread_b.is_alive(),
+                              "newer check should finish almost instantly "
+                              "(latest_release returns instantly for it)")
+            self.ui._drain_ui()
+            self.assertIsNotNone(self.ui._pending)
+            self.assertEqual(
+                self.ui._pending[0], "v9.9.9",
+                "the newer check's result should have landed before the "
+                "older one is released")
+            release_first.set()            # let the orphaned older check finish
+            thread_a.join(5)
+            self.assertFalse(thread_a.is_alive(),
+                              "older check should have finished by now")
+            self.ui._drain_ui()
+        finally:
+            app.latest_release, app.is_newer, app.pick_asset = \
+                original_latest, original_is_newer, original_pick
+            app.threading.Thread = original_thread_cls
+        self.assertEqual(
+            self.ui._pending[0], "v9.9.9",
+            "an older check landing after a newer one was already applied "
+            "must not overwrite it with stale data")
+
+
+class AnOlderNonOfferCheckResultDoesNotOverwriteANewerOffer(UITestCase):
+    """test-review.md round 1, Finding 2 (should-fix): _check_worker's four
+    non-offer branches (NoReleases/unreachable/not-newer/no-build-for-OS)
+    weren't seq-gated the way the offer path (_apply_check) already is --
+    an orphaned older worker landing after a newer worker's offer has
+    already been applied could still overwrite the button/version-label
+    text with a stale "Up to date"/etc. message. Closed with the same
+    _check_seq/_apply_check_state gate _apply_check() already uses for the
+    offer path.
+
+    Same deterministic-ordering technique as
+    AnOlderCheckResultDoesNotOverwriteANewerOne above: the older check's
+    latest_release() blocks until explicitly released, and it resolves to
+    a NOT-newer release (drives the "Up to date" branch, not an offer),
+    while the newer check resolves immediately to a newer release (drives
+    a real offer)."""
+
+    def test_an_orphaned_older_up_to_date_result_landing_after_a_newer_offer_is_dropped(self):
+        entered_first = threading.Event()
+        release_first = threading.Event()
+        calls = {"n": 0}
+        old_release = {"tag_name": "v1.0.0",
+                       "assets": [{"name": "Clickwork-linux-x86_64.tar.gz"}]}
+        new_release = {"tag_name": "v9.9.9",
+                       "assets": [{"name": "Clickwork-linux-x86_64.tar.gz"}]}
+
+        def fake_latest_release(timeout=10):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                entered_first.set()
+                release_first.wait(5)
+                return old_release
+            return new_release
+
+        def fake_is_newer(tag, current=app.__version__):
+            return tag == "v9.9.9"     # only the newer check's release offers
+
+        created = []
+        original_thread_cls = app.threading.Thread
+
+        class _TrackingThread(original_thread_cls):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                created.append(self)
+
+        original_latest, original_is_newer, original_pick = \
+            app.latest_release, app.is_newer, app.pick_asset
+        app.latest_release = fake_latest_release
+        app.is_newer = fake_is_newer
+        app.pick_asset = lambda rel: rel["assets"][0]
+        app.threading.Thread = _TrackingThread
+        try:
+            self.ui.check_update()         # starts the older check (seq 1)
+            thread_a = created[-1]
+            self.assertTrue(
+                entered_first.wait(5),
+                "older check never reached latest_release")
+            self.ui.check_update()         # starts the newer check (seq 2)
+            thread_b = created[-1]
+            self.assertIsNot(thread_a, thread_b)
+            thread_b.join(5)
+            self.assertFalse(thread_b.is_alive())
+            self.ui._drain_ui()
+            self.assertIsNotNone(self.ui._pending)
+            self.assertEqual(self.ui._pending[0], "v9.9.9",
+                             "the newer check's offer should have landed "
+                             "before the older one is released")
+            self.assertTrue(self.ui._update_text[0].startswith("Install"),
+                            "the newer offer's button text should be showing")
+            release_first.set()            # let the orphaned older check finish
+            thread_a.join(5)
+            self.assertFalse(thread_a.is_alive())
+            self.ui._drain_ui()
+        finally:
+            app.latest_release, app.is_newer, app.pick_asset = \
+                original_latest, original_is_newer, original_pick
+            app.threading.Thread = original_thread_cls
+        self.assertEqual(
+            self.ui._pending[0], "v9.9.9",
+            "the orphaned older check's non-offer result must not clear "
+            "the newer offer's self._pending")
+        self.assertTrue(
+            self.ui._update_text[0].startswith("Install"),
+            "an orphaned older check's stale 'Up to date' message must not "
+            "overwrite a newer, already-applied offer's button text")
 
 
 class RunningClickerSurvivesRebuild(UITestCase):
