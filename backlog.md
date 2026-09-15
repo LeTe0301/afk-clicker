@@ -109,7 +109,9 @@ Bugs and residue:
       ordering, test hygiene, stale counts. The startup-ordering gap had already closed
       (since `54a3b65`, `_build_ui()` runs `_sync_settings()` before the hotkey restore),
       so it is documented, not moved. The stale counts were already corrected on GitHub.
-- [ ] G#18 / GH#22 — Review residue from PR #21. The `bind_all` comment is done; still missing: a test that a Button click drops a field's focus.
+- [x] **Done 2026-09-15, PR #77.** G#18 / GH#22 — Review residue from PR #21. The `bind_all`
+      comment landed with PR #30; the test clicks the sidebar's real "Add current game"
+      `Button` (round 1 built a throwaway one, missing that the sidebar stays viewable).
 - [ ] G#21 / GH#32 — Review residue from the updater PRs: a hex check in `fetch_checksums`, the zip comment, the superseded-worker race test, and `Store.save` swallowing `OSError`.
 - [x] **Done 2026-09-15, PR #72.** G#36 / GH#64 — Ask the person to send `update.log`
       (prefilled GitHub issue) when an in-app update didn't finish. Follow-up to G#35,
@@ -516,7 +518,7 @@ releases**. Keep a second display for load loops — see Housekeeping.
 
 ## Session handoff — 2026-09-15 (continued)
 
-Main is at `691c42a` (item 1 merged since, PR #74 → `c142eee`; item 2, PR #76 → `c2db91d`; 0.7.0 cut from `b853890`). Everything below is queued, in the order to work it, one cycle
+Main is at `691c42a` (item 1 merged since, PR #74 → `c142eee`; item 2, PR #76 → `c2db91d`; item 3, PR #77 → `c1c7977`; 0.7.0 cut from `b853890`). Everything below is queued, in the order to work it, one cycle
 at a time (product-manager → developer → reviewer → PR → independent PR review →
 merge), auto-continuing to the next after each merge unless told to stop:
 
@@ -533,7 +535,7 @@ merge), auto-continuing to the next after each merge unless told to stop:
    `_sync_settings`/`_drain_ui` run (move it or document why it can't move);
    `test_malformed_input_yields_none` never actually exercises a `None` blob because
    of `blob if blob else {}`.
-3. **G#18 / GH#22 — missing Button click-away test**, plus a one-sentence comment on
+3. ~~**G#18 / GH#22 — missing Button click-away test**~~ **Done, PR #77.**, plus a one-sentence comment on
    `_maybe_drop_focus` noting `root.bind_all("<Button-1>", ...)` is interpreter-wide
    (fires in every future `Toplevel`, including the G#36 dialog).
 4. **G#21 / GH#32 — updater hardening residue.** A hex check in `fetch_checksums`; a
