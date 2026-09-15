@@ -151,6 +151,21 @@ DEFAULT_CLICK_MS = 650      # 12 ticks (600 ms) is Java's full sword-sweep charg
 DEFAULT_EAT_EVERY_S = 75    # attacking burns ~1 food point / 20 s; flesh restores 4
 DEFAULT_EAT_HOLD_S = 2.0
 
+# Below this, click_ms - jitter_ms has dropped to 10 ticks (500 ms) or
+# worse -- the ticket's own cited failure case (G#22): 84% charge, 76%
+# damage, no sweep. Between this and DEFAULT_CLICK_MS the one-tick
+# quantization margin DEFAULT_CLICK_MS banks on is already gone (11
+# ticks/550 ms) -- a hit can still often land as a full sweep, but there
+# is no margin left, hence a hint rather than nothing, and MUTED rather
+# than BAD.
+MIN_SWEEP_BAD_MS = 550
+
+# Exact copy (docs/design.md): both name "Java" explicitly, since the app
+# cannot tell a Java window from a Bedrock one and an unscoped claim would
+# be flatly false for a Bedrock player, who has no sweep cooldown to lose.
+SWEEP_HINT_MUTED = "Java sweeps may miss"
+SWEEP_HINT_BAD = "Java sweeps likely fail"
+
 # One content width for the whole column. Everything -- the status pill, the
 # cards, the segmented control -- is measured off this so nothing nests
 # inward by a few pixels and breaks the vertical edge the eye follows.
@@ -1368,6 +1383,8 @@ PROFILES = [
         "defaults": {"click_ms": 650, "jitter_ms": 0, "autostop_min": 0,
                      "button": "left", "eat_mode": "pause",
                      "eat_every": 75, "eat_hold": 2.0},
+        "min_sweep_ms": DEFAULT_CLICK_MS,   # G#22: the only profile whose
+                                             # numbers this hint applies to
     },
     {
         "id": "global",
@@ -1378,6 +1395,7 @@ PROFILES = [
         "defaults": {"click_ms": 250, "jitter_ms": 0, "autostop_min": 0,
                      "button": "left", "eat_mode": "off",
                      "eat_every": 75, "eat_hold": 2.0},
+        "min_sweep_ms": None,
     },
 ]
 GENERIC_DEFAULTS = dict(PROFILES[-1]["defaults"])
@@ -1387,7 +1405,8 @@ def make_profile(game_id, name, title_fragment):
     """A game the user added from whatever window was in front."""
     return {"id": game_id, "name": name, "titles": (title_fragment.lower(),),
             "eating": False, "note": "Added from the active window.",
-            "defaults": dict(GENERIC_DEFAULTS), "custom": True}
+            "defaults": dict(GENERIC_DEFAULTS), "custom": True,
+            "min_sweep_ms": None}
 
 
 
@@ -2168,7 +2187,7 @@ class SettingsItem(tk.Canvas):
 class Row(tk.Frame):
     """Label on the left, control on the right -- the NVIDIA settings-table look."""
 
-    def __init__(self, parent, label, s, hint=None):
+    def __init__(self, parent, label, s, hint=None, mutable_hint=False):
         super().__init__(parent, bg=CARD)
         # A fixed-width label column via grid, not pack -- the control then
         # starts at a constant offset from the row's left edge regardless of
@@ -2181,12 +2200,33 @@ class Row(tk.Frame):
         tk.Label(text, text=label, bg=CARD, fg=INK, anchor="w", justify="left",
                  wraplength=int(ROW_LABEL_W * s),
                  font=("Segoe UI", int(9.5 * s))).pack(fill="x")
+        self.hint_label = None
         if hint:
             tk.Label(text, text=hint, bg=CARD, fg=MUTED, anchor="w", justify="left",
                      wraplength=int(ROW_LABEL_W * s),
                      font=("Segoe UI", int(8 * s))).pack(fill="x")
+        elif mutable_hint:
+            # G#22/GH#33: built once, here, empty and unpacked -- not lazily
+            # on the first set_hint() call -- so a caller that reaches
+            # set_hint()/clear_hint() (or reads self.hint_label directly)
+            # right after construction never hits a missing attribute. Every
+            # *existing* hint= call site (jitter, auto-stop) is untouched by
+            # this branch -- hint_label stays None for them, same as today.
+            self.hint_label = tk.Label(
+                text, bg=CARD, anchor="w", justify="left",
+                wraplength=int(ROW_LABEL_W * s), font=("Segoe UI", int(8 * s)))
         self.control = tk.Frame(self, bg=CARD)
         self.control.grid(row=0, column=1, sticky="w")
+
+    def set_hint(self, text, colour):
+        """Show (or retext/recolour) the mutable hint this Row opted into
+        via mutable_hint=True. Packs after the row's own main label, same
+        slot a static hint= string occupies at construction."""
+        self.hint_label.config(text=text, fg=colour)
+        self.hint_label.pack(fill="x")
+
+    def clear_hint(self):
+        self.hint_label.pack_forget()
 
 
 class NumBox(tk.Frame):
@@ -2293,6 +2333,17 @@ class AfkAutoclicker:
         self._save_failed = False      # last self.store.save()/put_game()
                                         # outcome seen by _note_save() -- see
                                         # there
+        self._sweep_hint_pending = None    # (text, colour) or None -- the
+                                        # Interval row's dynamic hint state
+                                        # as last computed by
+                                        # _note_sweep_hint(), painted by
+                                        # _paint_sweep_hint() (G#22/GH#33)
+        self._sweep_hint_visible = False    # whether that hint was actually
+                                        # showing the last time it was
+                                        # painted -- used only to detect a
+                                        # genuine visibility transition, so
+                                        # _request_pane_fill("clicking") is
+                                        # not called on every keystroke
         self._log_dialog = None        # the update-log Toplevel (G#36/GH#64),
                                         # if one is currently open -- None
                                         # otherwise. It IS a genuine child of
@@ -2694,6 +2745,14 @@ class AfkAutoclicker:
         else:
             self._build_content(s)
             self._select(self.current, persist=False)
+            # G#22/GH#33: replay the Interval row's dynamic hint the same
+            # way the settings branch above replays the save-failure notice
+            # -- _select()'s own tail _persist() call just recomputed
+            # self._sweep_hint_pending but, per _note_sweep_hint()'s own
+            # docstring, could not paint it (self._rebuilding is still True
+            # here -- see _rebuild_ui()). self.interval_row is fresh now, so
+            # painting is safe.
+            self._paint_sweep_hint()
 
         # The status pill starts hard-coded "OFF" in its own constructor --
         # resync it to the real, unchanged self.running/self.registered_
@@ -2915,8 +2974,9 @@ class AfkAutoclicker:
         # No "Clicking" section header here -- the tab label above already
         # names the pane (docs/design.md's redundant-header decision).
         cl = card(self.clicking_pane, s)
-        r = Row(cl, "Interval", s); r.pack(fill="x")
-        self.click_ms = NumBox(r.control, DEFAULT_CLICK_MS, "ms", s)
+        self.interval_row = Row(cl, "Interval", s, mutable_hint=True)
+        self.interval_row.pack(fill="x")
+        self.click_ms = NumBox(self.interval_row.control, DEFAULT_CLICK_MS, "ms", s)
         self.click_ms.pack()
         r = Row(cl, "Random jitter", s, hint="spreads the rhythm so it is not exact")
         r.pack(fill="x", pady=(int(6 * s), 0))
@@ -3450,6 +3510,62 @@ class AfkAutoclicker:
             self._note_save(self.store.save())
         self._persist()
 
+    def _note_sweep_hint(self, profile, values):
+        """G#22/GH#33: compute the Interval row's dynamic hint from
+        _persist()'s own already-_num()-coerced values (docs/spec.md
+        "Proposed approach" item 4) -- the hint can never disagree with
+        what the worker actually runs with, because it never re-reads the
+        fields itself. Reused, unmodified, by every _persist() trigger: a
+        keystroke, a profile switch (_select()'s own tail call), and a
+        theme/scale rebuild (_rebuild_ui()'s own leading call).
+
+        Only *records* self._sweep_hint_pending unconditionally; the actual
+        widget touch is deferred whenever self._rebuilding is True, mirroring
+        _note_save()/_paint_save_notice() exactly (this feature's own
+        Orchestrator correction, restating G#21/PR #78's Defect 1):
+        _rebuild_ui()'s leading self._persist() call runs while the old
+        Interval row is being (or is about to be) torn down, and the new one
+        does not exist yet -- _build_ui()'s own tail (see _paint_sweep_hint's
+        one other caller) is the safe point once a fresh one does."""
+        min_sweep = profile["min_sweep_ms"]
+        effective_min = max(50, values["click_ms"] - values["jitter_ms"])
+        if min_sweep is not None and effective_min < min_sweep:
+            if effective_min < MIN_SWEEP_BAD_MS:
+                self._sweep_hint_pending = (SWEEP_HINT_BAD, BAD)
+            else:
+                self._sweep_hint_pending = (SWEEP_HINT_MUTED, MUTED)
+        else:
+            self._sweep_hint_pending = None
+        if not self._rebuilding:
+            self._paint_sweep_hint()
+
+    def _paint_sweep_hint(self):
+        """The one place that actually shows/hides/retexts the Interval
+        row's dynamic hint, from whatever _note_sweep_hint() last computed.
+        Safe to call once the current widget tree exists -- called from
+        there directly (not mid-rebuild) and, unconditionally, from
+        _build_ui()'s own tail once _build_content()/_select() have just
+        (re)built self.interval_row fresh.
+
+        _request_pane_fill("clicking") only fires on an actual shown/hidden
+        *transition* (self._sweep_hint_visible), not on every keystroke --
+        most keystrokes just change text/colour within an already-shown or
+        already-hidden state -- and only while the Clicking tab is actually
+        visible (_select()'s own identical guard, :3445): reading a hidden
+        pane's geometry is the exact hazard _on_eat_card_settled()'s own
+        docstring warns about."""
+        state = self._sweep_hint_pending
+        now_visible = state is not None
+        if now_visible:
+            text, colour = state
+            self.interval_row.set_hint(text, colour)
+        else:
+            self.interval_row.clear_hint()
+        if now_visible != self._sweep_hint_visible:
+            self._sweep_hint_visible = now_visible
+            if self._content_tab == "clicking":
+                self._request_pane_fill("clicking")
+
     def _persist(self):
         if self._loading:
             return
@@ -3463,6 +3579,7 @@ class AfkAutoclicker:
             "eat_every": self._num(self.eat_every, DEFAULT_EAT_EVERY_S, 5),
             "eat_hold": self._num(self.eat_hold, DEFAULT_EAT_HOLD_S, 0.5),
         }
+        self._note_sweep_hint(profile, values)
         if profile.get("custom"):
             values["_profile"] = {"id": profile["id"], "name": profile["name"],
                                   "title": profile["titles"][0]}
