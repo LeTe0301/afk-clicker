@@ -98,14 +98,17 @@ Bugs and residue:
       keysyms (`0x1008FFxx`) sit above that.
 - [ ] G#40 / GH#75 — macOS flake: `Sidebar.test_running_dot_and_follow` read `running`
       as False on PR #74's first macOS leg (run 34989787219); the same commit's re-run
-      was green. Suspected to be the same class as G#39: a periodic `_poll_games`
+      was green. **Hit again on PR #76 (run 34996063044) — 2 of the last 7 macOS legs.** Suspected to be the same class as G#39: a periodic `_poll_games`
       scan landing inside the test's own `root.update()` after `settle()` only
       waited for the startup scan. Unconfirmed; details on the ticket.
 - [x] **Done 2026-09-15, PR #73.** G#9 / GH#11 — macOS input-permission guard: residue
       from the review of PR #4 (5 small items: `selftest()`'s unconditional listener
       construction, a load-bearing comment, a corrected darwin hint string, a
       previously-self-skipping darwin test now exercised via a `find_library` patch).
-- [ ] G#10 / GH#12 — Review residue: roadmap line, startup ordering, test hygiene, stale counts.
+- [x] **Done 2026-09-15, PR #76.** G#10 / GH#12 — Review residue: roadmap line, startup
+      ordering, test hygiene, stale counts. The startup-ordering gap had already closed
+      (since `54a3b65`, `_build_ui()` runs `_sync_settings()` before the hotkey restore),
+      so it is documented, not moved. The stale counts were already corrected on GitHub.
 - [ ] G#18 / GH#22 — Review residue from PR #21. The `bind_all` comment is done; still missing: a test that a Button click drops a field's focus.
 - [ ] G#21 / GH#32 — Review residue from the updater PRs: a hex check in `fetch_checksums`, the zip comment, the superseded-worker race test, and `Store.save` swallowing `OSError`.
 - [x] **Done 2026-09-15, PR #72.** G#36 / GH#64 — Ask the person to send `update.log`
@@ -513,7 +516,7 @@ releases**. Keep a second display for load loops — see Housekeeping.
 
 ## Session handoff — 2026-09-15 (continued)
 
-Main is at `691c42a` (item 1 merged since, PR #74 → `c142eee`). Everything below is queued, in the order to work it, one cycle
+Main is at `691c42a` (item 1 merged since, PR #74 → `c142eee`; item 2, PR #76 → `c2db91d`; 0.7.0 cut from `b853890`). Everything below is queued, in the order to work it, one cycle
 at a time (product-manager → developer → reviewer → PR → independent PR review →
 merge), auto-continuing to the next after each merge unless told to stop:
 
@@ -524,7 +527,7 @@ merge), auto-continuing to the next after each merge unless told to stop:
    `"Key True"`; a negative or 200-char `vk`/`char` renders verbatim; a 4-key payload
    is silently truncated (`records[:MAX_CHORD]`) rather than rejected — prefer
    `if len(raw) > MAX_CHORD: return None`.
-2. **G#10 / GH#12 — review residue grab-bag.** ROADMAP.md's schema-version item
+2. ~~**G#10 / GH#12 — review residue grab-bag.**~~ **Done, PR #76.** ROADMAP.md's schema-version item
    should say hotkey is the first structured value `settings.json` ever carried;
    `AfkAutoclicker.__init__` arms the global listener before `_timers` exists / before
    `_sync_settings`/`_drain_ui` run (move it or document why it can't move);
