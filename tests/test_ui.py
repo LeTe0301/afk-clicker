@@ -18,6 +18,48 @@ from .context import app, kb, needs_display, hotkey
 if app is not None:
     import tkinter as tk
 
+# --- ac-39 diagnostic instrumentation (G#39/GH#69), temporary and
+# throwaway: gated behind AC39_DIAG so it is completely inert unless a CI
+# run opts in. Never intended to reach main -- see the draft PR this ships
+# with. ---
+_AC39_DIAG = os.environ.get("AC39_DIAG") == "1"
+
+
+def _ac39_log(msg):
+    if not _AC39_DIAG:
+        return
+    print(f"[ac39] {time.monotonic():.6f} "
+          f"{threading.current_thread().name} {msg}", file=sys.stderr, flush=True)
+
+
+if _AC39_DIAG and app is not None:
+    _ac39_orig_poll_games = app.AfkAutoclicker._poll_games
+    _ac39_orig_mark_running = app.AfkAutoclicker._mark_running
+
+    def _ac39_poll_games(self):
+        n = getattr(self, "_ac39_poll_count", 0)
+        self._ac39_poll_count = n + 1
+        tag = "initial" if n == 0 else "periodic"
+        _ac39_log(f"_poll_games entry #{n} ({tag}) app={id(self)}")
+        result = _ac39_orig_poll_games(self)
+        thread = getattr(self, "_poll_thread", None)
+        if thread is not None:
+            _ac39_log(f"poll thread start #{n} name={thread.name}")
+
+            def _ac39_watch(th=thread, idx=n):
+                th.join()
+                _ac39_log(f"poll thread finish #{idx} name={th.name}")
+
+            threading.Thread(target=_ac39_watch, daemon=True).start()
+        return result
+
+    def _ac39_mark_running(self, running_ids):
+        _ac39_log(f"_mark_running entry value={running_ids!r} app={id(self)}")
+        return _ac39_orig_mark_running(self, running_ids)
+
+    app.AfkAutoclicker._poll_games = _ac39_poll_games
+    app.AfkAutoclicker._mark_running = _ac39_mark_running
+
 
 class FakeMouse:
     """Records what the loop asked for instead of moving a real pointer."""
@@ -121,6 +163,7 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
         while time.monotonic() < deadline:
             self.root.update()
             if hasattr(self.ui, "_seen_running"):
+                _ac39_log(f"settle() returns seen={self.ui._seen_running!r}")
                 return
             time.sleep(0.02)
         self.fail("the startup game scan never landed")
@@ -3851,13 +3894,17 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
         original_poll_games = self.ui._poll_games
         self.ui._poll_games = lambda: None
         try:
+            _ac39_log(f"test manual queue-put target={target!r}")
             self.ui._ui(self.ui._mark_running, target)
             self.ui._rebuild_ui()
+            _ac39_log("test _rebuild_ui() returned")
             self.ui._drain_ui()
+            _ac39_log(f"test final drain done, seen={getattr(self.ui, '_seen_running', None)!r}")
             self.assertEqual(
                 self.ui._seen_running, target,
                 "a queued _mark_running() scan result should survive a "
                 "rebuild, not be silently dropped by the old _ui_queue swap")
+            _ac39_log("test assertion passed")
         finally:
             self.ui._poll_games = original_poll_games
 

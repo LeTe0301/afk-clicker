@@ -60,6 +60,28 @@ jobs:
       # pynput resolves its X11 backend at import time and raises without a
       # display, so on Linux the whole suite needs one -- not just the window
       # tests. Windows and macOS have a window server either way.
+      # TEMPORARY (G#39/GH#69 diagnostic, never to be merged): loop just the
+      # flaky test class many times on macOS only, with diagnostics on, so a
+      # single draft-PR run captures either a second _poll_games/
+      # _mark_running landing inside the exposure window or nothing -- see
+      # docs/spec.md's "Evidence plan". Runs before the normal suite step so
+      # its own timing isn't perturbed by anything the full suite leaves
+      # behind, and `|| fail=$((fail+1))` keeps one bad iteration from
+      # aborting the loop and losing later iterations' logs.
+      - name: ac-39 diagnostic loop (macOS only, temporary)
+        if: runner.os == 'macOS'
+        timeout-minutes: 20
+        env:
+          CI: "true"
+          AC39_DIAG: "1"
+        run: |
+          fail=0
+          for i in $(seq 1 40); do
+            echo "=== ac39 diag run $i ==="
+            python -m unittest tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild -v || fail=$((fail+1))
+          done
+          echo "ac39 diagnostic loop: $fail/40 iterations failed"
+
       - name: Run the test suite (Linux)
         if: runner.os == 'Linux'
         env:
