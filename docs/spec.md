@@ -238,11 +238,23 @@ scratch copy.
 - [ ] Given the sabotage (`_ui_queue` swap reintroduced in `_rebuild_ui()`), when the fixed test is
       run 3-5x, then it fails every time with the original `'minecraft'`-missing assertion —
       proving the fix does not blind the guard.
-- [ ] Given the draft-PR diagnostic run on macOS CI, when its log is inspected, then it either (a)
-      shows a second `_poll_games`/`_mark_running` invocation landing inside the exposure window
-      confirming H1, or (b) shows no such invocation, in which case H1 is not confirmed and the fix
-      direction must be revisited before merging (do not ship the test change speculatively against
-      contrary evidence).
+- [x] ~~Given the draft-PR diagnostic run on macOS CI, when its log is inspected, then it either (a)
+      confirms H1, or (b) shows no such invocation, in which case the fix direction must be
+      revisited before merging.~~ **Revised by the orchestrator, 2026-09-15, after PR #71**
+      (run 34942811672): 0/40 failures in isolation, no poll thread alive at any queue-put, max scan
+      0.481 s. That is *absence* of the triggering condition (the recorded failure was inside a
+      loaded full-suite run), not evidence against H1, and chasing it under full-suite load would
+      cost many macOS runs for a ~1-in-a-dozen flake. Replaced with:
+- [ ] The fix ships as a **defensive** closure of the code-established race path, and every place
+      that describes it (test comment, `docs/implementation.md`, `backlog.md`) says H1 is
+      *likely but unconfirmed on macOS*, citing PR #71's result.
+- [ ] If the bounded join leaves `_poll_thread` still alive, the test **fails loudly** with a
+      message naming that condition (not a silent fall-through into the same race), so a future
+      recurrence itself says whether H1 was the trigger. The sabotage criterion above must still
+      hold.
+- [ ] G#39 stays open in `backlog.md` as "mitigated, trigger unconfirmed" until the macOS leg has
+      stayed clean for a while; a recurrence with the fix in place means H1 was not the (only)
+      cause.
 - [ ] The full existing suite still passes on Linux/Xvfb after the change (no regression to any
       other test in `QueuedNonResyncedUpdatesSurviveARebuild` or elsewhere).
 - [ ] No instrumentation/diagnostic code reaches `main` or the `hotfix/ac-39/...` branch — the

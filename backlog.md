@@ -115,6 +115,32 @@ Bugs and residue:
       entirely, and stubbing it to a *distinguishable* value fails 5/5 on correct
       code, because an instant stub makes the second scan land deterministically
       first.
+      **Mitigated (PR #70), trigger unconfirmed.** `e60a6aa`+ closes a second,
+      broader code-established gap the `_poll_games` stub above can't reach:
+      `setUp()`'s own construction (not just a rebuild) starts a real scan and
+      arms a 5000ms self-rescheduling timer that captured the *original*
+      `_poll_games` before the stub ever exists, so a scan already in flight from
+      `setUp()` could still land between the test's manual queue-put and its
+      drain (`tests/test_ui.py`'s "Round 3" comment). The fix cancels that timer
+      and joins the real poll thread (now failing loudly, not silently
+      proceeding, if it's still alive after 5s) before the manual queue-put — see
+      `docs/implementation.md`. This is real and sabotage-verified (two
+      independently-designed sabotages, both 5/5 red; an independent race-class
+      reproduction, old critical section red / new one green, 10/10 each) —
+      **but that this was actually the trigger behind the real macOS recurrences
+      above is NOT confirmed.** A dedicated diagnostic (draft PR #71, run
+      34942811672) looped the fixed-for-Round-3 test 40x in isolation on macOS:
+      0/40 failures, no poll thread ever alive at a manual queue-put, no periodic
+      `_poll_games` firing inside the test, every real scan finishing well under
+      0.5s (max 0.481s, median 0.162s) — nowhere near the ~5s stall this
+      hypothesis needs. That's absence of the triggering condition in an isolated
+      loop (the historical failures happened inside a loaded full-suite run, a
+      different timing profile), not evidence against the mechanism itself, so
+      this ships as a defensive closure of a real race path, not a claimed fix of
+      G#39. Left open: **a recurrence with this fix in place means the periodic-
+      timer/in-flight-poller hypothesis (H1) was not the (only) cause**, and the
+      investigation should resume from the loaded-full-suite condition rather
+      than re-deriving H1 from scratch.
 - [x] **The test suite intermittently aborts at interpreter shutdown** —
       `Tcl_AsyncDelete: async handler deleted by the wrong thread`, exit 134, and
       unittest's summary never prints, so a run that passed looks like a failure.

@@ -61,13 +61,18 @@ timer) is ruled out on inspection: `_redraw()`'s `inner.update_idletasks()`
 semantics, not the `after(5000, ...)` timer event — verified by reading
 `afk_clicker.py:2304-2325`'s own note, not just cited from the spec.
 
-**Not established from code alone (awaiting macOS CI evidence):** whether
-this is actually the trigger on the real macOS runs that produced G#39/GH#69,
-as opposed to some other timing quirk. The spec's own evidence plan (a
-throwaway draft PR off `main` with print-based diagnostics, opened, read, and
-closed unmerged) is the only way to confirm this on the real hardware — see
-"What was not done in this pass" below for why that step was not executed
-here.
+**Not established from code alone — now has macOS evidence, and it's
+negative-in-isolation (Round 2, PR #71):** whether this mechanism is actually
+the trigger behind the real G#39/GH#69 macOS recurrences remains
+**unconfirmed**. The diagnostic draft PR (#71, run 34942811672) looped this
+exact test 40x in isolation on macOS: 0/40 failures, no poll thread ever
+alive at a manual queue-put, no periodic `_poll_games` firing inside the
+target test, every real scan finishing well under 0.5s (max 0.481s, median
+0.162s) — nowhere near the ~5s stall H1 requires. That is absence of the
+triggering condition *in an isolated loop*, not evidence against the
+mechanism itself (the historical failures happened inside a loaded
+full-suite run, a materially different timing profile) — see "Round 2" below
+for how this changed the fix's framing and wording throughout.
 
 ## Reuse audit (what `on_close()`/`_rebuild_ui()` already do, reused as-is)
 - **Timer cancellation pattern** — `on_close()` (`afk_clicker.py:3446-3451`)
@@ -82,8 +87,10 @@ here.
   (`afk_clicker.py:3481-3484`) joins `self._poll_thread` with `timeout=2.0`
   if it's alive, with a comment explaining the bound (a stuck
   `Xlib.display.Display()` connection, observed roughly 1 scan in a couple
-  hundred). The fix reuses the exact same `timeout=2.0` bound and the same
-  "check `is_alive()` first" guard, per the spec's own citation.
+  hundred). The fix reuses the same "check `is_alive()` first, then bounded
+  `join()`" shape, but **not** the same 2.0s bound — see "Round 2" below for
+  why the bound was widened to 5.0s and paired with a loud failure instead of
+  a silent proceed-anyway.
 - **`getattr(..., None)` defensiveness** — spec's edge-case note ("can't
   happen for this test class, but guard anyway") matched with
   `getattr(self.ui, "_poll_thread", None)`, same style as `on_close()`'s own
@@ -274,13 +281,14 @@ File: `/tmp/claude-1000/-home-dev-projects-afk-clicker/f462b60e-d499-494f-ac9e-f
   stage of this pipeline.
 
 ## Known limitations
-- The bounded 2.0s join can still time out on the documented
-  ~1-in-a-couple-hundred stuck-`Display()` case; per the spec's own edge
-  case, this fix reduces exposure from "unbounded" to "at most 2s of
-  continued real risk," it does not eliminate it outright.
-- H1 remains code-established but macOS-CI-unconfirmed until the draft-PR
-  diagnostic step (deliverable B) is actually run — see "Deviations from
-  spec" above.
+- The bounded 5.0s join (Round 2; was 2.0s in Round 1 of this fix) can still
+  time out on a genuinely stuck scan; unlike Round 1, this now fails the test
+  loudly instead of proceeding into the race — see "Round 2" below.
+- H1 (a slow macOS `osascript` stall arms a still-running poller) is
+  code-established and sabotage-verified as a real, closed race path, but
+  is **not confirmed** as G#39's actual real-world trigger — PR #71's
+  isolated-loop evidence is negative (0/40, see "Round 2"). A recurrence of
+  G#39 with this fix in place means H1 was not the (only) cause.
 
 ## How to verify locally
 ```
@@ -303,3 +311,125 @@ AC39_DIAG=1 DISPLAY=:99 <venv>/bin/python -m unittest tests.test_ui.QueuedNonRes
 Run in this session: all of the above (baseline, 20x fixed-test loop, 5x
 sabotage, full suite, and the diagnostic patch's apply-check + one Linux run)
 — see "Local verification" and "Deliverable B" sections for actual output.
+
+## Round 2 (PR #70 review / PR #71 macOS evidence)
+
+**What changed the framing:** the reviewer's testing pass (`docs/test-review.md`)
+confirmed the code change itself is correct and sabotage-verified — two
+independently-designed sabotages (the `_ui_queue` swap, and a separate
+"discard queued closures without executing them" variant) both still fail
+5/5, and an independent race-class reproduction (old critical section red,
+new one green, 10/10 each, against a real injected in-flight `_poll_thread`)
+confirmed the mechanism directly. The blocker (Finding #1, "changes
+requested") was that the spec's own AC3 required macOS CI to confirm H1
+before shipping, and the diagnostic evidence that came in (draft PR #71, run
+34942811672) was negative in isolation: 0/40 failures, no poll thread ever
+alive at a manual queue-put, no periodic `_poll_games` firing inside the
+target test, max scan 0.481s / median 0.162s — nowhere near the ~5s stall H1
+needs. The orchestrator revised `docs/spec.md`'s acceptance criteria in
+response (struck AC3, replaced with: ship as a defensive closure with H1
+explicitly hedged everywhere, fail loudly instead of silently racing on a
+timeout, keep G#39 open as "mitigated, trigger unconfirmed").
+
+**Changes made this round, all in `tests/test_ui.py` plus docs:**
+1. **Hedged wording** in the test's inline comment (added a "Round 4 (PR #70
+   review / PR #71 macOS evidence, hedge)" paragraph — the "Round 3" text
+   itself was also softened from stating the mechanism as fact ("the
+   periodic timer fires a SECOND real scan") to conditional phrasing ("IF
+   that first scan takes long enough ... could fire"), plus the new
+   paragraph spells out PR #71's numbers and states H1 as "likely but
+   UNCONFIRMED"), in `docs/implementation.md` (this file — see the "Root
+   cause" and "Known limitations" sections above), and in `backlog.md`'s
+   G#39 entry (now says "Mitigated (PR #70), trigger unconfirmed", stays
+   `- [ ]` open, and states explicitly that a recurrence with the fix in
+   place means H1 was not the (only) cause).
+2. **Loud failure on a timed-out join.** Previously: `poll_thread.join(timeout=2.0)`
+   then proceed regardless of whether the thread was still alive (silently
+   walking into the very race this fix exists to close, in the rare case the
+   bound is hit). Now: `poll_thread.join(timeout=5.0)`, and if
+   `poll_thread.is_alive()` afterward, `self.fail("real game poller still
+   running after 5s; cannot isolate the queued update from a real scan
+   landing later -- see G#39")` before ever reaching the manual queue-put.
+   **Bound choice, decided and justified (per the coordinator's ask,
+   `self.fail` vs. a longer wait-then-fail):** widened from `on_close()`'s
+   2.0s to 5.0s, matching `settle()`'s own docstring, which documents a
+   *legitimately slow, not stuck*, cold `osascript` start taking close to 5s
+   on a loaded macOS runner — the same real-world timing profile this whole
+   investigation is about. `on_close()`'s shorter 2.0s bound optimizes for a
+   fast app shutdown and is content to abandon a still-running scan
+   (nothing downstream depends on it finishing); this test's whole point is
+   the opposite — it needs the poller genuinely silenced, not merely
+   bounded-then-ignored — so a bound that would routinely time out on the
+   very stall this fix is meant to tolerate would turn "generous enough to
+   let a slow-but-real scan land" into "reliably fails on exactly the
+   scenario H1 describes," which is worse than the race it replaces. `fail`
+   over `skip`: a skip would hide a genuinely stuck poller from CI's summary
+   the same way a proceed-anyway silently hides it from the assertion;
+   `self.fail` with a message naming the condition is the only outcome that
+   surfaces the problem and lets a future recurrence say plainly whether a
+   still-running poller (H1) was the trigger, rather than reproducing the
+   same ambiguous `'minecraft'`-missing assertion with no diagnosis.
+3. Re-verified everything the sabotage/regression criteria require, plus a
+   new sabotage of the loud-fail path itself (see below).
+
+### Re-verification (Round 2)
+All run against the real working tree, `DISPLAY=:99`, same venv as before.
+- Sabotage (`_ui_queue = queue.SimpleQueue()` reinserted at
+  `afk_clicker.py:2367`), fixed test x5: **5/5 failed**, identical
+  `AssertionError: ... 'minecraft' ...` message (confirmed it was the
+  original assertion, not the new loud-fail message) — reverted via
+  `git checkout -- afk_clicker.py`, confirmed clean.
+- Fixed test, 20x back-to-back: **20/20 passed**.
+- Full suite: `Ran 314 tests ... OK (skipped=10)` — identical to baseline,
+  no regression.
+- **New: sabotage of the loud-fail path itself.** Temporarily replaced
+  `self.ui._poll_thread` (right before the neutralization block) with a
+  freshly-started thread that sleeps 8.0s — deliberately longer than the new
+  5.0s bound, simulating a genuinely stuck (not just slow) scan. Ran the
+  test once:
+  ```
+  AssertionError: real game poller still running after 5s; cannot isolate
+  the queued update from a real scan landing later -- see G#39
+  FAILED (failures=1)
+  ```
+  The new message appeared exactly as designed (test took ~7.3s, consistent
+  with the 5.0s join bound plus setup/teardown overhead). Reverted the
+  injected sabotage immediately after; re-ran the class once more to confirm
+  it was back to a clean `OK` before re-running the full suite.
+
+### Changes by file (Round 2)
+- `tests/test_ui.py` —
+  `QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`:
+  softened the "Round 3" comment's factual claims to conditional phrasing,
+  added a "Round 4" comment paragraph recording PR #71's hedge, and changed
+  `poll_thread.join(timeout=2.0)` (proceed regardless) to
+  `poll_thread.join(timeout=5.0)` followed by `self.fail(...)` if still
+  alive.
+- `docs/implementation.md` — this file: hedged the "Root cause" and "Known
+  limitations" sections, updated the "Reuse audit" bounded-join bullet, added
+  this "Round 2" section.
+- `backlog.md` — G#39/GH#69 entry: added a "Mitigated (PR #70), trigger
+  unconfirmed" paragraph; left the checkbox `- [ ]` (still open), per the
+  coordinator's explicit instruction.
+- `docs/spec.md` — updated by the orchestrator before this round started
+  (not by me); AC3 struck through and replaced, per the diff already present
+  in the file when this round began.
+
+### How to verify locally (Round 2)
+```
+cd /home/dev/projects/afk-clicker
+export DISPLAY=:99
+<venv>/bin/python -m unittest tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild -v   # both ok
+<venv>/bin/python -m unittest discover -s tests -t .                                     # full suite, unchanged baseline
+
+# Sabotage (revert after): insert `self._ui_queue = queue.SimpleQueue()` after
+# `self._timers = {}` in afk_clicker.py's _rebuild_ui() (~line 2367); run the
+# target test 3-5x (fails every time, original assertion); git checkout -- afk_clicker.py
+
+# Loud-fail sabotage (revert after): inside the target test, right before the
+# `try:` block, replace self.ui._poll_thread with a thread that sleeps longer
+# than 5.0s and .start()s it; run the test once (fails with the new "real game
+# poller still running after 5s" message, not the original assertion).
+```
+Run in this session: all of the above — see "Re-verification (Round 2)"
+above for actual output.

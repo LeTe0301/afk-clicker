@@ -3856,20 +3856,49 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
         # macOS runner, settle() (tests/test_ui.py's own UITestCase.settle())
         # calls root.update() in a loop while waiting out a slow initial
         # `osascript` scan, and root.update() (unlike update_idletasks())
-        # does service due timer events -- so if that first scan takes
-        # long enough, the periodic timer fires a SECOND real scan while
-        # still inside setUp(), before this test body runs. settle() returns
-        # as soon as _seen_running first exists, not once no scan is in
-        # flight, so that second scan can still be running, unjoined, when
-        # this method starts. Its own self._ui(self._mark_running, ...) call
-        # is a plain, thread-safe queue put needing no Tk event-loop cycle to
-        # land, so it can clobber this test's manually-queued target between
-        # the put below and the final _drain_ui() exactly like the rebuild's
-        # own rescan used to (Round 1/2), just from a different, earlier
-        # source the _poll_games stub can't reach. Neutralizing it before the
-        # manual put -- cancelling any armed timer and joining the real poll
-        # thread, bounded 2.0s, same as on_close() (afk_clicker.py:3446-3484)
-        # -- closes this gap the same way Round 2 closed the rebuild one.
+        # does service due timer events -- so IF that first scan takes long
+        # enough, the periodic timer could fire a SECOND real scan while
+        # still inside setUp(), before this test body runs, and settle()
+        # returns as soon as _seen_running first exists, not once no scan is
+        # in flight, so that second scan could still be running, unjoined,
+        # when this method starts. Its own self._ui(self._mark_running, ...)
+        # call is a plain, thread-safe queue put needing no Tk event-loop
+        # cycle to land, so it could clobber this test's manually-queued
+        # target between the put below and the final _drain_ui() exactly
+        # like the rebuild's own rescan used to (Round 1/2), just from a
+        # different, earlier source the _poll_games stub can't reach.
+        # Neutralizing it before the manual put -- cancelling any armed
+        # timer and joining the real poll thread, same pattern as on_close()
+        # (afk_clicker.py:3446-3484) -- closes this code-established gap the
+        # same way Round 2 closed the rebuild one.
+        #
+        # Round 4 (PR #70 review / PR #71 macOS evidence, hedge): the path
+        # above is real and closed regardless -- an independent race-class
+        # reproduction (old critical section red, new one green against the
+        # same injected in-flight `_poll_thread`) confirms the mechanism, and
+        # two independently-designed sabotages (queue-object swap, and
+        # discarding queued closures without executing them) both still fail
+        # this test 5/5, so the fix does not blind the guard either way.
+        # What is NOT confirmed: that this was actually the trigger behind
+        # the real G#39 macOS recurrence. A dedicated diagnostic (draft PR
+        # #71, run 34942811672) looped this exact test 40x in isolation on
+        # macOS and found 0/40 failures, no poll thread ever alive at a
+        # manual queue-put, no periodic _poll_games firing inside the test,
+        # and every real scan finishing in well under 0.5s (max 0.481s,
+        # median 0.162s) -- nowhere near the ~5s stall this hypothesis
+        # requires. That is absence of the triggering condition in isolation
+        # (the historical failures happened inside a loaded full-suite run,
+        # a different timing profile), not evidence against the mechanism
+        # itself, but it means H1 -- "a slow macOS osascript stall arms a
+        # still-running poller thread" -- is likely but UNCONFIRMED as
+        # G#39's actual real-world trigger; see backlog.md's G#39 entry and
+        # docs/implementation.md for the same hedge. This fix ships anyway,
+        # as a defensive closure of a real, code-established, sabotage-
+        # verified race path and a strict superset of PR #58's already-
+        # accepted fix -- not as a claimed resolution of G#39 itself. If
+        # G#39 recurs with this fix in place, that will mean H1 was not the
+        # (only) cause and the investigation needs to resume from the
+        # loaded-full-suite condition instead.
         old_seen = self.ui._seen_running   # already set by setUp()'s settle()
         target = {"minecraft"}
         self.assertNotEqual(old_seen, target,
@@ -3882,11 +3911,10 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
             # Neutralize a scan already in flight/armed from setUp() (Round
             # 3/G#39) before queuing the manual value below: cancel the
             # periodic timer if one is still armed, join the real poll
-            # thread if it's still running (bounded, matching on_close()'s
-            # own convention), then drain once more so a genuine, harmless
-            # landing from before this critical section can't be mistaken
-            # for -- or collide with -- the value this test is about to
-            # queue itself.
+            # thread if it's still running, then drain once more so a
+            # genuine, harmless landing from before this critical section
+            # can't be mistaken for -- or collide with -- the value this
+            # test is about to queue itself.
             job = self.ui._timers.pop("poll_games", None)
             if job is not None:
                 try:
@@ -3895,7 +3923,30 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
                     pass
             poll_thread = getattr(self.ui, "_poll_thread", None)
             if poll_thread is not None and poll_thread.is_alive():
-                poll_thread.join(timeout=2.0)
+                # Bounded to 5s, not on_close()'s 2.0s (afk_clicker.py:3481-
+                # 3484): on_close() optimizes for a fast shutdown and is
+                # content to abandon a still-running scan after its shorter
+                # bound, since nothing downstream depends on that scan
+                # landing. This test's whole point is the opposite -- it
+                # needs the poller genuinely silenced before the manual
+                # queue-put, not merely bounded-then-ignored -- so it needs
+                # to tolerate the legitimately slow (not stuck) osascript
+                # stall settle()'s own docstring documents (up to ~5s on a
+                # loaded macOS runner) rather than the rarer, truly-stuck
+                # Display() case on_close()'s shorter bound guards against.
+                # If the thread is STILL alive after that generous a wait,
+                # proceeding anyway would silently walk back into the exact
+                # race this fix exists to close, with no signal about why --
+                # failing loudly here instead means a future recurrence
+                # tells us plainly whether a still-running poller (H1) was
+                # actually the trigger, rather than reproducing the same
+                # ambiguous 'minecraft'-missing assertion with no diagnosis.
+                poll_thread.join(timeout=5.0)
+                if poll_thread.is_alive():
+                    self.fail(
+                        "real game poller still running after 5s; cannot "
+                        "isolate the queued update from a real scan landing "
+                        "later -- see G#39")
             self.ui._drain_ui()
             self.ui._ui(self.ui._mark_running, target)
             self.ui._rebuild_ui()
