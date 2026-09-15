@@ -84,10 +84,17 @@ Bugs and residue:
       rebuild-to-rebuild accumulation is fixed; the final generation's traces (a
       one-time leak, on every close, not a per-rebuild accumulation) are open again,
       same as before this ticket. Left open, narrowed to both windows.
-- [ ] G#5 / GH#7 — Applying a hotkey crashes the process on macOS without Accessibility permission.
-- [ ] G#8 / GH#10 — `registered_hotkey` claims a listener that is not running.
+- [x] **Done 2026-09-15, PR #73 (combined with G#8/G#9 below).** G#5 / GH#7 — Applying
+      a hotkey crashes the process on macOS without Accessibility permission. Needed no
+      code change: already fixed by the commit that introduced `macos_input_permitted()`.
+- [x] **Done 2026-09-15, PR #73.** G#8 / GH#10 — `registered_hotkey` claims a listener
+      that is not running. Round 1 fixed the first-Apply case only; round 2 (caught by
+      PR review, reproduced live) fixed a second Apply after an earlier successful one.
 - [ ] G#7 / GH#9 — `from_json` checks shape but not vocabulary.
-- [ ] G#9 / GH#11 — macOS input-permission guard: residue from the review of PR #4.
+- [x] **Done 2026-09-15, PR #73.** G#9 / GH#11 — macOS input-permission guard: residue
+      from the review of PR #4 (5 small items: `selftest()`'s unconditional listener
+      construction, a load-bearing comment, a corrected darwin hint string, a
+      previously-self-skipping darwin test now exercised via a `find_library` patch).
 - [ ] G#10 / GH#12 — Review residue: roadmap line, startup ordering, test hygiene, stale counts.
 - [ ] G#18 / GH#22 — Review residue from PR #21. The `bind_all` comment is done; still missing: a test that a Button click drops a field's focus.
 - [ ] G#21 / GH#32 — Review residue from the updater PRs: a hex check in `fetch_checksums`, the zip comment, the superseded-worker race test, and `Store.save` swallowing `OSError`.
@@ -493,3 +500,62 @@ releases**. Keep a second display for load loops — see Housekeeping.
    case is low-DPI *and* the 90% step together (`s = 0.675`). `int()` truncates.
 5. A comment asserting a hazard is worth testing before trusting it. Three in this
    codebase claimed safety properties that were simply false.
+
+## Session handoff — 2026-09-15 (continued)
+
+Main is at `691c42a`. Everything below is queued, in the order to work it, one cycle
+at a time (product-manager → developer → reviewer → PR → independent PR review →
+merge), auto-continuing to the next after each merge unless told to stop:
+
+1. **G#7 / GH#9 — `from_json` checks shape but not vocabulary.** Ticket text is
+   essentially the spec already: `hasattr(kb.Key, name)` accepts non-key attributes
+   (should be `name in kb.Key.__members__`); an empty `char` slides through to a
+   `"Key None"` label; a bool `vk` (`isinstance(True, int)` is `True`) becomes
+   `"Key True"`; a negative or 200-char `vk`/`char` renders verbatim; a 4-key payload
+   is silently truncated (`records[:MAX_CHORD]`) rather than rejected — prefer
+   `if len(raw) > MAX_CHORD: return None`.
+2. **G#10 / GH#12 — review residue grab-bag.** ROADMAP.md's schema-version item
+   should say hotkey is the first structured value `settings.json` ever carried;
+   `AfkAutoclicker.__init__` arms the global listener before `_timers` exists / before
+   `_sync_settings`/`_drain_ui` run (move it or document why it can't move);
+   `test_malformed_input_yields_none` never actually exercises a `None` blob because
+   of `blob if blob else {}`.
+3. **G#18 / GH#22 — missing Button click-away test**, plus a one-sentence comment on
+   `_maybe_drop_focus` noting `root.bind_all("<Button-1>", ...)` is interpreter-wide
+   (fires in every future `Toplevel`, including the G#36 dialog).
+4. **G#21 / GH#32 — updater hardening residue.** A hex check in `fetch_checksums`; a
+   comment correction in `_safe_names` (zipfile has stripped `..` since 3.6.2, tar
+   still needs the check); a test for the superseded-worker race in `check_update`;
+   `Store.save()` swallowing `OSError` silently.
+5. **G#22 (Gitea only, no backlog entry existed before now) — warn when the
+   Minecraft interval minus jitter drops below 650 ms.** Real feature, needs a
+   ux-designer pass: a muted hint under the Interval row below 650, bad-colour below
+   550. Java only (Bedrock has no sweep cooldown).
+6. **G#23 / GH#35 — macOS `_dpi_s` ~0.75 renders 5pt labels at 90% UI scale.** Decide:
+   an `fs(base, s)` floor across ~20 font call sites, drop 90% on low-DPI displays, or
+   accept it. Only verifiable via CI, no real Mac here.
+7. **G#4 / GH#6 — click interval measures 25–40% slow on macOS CI.** Investigation
+   only; may end in "accept and document" rather than a code fix. Needs a real Mac to
+   fully resolve.
+8. **G#38 / GH#67 — UI scale follows the window size.** Leo's decisions already
+   recorded as comments on both tickets (2026-09-15): add "Auto" next to the fixed
+   90/100/115/130% steps, Auto is the default; continuous scaling, not snapping to
+   steps; screen-relative reference. Spec must handle: debounce/settle rebuilds during
+   a drag resize (a full `_rebuild_ui()` per pixel is too slow); a font-size floor and
+   rounding for sizes between the tested steps; must not fight `WINDOW_MIN_H` or the
+   icon-rail collapse threshold mid-drag.
+9. **G#12 / GH#14 — calibration suite for the review agent** (ten planted features).
+   Rebase its branch first — check what's stale on it before resuming.
+10. **G#13 / GH#15 — Macros tab story.** Blocked on the settings schema version bump
+    (ROADMAP) — resolve that first, then run as a `story` workflow (multiple
+    features), the largest item on this list. Rebase its branch first.
+
+**Housekeeping done this pass:** closed 5 stale Gitea tickets for already-merged work
+(#33 rename, #34 icon, #35 Windows fix, #36 update-log dialog, #37 top-aligned panes)
+and Story #24's own tracking issue (Gitea #24 / GitHub #36) — none of these had ever
+been closed despite the work being merged days-to-hours earlier, because GitHub's
+"Closes #N" only closes GitHub's own mirror, never the Gitea original. **Check this
+every time a PR merges** — Gitea needs its own explicit close.
+
+**0.6.0 remains the latest release.** `main` has PRs #68/#70/#72/#73 beyond it,
+none cut into a version. Always ask Leo before cutting a release.
