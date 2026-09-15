@@ -618,7 +618,7 @@ class HotkeyWatcher:
 # Deliberately below 1.0: the interface and the per-game settings format are
 # still moving, and semver reserves 1.0.0 for the point where they stop. Until
 # then only the minor and patch parts advance.
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 GITHUB_REPO = "LeTe0301/afk-clicker"
 
 # Which release asset belongs to which platform. Keep in step with the
