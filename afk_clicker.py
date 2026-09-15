@@ -155,7 +155,7 @@ DEFAULT_EAT_HOLD_S = 2.0
 # cards, the segmented control -- is measured off this so nothing nests
 # inward by a few pixels and breaks the vertical edge the eye follows.
 if sys.platform == "darwin":
-    HOTKEY_HELP = "Grant Accessibility permission, then reopen"
+    HOTKEY_HELP = "Grant Accessibility permission, then press Apply again"
 elif sys.platform.startswith("linux"):
     HOTKEY_HELP = "Needs an X11 session (Wayland blocks global keys)"
 else:
@@ -252,8 +252,13 @@ def selftest():
                                                     # the only place this runs
                                                     # against the frozen build
 
-    if macos_input_permitted():
-        kb.Listener(on_press=lambda k: False)     # pynput keyboard backend
+    kb.Listener(on_press=lambda k: False)         # pynput keyboard backend --
+                                                   # __init__ only, never
+                                                   # started here, so this is
+                                                   # safe even without
+                                                   # Accessibility permission
+                                                   # (see macos_input_permitted's
+                                                   # docstring)
     Hotkey({"ctrl"}, [_record(kb.KeyCode.from_char("h"))]).label()
     Hotkey(set(), [_record(kb.Key.f6), _record(kb.Key.f7)]).label()
     icon_root = tk.Tk()                           # Tcl/Tk actually bundled
@@ -333,7 +338,9 @@ def macos_input_permitted():
         if not path:
             return False        # same unanswerable question as the except below
         lib = ctypes.cdll.LoadLibrary(path)
-        lib.AXIsProcessTrusted.restype = ctypes.c_bool
+        lib.AXIsProcessTrusted.restype = ctypes.c_bool   # without this ctypes reads an
+                                                          # int; non-zero garbage in the
+                                                          # upper bytes reads as trusted
         return bool(lib.AXIsProcessTrusted())
     except Exception:
         # On macOS an unanswerable question must read as "not permitted".
@@ -4023,11 +4030,14 @@ class AfkAutoclicker:
             self.hk_listener.stop()
             self.hk_listener = None
         if not macos_input_permitted():
-            # Starting the listener here would trap, not raise. Show the label
-            # and keep the recorded combination so applying it again after the
-            # permission is granted just works.
-            self.registered_hotkey = self.hotkey
-            self.hotkey_label.config(text=self.hotkey.label(), fg=INK)
+            # Starting the listener here would trap, not raise. Keep the
+            # recorded combination (self.hotkey) so applying it again after
+            # the permission is granted works without re-recording -- but
+            # registered_hotkey means a listener is running for this, and
+            # none is (the stop() above already cleared hk_listener even if
+            # an earlier Apply had one running), so it must be reset to None
+            # explicitly here, not just left alone.
+            self.registered_hotkey = None
             self._hotkey_error("Accessibility permission not granted")
             return
         try:

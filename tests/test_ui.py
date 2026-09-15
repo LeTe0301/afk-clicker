@@ -2025,7 +2025,39 @@ class HotkeyPersistence(UITestCase):
             self.ui.apply_hotkey()
             self.root.update()
             self.assertIsNone(self.ui.hk_listener, "a listener was started anyway")
-            self.assertEqual(self.ui.registered_hotkey.label(), "Ctrl + F6")
+            self.assertIsNone(self.ui.registered_hotkey,
+                              "no listener is running, so registered_hotkey must not claim one")
+            self.assertEqual(self.ui.hotkey.label(), "Ctrl + F6",
+                             "the recorded combination must survive so a second Apply works")
+        finally:
+            app.macos_input_permitted = original
+
+    @needs_input_permission
+    def test_registered_hotkey_cleared_on_second_apply_without_permission(self):
+        # G#8's exact bug lived here: a *first* Apply with no prior listener
+        # trivially left registered_hotkey at its already-None default, which
+        # made "don't touch it" look sufficient. A *second* Apply -- after an
+        # earlier successful Apply had started a real listener and set
+        # registered_hotkey -- must also end with registered_hotkey None,
+        # even though hk_listener is already correctly stopped/cleared a few
+        # lines above the permission check.
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
+        self.ui.apply_hotkey()
+        self.root.update()
+        self.assertIsNotNone(self.ui.registered_hotkey, "setup: first Apply should register")
+        self.assertIsNotNone(self.ui.hk_listener, "setup: first Apply should start a listener")
+
+        original = app.macos_input_permitted
+        app.macos_input_permitted = lambda: False
+        try:
+            self.ui.apply_hotkey()
+            self.root.update()
+            self.assertIsNone(self.ui.hk_listener, "the old listener must be stopped")
+            self.assertIsNone(self.ui.registered_hotkey,
+                              "no listener is running any more, so registered_hotkey must not "
+                              "keep claiming the one from the earlier successful Apply")
+            self.assertEqual(self.ui.hotkey.label(), "Ctrl + F6",
+                             "the recorded combination must survive so a third Apply works")
         finally:
             app.macos_input_permitted = original
 
