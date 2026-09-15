@@ -188,3 +188,69 @@ git status --short
 
 ### Deviations from spec / design (round 2)
 None. Both fixes are exactly what `docs/test-review.md` asked for: Defect 1's must-fix (an ordering fix, chosen over a bare `hasattr` guard because the reviewer's own Path B shows `hasattr` alone doesn't close it) and Finding 2's should-fix (one gate method, following the `_apply_scan`/`_apply_check` precedent, exactly as suggested).
+
+## Round 3
+
+CI run 35013166754 failed on macOS only (ubuntu/windows green), with a hard
+interpreter abort rather than an assertion failure:
+```
+test_every_save_call_site_can_trigger_the_notice (tests.test_ui.SaveFailureNotice...) ... Trace/BPT trap: 5
+##[error]Process completed with exit code 133.
+```
+
+**Root cause (verified, not re-derived):** `SaveFailureNotice.test_every_save_call_site_can_trigger_the_notice`'s `via_apply_hotkey` subtest (`tests/test_ui.py:3186-3188` before this round) called the real `self.ui.apply_hotkey()`. On the macOS CI runner, `AXIsProcessTrusted` reports trusted, so `apply_hotkey()` (`afk_clicker.py:4195-4208`) passes its `macos_input_permitted()` guard and reaches `self.hk_listener = HotkeyWatcher(self.hotkey, self.toggle); self.hk_listener.start()` — a real pynput listener, which aborts the process with `SIGTRAP` on that runner regardless of permission, exactly as `HotkeyPersistence`'s class comment (`tests/test_ui.py`) already documents for its own `needs_input_permission`-skipped tests. `apply_hotkey()` only reaches `self._note_save(self.store.save())` (`afk_clicker.py:4214-4215`) *after* `HotkeyWatcher.start()` returns, so patching `macos_input_permitted` to `False` (this class's existing pattern for other subtests) would have made the test pass but never exercise the save at all — it would return early at the permission guard instead.
+
+**Fix (`tests/test_ui.py`, `via_apply_hotkey` only, no production code change):** replaced `app.HotkeyWatcher` with a minimal stub class for the duration of this one nested function call, restored in `finally`:
+```python
+def via_apply_hotkey():
+    # HotkeyPersistence's class comment explains why: apply_hotkey()
+    # only reaches _note_save() after a real HotkeyWatcher.start()
+    # returns, and starting a real listener aborts the process on
+    # macOS regardless of permission. Stub the class for this call
+    # only, so the save is exercised on every platform without ever
+    # starting a real listener.
+    original_watcher = app.HotkeyWatcher
+
+    class _StubHotkeyWatcher:
+        def __init__(self, hotkey, callback):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            pass
+
+    app.HotkeyWatcher = _StubHotkeyWatcher
+    try:
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f9])
+        self.ui.apply_hotkey()
+    finally:
+        app.HotkeyWatcher = original_watcher
+```
+This keeps `apply_hotkey()`'s own save call site genuinely tested on all three platforms — `test-review.md`'s acceptance criterion for this test — without a real listener anywhere, and without skipping the whole test on darwin (which would have dropped coverage of the other four call sites there, the same reasoning `HotkeyPersistence` already applies per-test via `needs_input_permission` rather than at the class level).
+
+**Other new-this-cycle tests checked for the same risk** (`git diff 7d49f83 -- tests/`): `StoreSaveResult`, the rest of `SaveFailureNotice` (all monkeypatch `app.os.replace`, no listener), `AnOlderCheckResultDoesNotOverwriteANewerOne` and `AnOlderNonOfferCheckResultDoesNotOverwriteANewerOffer` (wrap `app.threading.Thread` for `check_update()`/`_check_worker`, unrelated to `HotkeyWatcher`), and `tests/test_updater.py`'s changes (checksum/staging-safety only). None of these call `apply_hotkey()`, construct a `HotkeyWatcher`, or call `capture_hotkey()`. `HotkeyPersistence`'s own pre-existing tests (`test_no_listener_is_started_without_permission`, `test_capture_refuses_without_permission`) already avoid a real listener via the `macos_input_permitted` guard and are untouched by this cycle. No other fix was needed.
+
+### Verification (this round)
+
+Full suite, pynput 1.7.7 venv:
+```
+DISPLAY=:99 <venv>/bin/python -m unittest discover -s tests -t .
+Ran 388 tests in 100.500s
+
+OK (skipped=10)
+```
+Same 388/skipped=10 as round 2 — this round only changes how one existing subtest is exercised, adding no new test.
+
+**Proved the stub is actually in effect, not just that the test still passes** (in-process monkeypatch from a scratchpad script, deleted immediately after use, never touching a repo file): poisoned the *real* `afk_clicker.HotkeyWatcher.start` to raise `AssertionError("real HotkeyWatcher.start() was called")`, then ran `SaveFailureNotice.test_every_save_call_site_can_trigger_the_notice` directly — it still passed, because `via_apply_hotkey`'s stub replaces the class `apply_hotkey()` looks up, so the poisoned real `start()` is never reached. As a negative control, confirmed the reverse: calling `apply_hotkey()` with the real class poisoned the same way but *without* the stub swallows the raised exception in `apply_hotkey()`'s own `except Exception` clause (`afk_clicker.py:4209-4212`) and leaves `_save_failed` at `False` — showing precisely why patching `macos_input_permitted` alone (this round's initially-considered alternative) could never have exercised the save, and confirming the proof methodology itself is meaningful, not just tautological.
+
+### Scope check (round 3)
+```
+git status --short
+ M tests/test_ui.py
+```
+Only `via_apply_hotkey` changed; no production code touched. No scratch file left in the repo tree (verified via `git status --porcelain` after the proof scripts ran and were deleted).
+
+### Deviations from spec / design (round 3)
+None. This is a test-only fix to a CI-environment-specific abort, exactly as directed: stub `HotkeyWatcher` for the one subtest that reaches it, restore in `finally`, keep coverage of the other four call sites and of `HotkeyPersistence`'s existing darwin skip untouched.

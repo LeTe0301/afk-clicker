@@ -3184,8 +3184,30 @@ class SaveFailureNotice(UITestCase):
             self.ui._persist()
 
         def via_apply_hotkey():
-            self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f9])
-            self.ui.apply_hotkey()
+            # HotkeyPersistence's class comment explains why: apply_hotkey()
+            # only reaches _note_save() after a real HotkeyWatcher.start()
+            # returns, and starting a real listener aborts the process on
+            # macOS regardless of permission. Stub the class for this call
+            # only, so the save is exercised on every platform without ever
+            # starting a real listener.
+            original_watcher = app.HotkeyWatcher
+
+            class _StubHotkeyWatcher:
+                def __init__(self, hotkey, callback):
+                    pass
+
+                def start(self):
+                    pass
+
+                def stop(self):
+                    pass
+
+            app.HotkeyWatcher = _StubHotkeyWatcher
+            try:
+                self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f9])
+                self.ui.apply_hotkey()
+            finally:
+                app.HotkeyWatcher = original_watcher
 
         triggers = [via_apply_appearance, via_apply_ui_scale, via_select_persist,
                    via_persist, via_apply_hotkey]
