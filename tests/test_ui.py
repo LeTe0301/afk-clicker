@@ -3869,8 +3869,11 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
         # different, earlier source the _poll_games stub can't reach.
         # Neutralizing it before the manual put -- cancelling any armed
         # timer and joining the real poll thread, same pattern as on_close()
-        # (afk_clicker.py:3446-3484) -- closes this code-established gap the
-        # same way Round 2 closed the rebuild one.
+        # (afk_clicker.py:3446-3484) -- closes this for the single most-
+        # recently-started scan. It does NOT, on its own, close it for an
+        # OLDER scan that a later one has already overwritten
+        # self.ui._poll_thread out from under -- see "Round 5" below for why
+        # that needed a small production-side fix instead.
         #
         # Round 4 (PR #70 review / PR #71 macOS evidence, hedge): the path
         # above is real and closed regardless -- an independent race-class
@@ -3899,6 +3902,38 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
         # G#39 recurs with this fix in place, that will mean H1 was not the
         # (only) cause and the investigation needs to resume from the
         # loaded-full-suite condition instead.
+        #
+        # Round 5 (PR #70 independent review, Finding #1, BLOCKER -- fixed in
+        # afk_clicker.py, not here): the neutralization above only ever sees
+        # self.ui._poll_thread's CURRENT value. _poll_games()
+        # (afk_clicker.py:3093-3151) overwrites that attribute on every call,
+        # including its own periodic reschedule, without joining whatever
+        # scan it just replaced -- so when an older scan is still stalled
+        # when a newer one starts (H1's own described trigger), the older
+        # scan's thread handle is gone from anywhere this block can reach.
+        # Reproduced directly against real production code by the reviewer
+        # (scratchpad's pr70-own-sabotage.py): the orphaned older scan lands
+        # its own _mark_running call later, after this test's own assertion
+        # would already have run, clobbering the result with stale data and
+        # tripping neither the join nor the loud-fail above (nothing here
+        # was ever "alive" to check). This is a genuine PRODUCT race, not
+        # only a test-exposure gap -- a live "what's running now" indicator
+        # really can regress to stale window state -- so it's fixed at the
+        # source: _poll_games() now stamps each call with a monotonically
+        # increasing sequence number, and a new self._apply_scan(seq,
+        # running) gate (afk_clicker.py) drops any scan result older than
+        # the newest one already applied, before ever calling
+        # _mark_running(). See AnOlderScanResultDoesNotOverwriteANewerOne
+        # below for the dedicated regression test, driven through the real
+        # _poll_games()/scan() path, and docs/implementation.md's "Round 3"
+        # section for the rejected alternatives (joining the predecessor
+        # inside _poll_games() itself would let one stuck Xlib.display.
+        # Display() connection freeze detection entirely; more test-side
+        # thread tracking would leave the real production gap open for any
+        # other caller). This block's own join/loud-fail still matters --
+        # it closes the single-most-recent-scan case on its own, without
+        # having to wait for a slower scan's sequence number to resolve --
+        # the two mechanisms are complementary, not redundant.
         old_seen = self.ui._seen_running   # already set by setUp()'s settle()
         target = {"minecraft"}
         self.assertNotEqual(old_seen, target,
@@ -3957,6 +3992,97 @@ class QueuedNonResyncedUpdatesSurviveARebuild(UITestCase):
                 "rebuild, not be silently dropped by the old _ui_queue swap")
         finally:
             self.ui._poll_games = original_poll_games
+
+
+class AnOlderScanResultDoesNotOverwriteANewerOne(UITestCase):
+    """G#39/GH#69, PR #70 review Finding #1: _poll_games() unconditionally
+    overwrites self._poll_thread on every call (afk_clicker.py:3129-3130),
+    including the periodic 5000ms reschedule, without ever joining whatever
+    scan it just superseded. If an earlier scan is still stalled when a
+    later one starts (H1's own story -- a slow osascript call still running
+    when the periodic timer fires again), self._poll_thread only ever
+    points at the newer scan; the older one's thread handle is gone from
+    anywhere else that could join or check it. When that orphaned older
+    scan eventually finishes, its own self._ui(self._mark_running, ...)
+    call used to land exactly like a fresh one, silently clobbering
+    whatever the newer scan (or, in the flaky test this guards elsewhere,
+    a manually queued value) had already set -- with no diagnostic, no
+    exception, nothing for QueuedNonResyncedUpdatesSurviveARebuild's own
+    quiesce-then-join to catch, because that block only ever sees the
+    single most-recently-started thread.
+
+    This is a genuine product race (a live "what's running now" indicator
+    can regress to stale data), not just a test-hermeticity gap, so unlike
+    every other round of this fix it is closed in afk_clicker.py itself:
+    each _poll_games() call stamps its own scan with a monotonically
+    increasing sequence number (self._poll_seq), and the main-thread
+    handler (_apply_scan) drops any result whose sequence is older than
+    the newest one already applied (self._poll_applied_seq), before ever
+    calling _mark_running(). A later-started scan's result always wins
+    once applied, regardless of which scan's thread actually finishes (or
+    lands) first. _mark_running() itself is unchanged -- this test's own
+    sibling class still calls it directly via self.ui._ui(...), bypassing
+    sequencing entirely, since a hand-queued value isn't a scan result.
+
+    Drives this through the REAL _poll_games()/scan() path (not by calling
+    _apply_scan with hand-made sequence numbers), with a controllable
+    detect_running that blocks the first (older) scan until explicitly
+    released, so the ordering -- older scan starts, newer scan starts and
+    lands first, older scan is released and lands last -- is deterministic
+    rather than a timing gamble."""
+
+    def test_an_orphaned_older_scan_landing_later_is_dropped(self):
+        entered_first = threading.Event()
+        release_first = threading.Event()
+        calls = {"n": 0}
+        old_result = {"global"}
+        new_result = {"minecraft"}
+
+        def fake_detect_running(profiles):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                entered_first.set()
+                release_first.wait(5)
+                return old_result
+            return new_result
+
+        original_detect_running = app.detect_running
+        app.detect_running = fake_detect_running
+        try:
+            self.ui._poll_games()          # starts the older scan
+            thread_a = self.ui._poll_thread
+            self.assertTrue(
+                entered_first.wait(5),
+                "older scan never reached detect_running")
+            self.ui._poll_games()          # starts the newer scan, overwrites
+                                            # self.ui._poll_thread -- thread_a's
+                                            # handle is now orphaned, exactly
+                                            # like the reviewed defect
+            thread_b = self.ui._poll_thread
+            self.assertIsNot(
+                thread_a, thread_b,
+                "test needs _poll_games() to actually overwrite _poll_thread "
+                "to exercise the orphaned-scan scenario")
+            thread_b.join(5)
+            self.assertFalse(thread_b.is_alive(),
+                              "newer scan should finish almost immediately "
+                              "(detect_running returns instantly for it)")
+            self.ui._drain_ui()
+            self.assertEqual(
+                self.ui._seen_running, new_result,
+                "the newer scan's result should have landed before the "
+                "older one is released")
+            release_first.set()            # let the orphaned older scan finish
+            thread_a.join(5)
+            self.assertFalse(thread_a.is_alive(),
+                              "older scan should have finished by now")
+            self.ui._drain_ui()
+        finally:
+            app.detect_running = original_detect_running
+        self.assertEqual(
+            self.ui._seen_running, new_result,
+            "an older scan landing after a newer one was already applied "
+            "must not overwrite it with stale data")
 
 
 class QueuedStatusSurvivesARebuild(UITestCase):

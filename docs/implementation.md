@@ -6,11 +6,13 @@ Extended the "Round 2" fix (PR #58, G#30/GH#53) for the one flaky test
 to also close a gap Round 2 could not reach: a real `_poll_games()` scan
 already started (and possibly still in flight) by `setUp()`'s own app
 construction, before the test body's `self.ui._poll_games = lambda: None`
-stub ever exists to block it. Test-only change, `tests/test_ui.py` only —
-no production code (`afk_clicker.py`) touched, matching the spec's
-"Proposed approach". A throwaway macOS diagnostic patch (deliverable B) was
-also produced, verified to apply cleanly and run, but is **not** part of the
-working tree — it lives only at
+stub ever exists to block it. Rounds 1-2 were test-only,
+`tests/test_ui.py` only, matching the spec's original "Proposed approach".
+**Round 3 (below) adds a small, targeted `afk_clicker.py` change** after an
+independent review found a real product race the test-only approach cannot
+close by construction — see "Round 3" for why. A throwaway macOS diagnostic
+patch (deliverable B) was also produced in Round 1, verified to apply
+cleanly and run, but is **not** part of the working tree — it lives only at
 `/tmp/claude-1000/-home-dev-projects-afk-clicker/f462b60e-d499-494f-ac9e-fb9b46949dd0/scratchpad/ac39-diag.patch`.
 
 ## Root cause
@@ -439,3 +441,210 @@ export DISPLAY=:99
 ```
 Run in this session: all of the above — see "Re-verification (Round 2)"
 above for actual output.
+
+## Round 3 (PR #70 independent review, Finding #1 — BLOCKER, product fix)
+
+**What the independent review found (not `docs/test-review.md`'s own two rounds — a
+separate, independent re-derivation, `.../scratchpad/pr70-review.md`):** the Round 2
+quiesce block (`tests/test_ui.py`, pop timer / join `self.ui._poll_thread` / drain) only
+ever sees `self.ui._poll_thread`'s *current* value. `_poll_games()`
+(`afk_clicker.py:3093-3151`) overwrites that attribute on every call — including its own
+periodic 5000ms reschedule — with no join of whichever scan it just superseded. H1's own
+story is precisely that an older scan can still be stalled when the periodic timer fires
+a second, faster one; the instant that happens, `self.ui._poll_thread` points at the new
+scan, and the old scan's thread handle is gone from anywhere the test's quiesce can reach.
+The reviewer reproduced this directly against real production code
+(`.../scratchpad/pr70-own-sabotage.py`, not the two already-used `_rebuild_ui`-queue
+sabotages): started a real, slow "scan A" via `_poll_games()`, then a real, fast "scan B"
+50ms later (overwriting `self.ui._poll_thread` from A to B), ran the exact shipped
+neutralization logic, and found the assertion passed immediately (`immediate_ok=True`,
+since B had already landed the test's target) but failed 1.3s later once orphaned scan A
+finally landed and silently overwrote it (`after_orphan_ok=False`) — with the
+neutralization block reporting nothing wrong, defeating the whole "make a recurrence
+diagnosable" goal Round 2 was built around.
+
+**Root cause (verified against the code, not assumed from the review):**
+`afk_clicker.py:3129-3130` (pre-Round-3 line numbers) —
+```python
+self._poll_thread = threading.Thread(target=scan, daemon=True)
+self._poll_thread.start()
+```
+This unconditionally reassigns `self._poll_thread`, on every `_poll_games()` call, with
+no join of whatever thread was already referenced there. Confirmed this is a genuine
+**product** race, not only a test-hermeticity gap: a live "what's running now" indicator
+really can regress to stale window state if an older, slower scan lands after a newer one
+has already been applied, on a real running app, independent of any test.
+
+**Decision (orchestrator): fix the root cause in `afk_clicker.py`, not with more test-side
+thread tracking.** This narrowly reopens the scope decided in Round 1/2 ("test-only fix",
+`afk_clicker.py` untouched) — recorded as a scope revision in `docs/spec.md`'s Summary and
+a new "Proposed approach, Round 3" section, not silently overridden.
+
+### The fix
+`afk_clicker.py`:
+1. `__init__` gains two counters, next to `self._poll_thread = None`:
+   ```python
+   self._poll_seq = 0             # bumped once per _poll_games() call,
+   self._poll_applied_seq = 0     # compared in _apply_scan() -- see there
+   ```
+2. `_poll_games()` stamps each call with a sequence number, assigned and read only on the
+   main thread (the method itself only ever runs via a Tk callback or `after()`):
+   ```python
+   self._poll_seq += 1
+   seq = self._poll_seq
+
+   def scan():
+       ...
+       running = detect_running(profiles)
+       me = weak()
+       if me is not None:
+           me._ui(me._apply_scan, seq, running)   # was: me._mark_running, running
+   ```
+3. A new method, `_apply_scan(self, seq, running)`, sits in front of `_mark_running()`:
+   ```python
+   def _apply_scan(self, seq, running):
+       if seq < self._poll_applied_seq:
+           return
+       self._poll_applied_seq = seq
+       self._mark_running(running)
+   ```
+   `_mark_running()` itself is completely unchanged — every direct caller (this test file
+   calls it directly via `self.ui._ui(self.ui._mark_running, ...)` in several places,
+   deliberately bypassing sequencing since a hand-queued value isn't a scan result with a
+   sequence number to compare) keeps working exactly as before.
+
+Because `seq` is assigned in call order (main thread, at the moment `_poll_games()` runs),
+a later-started scan's sequence number is always higher than an earlier one's, regardless
+of which thread's `detect_running()` call actually returns first. Whichever real scan
+result lands with the highest sequence number so far always wins; anything older is
+dropped silently and permanently, no matter how long after the newer one it eventually
+lands — closing the gap for good, not just narrowing the window.
+
+### Rejected alternatives (recorded per the coordinator's request)
+- **(a) Join the previous scan inside `_poll_games()` before starting a new one.**
+  `_poll_games()`'s own existing comment documents exactly why this method holds only a
+  weak reference to `self` across the blocking `detect_running()` call: a scan can stall
+  for an unbounded time (observed directly, roughly 1 scan in a couple hundred, stuck
+  inside `Xlib.display.Display()` itself). Blocking a *new* scan on an old one finishing
+  would let one stuck connection freeze the running-games indicator entirely — trading a
+  rare stale-data race for a much worse, unbounded detection freeze. Rejected.
+- **(b) Test-only tracking of every poll thread started since `setUp()`.** Would close the
+  gap for this one test (a growing list of thread handles instead of one mutable
+  attribute) but leaves the real production gap open for any other caller of
+  `_poll_games()` — a real user's app can still show a stale "running" indicator after two
+  overlapping scans, regardless of what the test suite does. Also strictly more test
+  machinery for a problem whose actual root cause lives in `afk_clicker.py`. Rejected in
+  favor of fixing the source.
+
+### Existing constraints respected
+- `scan()` still does not hold `self` across the blocking `detect_running()` call — the
+  weakref pattern (`weak = weakref.ref(self)`, `del me` before the call, re-resolved after)
+  is completely unchanged; `seq` is a plain `int` closed over by `scan()`, not a reference
+  back to `self`, so it does not reintroduce the off-thread `Variable` finalization risk
+  `_poll_games()`'s own comment documents.
+- `self._poll_seq` is only ever incremented inside `_poll_games()` itself, which only ever
+  runs on the main thread (called from `__init__`/`_build_ui()`'s tail, `_rebuild_ui()`, or
+  its own `root.after(5000, ...)` reschedule — never from `scan()`'s own thread).
+  `self._poll_applied_seq` is only ever compared/updated inside `_apply_scan()`, which only
+  ever runs via `_drain_ui()` on the main thread (queued through `self._ui(...)`, the same
+  thread-safe hand-off every other cross-thread UI update in this file already uses). No
+  new cross-thread access to either counter.
+
+### New test (TDD: written and confirmed red first, then made green by the fix)
+`tests/test_ui.py`, new class `AnOlderScanResultDoesNotOverwriteANewerOne`, method
+`test_an_orphaned_older_scan_landing_later_is_dropped`, placed immediately after
+`QueuedNonResyncedUpdatesSurviveARebuild`. Drives the scenario through the **real**
+`_poll_games()`/`scan()` path (not by calling `_apply_scan` with hand-made sequence
+numbers), with a controllable `detect_running`:
+- Call 1 (`calls["n"] == 1`) sets an `entered_first` event, then blocks on a
+  `release_first` event before returning `old_result = {"global"}`.
+- Every later call returns `new_result = {"minecraft"}` immediately.
+
+Sequence: start the older scan (`self.ui._poll_games()`, capture `thread_a =
+self.ui._poll_thread`), wait for it to actually reach `detect_running`
+(`entered_first.wait(5)`), start the newer scan (`self.ui._poll_games()` again, capture
+`thread_b = self.ui._poll_thread`, confirm `thread_a is not thread_b` so the scenario is
+actually exercised), join `thread_b` and drain, assert `_seen_running == new_result` (the
+newer scan landed and applied), then release the older scan (`release_first.set()`), join
+`thread_a`, drain again, and assert `_seen_running` is **still** `new_result` — the older
+scan's landing must not have overwritten it.
+
+Confirmed against the actual code in this session:
+- **Before the fix** (production code at `f730db9`, before this round's `afk_clicker.py`
+  change): **FAILED**, `AssertionError: ... 'minecraft' not in ... 'global' ...` — the
+  older scan's stale `old_result` clobbered the newer, already-applied `new_result`,
+  exactly reproducing the reviewer's finding.
+- **After the fix**: **OK**.
+- **Sabotage** (temporarily `if False and seq < self._poll_applied_seq:` in
+  `_apply_scan()`, disabling just the sequence check): test **FAILED** again, same
+  assertion — the check is load-bearing, not incidentally passing. Reverted immediately,
+  confirmed `git diff` matched the intended fix exactly (byte-for-byte, via a saved copy
+  compared with `diff`) before continuing.
+
+### Re-ran the reviewer's own reproduction script
+`.../scratchpad/pr70-own-sabotage.py`, unmodified:
+- **Against the Round 2 code** (`afk_clicker.py` temporarily reverted via `git stash push
+  -- afk_clicker.py`, keeping the new test in `tests/test_ui.py`): confirmed
+  `after_orphan_ok=False` — the same silent clobber the reviewer found, reproduced
+  independently in this session before touching the fix.
+- **After `git stash pop`** (fix restored): `after_orphan_ok=True` — the orphaned older
+  scan's landing no longer overwrites the already-applied result.
+
+### Existing acceptance criteria re-verified after the Round 3 change
+- Sabotage (`self._ui_queue = queue.SimpleQueue()` reinserted at `afk_clicker.py:2367`, in
+  `_rebuild_ui()`): fixed target test still **5/5 failed**, same original assertion
+  message — unaffected by the Round 3 change, confirmed still holds.
+- Target test (`QueuedNonResyncedUpdatesSurviveARebuild...still_lands`), 20x back-to-back:
+  **20/20 passed**.
+- Full suite: `Ran 315 tests ... OK (skipped=10)` — 314 (Round 2 baseline) + 1 new test,
+  no regressions, including `PollGamesScanDoesNotHoldSelfWhileBlocked` (confirms the new
+  `seq` local variable inside `scan()`'s closure does not reintroduce any `self`/`me`
+  reference visible in that test's own frame-locals inspection) and `Sidebar`'s direct,
+  synchronous `_mark_running()` callers (confirms `_mark_running()`'s own signature/
+  behavior is genuinely unchanged for non-scan callers).
+
+### Docs updated this round
+- `tests/test_ui.py` — target test's inline comment: softened the Round 3/4 "closes this
+  code-established gap the same way Round 2 closed the rebuild one" claim (the
+  reviewer's CONCERN finding #2) to state plainly that the quiesce only closes the
+  single-most-recent-scan case, and added a new "Round 5" paragraph describing the
+  product fix, referencing the new test class.
+- `docs/spec.md` — added a "Round 3 scope revision" note under Summary, a revision note on
+  the "merge/reconcile" non-goal, a full "Proposed approach, Round 3" subsection (the fix,
+  both rejected alternatives, docs to update), a second sabotage acceptance test, updated
+  "Affected areas" (no longer claims `afk_clicker.py` is untouched), a new acceptance
+  criterion for the stale-scan product race, and an updated "Risk / rollback notes"
+  section.
+- `backlog.md` — G#39 entry: added a "Round 3" paragraph describing the product fix; left
+  the checkbox `- [ ]` (still open) and the existing "trigger unconfirmed" hedge
+  unchanged, since this round doesn't touch whether H1 is macOS's actual trigger.
+
+### Changes by file (Round 3)
+- `afk_clicker.py` — `__init__` (two new counters), `_poll_games()` (assign `seq`, hand it
+  to `scan()`'s closure, call `_apply_scan` instead of `_mark_running` directly, updated
+  comment), new `_apply_scan(self, seq, running)` method. `_mark_running()` itself
+  unchanged.
+- `tests/test_ui.py` — new class `AnOlderScanResultDoesNotOverwriteANewerOne` (one test
+  method); target test's inline comment extended/corrected as described above. No other
+  test method changed.
+- `docs/spec.md`, `backlog.md`, `docs/implementation.md` (this file) — updated as above.
+
+### How to verify locally (Round 3)
+```
+cd /home/dev/projects/afk-clicker
+export DISPLAY=:99
+<venv>/bin/python -m unittest tests.test_ui.AnOlderScanResultDoesNotOverwriteANewerOne -v
+<venv>/bin/python -m unittest tests.test_ui.QueuedNonResyncedUpdatesSurviveARebuild -v
+<venv>/bin/python -m unittest discover -s tests -t .   # 315 tests, OK, skipped=10
+
+# Sabotage the new check (revert after):
+# in afk_clicker.py's _apply_scan(), change `if seq < self._poll_applied_seq:` to
+# `if False and seq < self._poll_applied_seq:`; run the new test (fails); revert.
+
+# Re-run the reviewer's own repro:
+<venv>/bin/python /path/to/pr70-own-sabotage.py   # after_orphan_ok=True against the fix
+git stash push -- afk_clicker.py   # temporarily back to Round 2 code
+<venv>/bin/python /path/to/pr70-own-sabotage.py   # after_orphan_ok=False, confirms the finding
+git stash pop                                      # restore the fix
+```
+Run in this session: all of the above — see the sections above for actual output.

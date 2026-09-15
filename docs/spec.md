@@ -6,6 +6,22 @@ PR #58's fix (stubbing `_poll_games` to a no-op for the duration of the test) on
 started (and may still be in flight) by `setUp()`'s own app construction before the stub takes
 effect — that's the gap this bugfix needs to actually close.
 
+**Round 3 scope revision (orchestrator, after PR #70's independent review):** the review
+(`.../scratchpad/pr70-review.md`) found a BLOCKER that the test-only quiesce (Round 2) cannot
+close by construction: `_poll_games()` (`afk_clicker.py:3129-3131`, now `:3093-3151`) overwrites
+`self._poll_thread` on every call — including its own periodic reschedule — without joining
+whatever scan it just superseded. When two real scans overlap (exactly H1's own described
+trigger: a stalled first scan still running when the periodic timer fires a second, faster one),
+the test's quiesce can only ever see the single most-recently-tracked thread; an orphaned older
+scan is invisible to it and can still land and clobber `_seen_running` later, silently, with no
+diagnostic from the loud-fail path (reproduced directly against real production code,
+`.../scratchpad/pr70-own-sabotage.py`). This is a genuine **product race** (a live "what's
+running now" indicator can regress to stale data), not only a test-hermeticity gap, so this round
+narrowly reopens the "test-only fix" scope decided in Round 1/2: `afk_clicker.py` now gets a
+small, targeted change (sequence-numbering scan results so a stale one is dropped on arrival) —
+see "Proposed approach, Round 3" below. This does **not** reopen the broader non-goal of merging/
+reconciling results across concurrent scans — see the revised non-goal below.
+
 ## Goals
 - Identify, with file:line evidence, every remaining writer of `self.ui._seen_running`/the
   `_ui_queue` that can land between the test's manual `_mark_running(target)` queue-put and its
@@ -22,6 +38,10 @@ effect — that's the gap this bugfix needs to actually close.
   what this fix requires.
 - Making `_seen_running` merge/reconcile results across concurrent scans — out of scope; the
   fix's job is to make this *test* hermetic, not to change production polling semantics.
+  **Revised (Round 3):** this still holds in spirit — the Round 3 product fix does not merge or
+  reconcile anything; it only drops a stale (superseded) scan result outright, keeping the
+  existing "last real scan wins" semantics intact for every scan that isn't already obsolete. See
+  the Round 3 scope-revision note under "Summary".
 
 ## Background / current state
 
@@ -191,10 +211,55 @@ fix `tests/test_ui.py`'s one test method to neutralize a scan that may already b
    at `tests/test_ui.py:3801-3821` already documents Round 1 and Round 2; this becomes "Round 3 /
    G#39").
 
-This is a **test-only fix**, same category as PR #58: the periodic re-poll and the
-last-write-wins `_mark_running` semantics are correct, intended production behavior (a live
-"what's running now" indicator should reflect the latest real scan) — the bug is entirely in this
-one test's continued exposure to a scan it has no business waiting on, not in `afk_clicker.py`.
+This was shipped as a **test-only fix**, same category as PR #58 (Round 1/2): the periodic
+re-poll and the last-write-wins `_mark_running` semantics were treated as correct, intended
+production behavior — see "Proposed approach, Round 3" below for why that turned out to be
+incomplete and a small `afk_clicker.py` change was added.
+
+### Proposed approach, Round 3 (PR #70 independent review, Finding #1)
+
+The review found that steps 1-4 above only ever see `self.ui._poll_thread`'s *current* value —
+the single most-recently-started scan. `_poll_games()` (`afk_clicker.py:3093-3151`) overwrites
+that attribute on every call, including its own periodic reschedule, without joining whichever
+scan it just replaced. When an older scan is still stalled when a newer one starts (H1's own
+described trigger), the older scan's thread handle is gone from anywhere the test's quiesce can
+reach — it can still land its own `_mark_running` call later, after the newer scan (or the test's
+own manually-queued value) has already been applied, silently overwriting it with stale data. This
+is a real product race (a live "what's running now" indicator can regress to older window state),
+not only a test-exposure gap, so it is fixed at the source instead of adding more test-side thread
+tracking:
+
+1. `_poll_games()` stamps each call with a monotonically increasing sequence number
+   (`self._poll_seq`, incremented and read only on the main thread, at call time) and hands it
+   back to the scan's own completion callback alongside its result.
+2. A new main-thread handler, `_apply_scan(seq, running)`, sits in front of `_mark_running()`:
+   it drops `running` outright if `seq` is older than the newest sequence number already applied
+   (`self._poll_applied_seq`), and otherwise updates that high-water mark and calls
+   `_mark_running(running)` exactly as before. `_mark_running()`'s own signature and behaviour are
+   unchanged — every direct caller (this test suite calls it directly via `self.ui._ui(self.ui.
+   _mark_running, ...)` in several places, deliberately bypassing sequencing since a hand-queued
+   value isn't a scan result) keeps working exactly as today.
+3. **Rejected alternative (a): join the previous scan before starting a new one inside
+   `_poll_games()` itself.** `_poll_games()`'s own existing comment documents why the whole method
+   holds only a weak reference to `self` across the blocking call: a scan can stall for an
+   unbounded time (~1 in 200 observed stuck inside `Xlib.display.Display()`). Blocking a *new*
+   scan on an old one finishing would let one stuck connection freeze the running-games indicator
+   entirely, trading a rare stale-data race for a much worse, unbounded detection freeze.
+4. **Rejected alternative (b): track every poll thread started since `setUp()` on the test side
+   only.** This adds more test-only bookkeeping (a growing list of thread handles instead of one
+   attribute) without addressing that the underlying gap — `_poll_games()` losing its predecessor's
+   handle — is a real production behavior that can affect actual users on a real machine, not just
+   this one test. It also doesn't generalize: any future caller of `_poll_games()` (not just this
+   test) would still be exposed.
+5. Steps 1-4 from Round 1/2 (cancel the armed timer, join `self.ui._poll_thread` if alive with a
+   loud failure on timeout, drain, then proceed) are kept unchanged — they still correctly close
+   the single-most-recent-scan case, and the product-level fix above closes the remaining
+   orphaned-older-scan case *regardless of when it lands*, including after the test's own
+   assertion has already run in a real (non-test) window.
+6. Update the test's inline comment (again) and `docs/implementation.md`/`backlog.md` to describe
+   the full picture, keeping the existing hedge that macOS is likely-but-unconfirmed as G#39's
+   actual real-world trigger — this round doesn't change that; it closes a gap the review found
+   in the *fix's own completeness*, independent of whether H1 turns out to be the trigger.
 
 **Sabotage acceptance test (must run before considering this closed):** in a throwaway copy,
 reintroduce the historical bug by adding `self._ui_queue = queue.SimpleQueue()` back into
@@ -205,15 +270,29 @@ queue entry and doesn't just make a coincidentally-matching value structurally g
 restore `afk_clicker.py` (`git checkout --`) and confirm `git diff` is clean before deleting the
 scratch copy.
 
+**Second sabotage acceptance test (Round 3, the new product fix):** disable just the sequence
+check in `_apply_scan()` (e.g. `if False and seq < self._poll_applied_seq:`) and run the new
+product-level test (below) — it must fail, proving the check is load-bearing, not a no-op that
+happens to pass because of how the test is built. Then restore and confirm `git diff` is clean.
+
 ## Affected areas
-- `tests/test_ui.py` — one test method
-  (`QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`)
-  plus its docstring comment. No production code (`afk_clicker.py`) change expected, pending the
-  evidence plan not overturning H1.
-- `backlog.md` — the existing G#39/GH#69 entry (lines ~102-115) should be updated to closed/fixed
-  with the actual mechanism once the fix lands (matches how G#30 was closed there).
+- `tests/test_ui.py` —
+  `QueuedNonResyncedUpdatesSurviveARebuild.test_a_mark_running_scan_result_queued_before_a_rebuild_still_lands`
+  (docstring comment updated again, Round 3) plus a new test class/method exercising the
+  product-level stale-scan-drop behavior directly through `_poll_games()`/`scan()` (not by calling
+  the handler with hand-made sequence numbers).
+- `afk_clicker.py` — **Round 3 revision:** no longer untouched. `__init__` gains two counters
+  (`self._poll_seq`, `self._poll_applied_seq`); `_poll_games()` stamps each call with a sequence
+  number; a new `_apply_scan(seq, running)` method gates `_mark_running()` for real scan results
+  only. See "Proposed approach, Round 3" above for why this narrow production change is justified
+  despite the original non-goal of leaving `afk_clicker.py` alone.
+- `backlog.md` — the existing G#39/GH#69 entry should be updated to reflect the Round 3 product
+  fix and keep the existing "mitigated, trigger unconfirmed" hedge (still `- [ ]`, still open).
+- `docs/implementation.md` — Round 3 section documenting the product fix, the rejected
+  alternatives, and re-verification.
 - A throwaway diagnostic branch + draft PR (never merged) for the evidence-gathering step only —
-  no lasting footprint on `main` or `hotfix/ac-39/...`.
+  no lasting footprint on `main` or `hotfix/ac-39/...`. (Already exercised in Round 2 via PR #71;
+  not reopened by Round 3.)
 
 ## Edge cases
 - **Scan A itself is the one still in flight** (not just a periodic-timer-triggered scan B) — the
@@ -259,6 +338,17 @@ scratch copy.
       other test in `QueuedNonResyncedUpdatesSurviveARebuild` or elsewhere).
 - [ ] No instrumentation/diagnostic code reaches `main` or the `hotfix/ac-39/...` branch — the
       draft PR is closed unmerged and its branch deleted once its log has been read.
+- [ ] **Round 3 (PR #70 review, Finding #1).** Given a real, older `_poll_games()` scan still in
+      flight when a newer one starts and lands first (driven through the actual
+      `_poll_games()`/`scan()` path with a controllable `detect_running`, not hand-made sequence
+      numbers), when the older scan eventually finishes and its result reaches the main thread,
+      then it must not overwrite the newer scan's already-applied result — proven by a new,
+      dedicated test, and by re-running the reviewer's own reproduction
+      (`.../scratchpad/pr70-own-sabotage.py`) against the fixed code and confirming it now passes
+      (`after_orphan_ok=True`), having first confirmed it still fails against the Round 2 code
+      (`after_orphan_ok=False`). Sabotage (disable just the sequence check) must fail the new test.
+      The existing `_ui_queue`-swap sabotage against the original target test must still hold
+      (5/5 red).
 
 ## Open questions
 None that block starting: the diagnostic-branch-off-`main` approach and the draft-PR (not
@@ -267,9 +357,12 @@ rather than sitting open — reasonable defaults, adjustable if the developer/re
 something contrary once macOS CI evidence is in hand.
 
 ## Risk / rollback notes
-Test-only change; if the join/cancel sequence itself introduces a new problem (e.g. joining a
-thread that's genuinely stuck past 2.0s on a slow runner, delaying the test slightly), it's a pure
-revert of the one test method — `afk_clicker.py` is untouched under the current hypothesis, so
-there's no production rollback surface. If macOS CI evidence contradicts H1, the fallback is to
-keep investigating rather than ship this specific fix (see acceptance criterion 3b) — don't merge
-a test change whose own justifying evidence turned out negative.
+Round 1/2 was a test-only change; Round 3 adds a small, narrowly-scoped `afk_clicker.py` change
+(two counters, one extra method, one call-site change in `_poll_games()`). Rollback surface: if the
+sequencing itself introduces a new problem, it's a pure revert of `_apply_scan()`/the `_poll_seq`/
+`_poll_applied_seq` additions and the one line in `_poll_games()` that calls `_apply_scan` instead
+of `_mark_running` directly — `_mark_running()` itself is never modified, so any direct caller
+(including this whole test file's other uses of it) is unaffected by a revert. If macOS CI evidence
+eventually contradicts H1 as the trigger, that does not on its own invalidate Round 3's product
+fix — Round 3 closes a real, independently-reproduced race (PR #70's own sabotage) regardless of
+whether H1 turns out to be G#39's actual real-world cause.

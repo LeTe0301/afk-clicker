@@ -141,6 +141,31 @@ Bugs and residue:
       timer/in-flight-poller hypothesis (H1) was not the (only) cause**, and the
       investigation should resume from the loaded-full-suite condition rather
       than re-deriving H1 from scratch.
+      **Round 3 (PR #70 independent review, Finding #1, BLOCKER): also fixed in
+      `afk_clicker.py` itself, a real production race, not just test exposure.**
+      The Round 2 quiesce above only ever sees `self.ui._poll_thread`'s current
+      value; `_poll_games()` (`afk_clicker.py:3093-3151`) overwrites that
+      attribute on every call, including its own periodic reschedule, without
+      joining whatever scan it just superseded. When an older scan is still
+      stalled when a newer one starts — H1's own described trigger — the older
+      scan's thread handle is orphaned and invisible to the test's quiesce; it
+      can land later and silently clobber an already-applied result, with no
+      diagnostic from the loud-fail path (reproduced directly against real
+      production code by the reviewer, not just the test). This is a genuine
+      product race (a live "what's running now" indicator can regress to stale
+      data), so `_poll_games()` now stamps each call with a monotonically
+      increasing sequence number, and a new `_apply_scan(seq, running)` gate
+      drops any scan result older than the newest one already applied before
+      calling `_mark_running()` (unchanged for every direct/non-scan caller).
+      New dedicated test (`AnOlderScanResultDoesNotOverwriteANewerOne`) drives
+      this through the real `_poll_games()`/`scan()` path and is sabotage-
+      verified (disabling the sequence check fails it); the reviewer's own
+      reproduction script now passes against the fixed code
+      (`after_orphan_ok=True`), confirmed still failing against the Round 2 code
+      first. The macOS-trigger hedge is unchanged by this round — still
+      **`- [ ]` open, mitigated, trigger unconfirmed** — this closes a
+      completeness gap the reviewer found in the fix itself, independent of
+      whether H1 is ever confirmed as G#39's real-world cause.
 - [x] **The test suite intermittently aborts at interpreter shutdown** —
       `Tcl_AsyncDelete: async handler deleted by the wrong thread`, exit 134, and
       unittest's summary never prints, so a run that passed looks like a failure.
