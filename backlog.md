@@ -11,16 +11,13 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
-**Release blocker — no release until this is fixed** (Leo, 2026-09-13): the Windows
-in-app Install bug (first item under "Bugs and residue" below). Rename (PR #61) and
-icon (PR #62) are waiting to ship together as 0.6.0. The release after them fixes
-the updater first, so Windows users aren't handed a build they can only install by
-hand. Order once #62 merges: fix this bug (full pipeline, with its own Gitea ticket),
-merge `release/0.5.0` back into `main` for the `__version__` bump, then cut
-`release/0.6.0`. Note that the fix only helps from the *next* update onward: every
-copy already installed runs its own shipped swap script, so 0.3.1/0.5.0 users on
-Windows still need to install the fixed release by hand once. Say so in the release
-notes.
+**0.6.0 released 2026-09-15** (`v0.6.0` from `0d83eef`, run 34931395022): the
+Clickwork name (PR #61), the Loop icon (PR #62) and the Windows install-update fix
+(PR #65, G#35). `release/0.5.0` and `release/0.6.0` are both merged back into `main`.
+Open check, only possible at the *next* release: a real Windows in-app update from
+0.6.0 should close and reopen on the new version with no console flash and leave
+`%APPDATA%\AFKFarmClicker\update.log` ending in `done`. Windows users on 0.5.0 or
+earlier install 0.6.0 by hand once (said in the release notes).
 
 Story G#24 / GH#36 (responsive layout and an icon-led minimal restyle) closed
 2026-09-12: all five features merged — PR #37 (`db20af2`, row value column),
@@ -36,7 +33,10 @@ end-to-end pass clean on `main` at `0d6e784`. Report: `handoff/story-17-e2e.md`.
 ## Open
 
 Bugs and residue:
-- [ ] **RELEASE BLOCKER. Windows: in-app Install closes the app and never comes back** (Leo,
+- [x] **Fixed in 0.6.0 (G#35 / GH#63, PR #65).** Under `DETACHED_PROCESS` the swap
+      script stalled at its first `tasklist | find`; now `CREATE_NO_WINDOW`, `ping` for
+      the wait, and a shipped `update.log`. Original report: **Windows: in-app Install
+      closes the app and never comes back** (Leo,
       2026-09-13, 0.3.1 → 0.5.0). What he saw: at 100% the window closes, a black
       console window flashes and closes, the files are not replaced, and a
       double-click still starts 0.3.1. **Running the leftover
