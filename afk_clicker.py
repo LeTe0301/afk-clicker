@@ -1952,6 +1952,8 @@ class AfkAutoclicker:
         self.worker = None
         self.capture_thread = None
         self._poll_thread = None
+        self._poll_seq = 0             # bumped once per _poll_games() call,
+        self._poll_applied_seq = 0     # compared in _apply_scan() -- see there
         self.right_held = False
         self.settings = {}
         self._pending = None
@@ -3105,7 +3107,25 @@ class AfkAutoclicker:
         # is how a stale Variable gets finalized off the main thread and
         # aborts the interpreter ("Tcl_AsyncDelete: async handler deleted
         # by the wrong thread").
+        #
+        # self._poll_thread is overwritten here on every call, including the
+        # periodic 5000ms reschedule below, with no join of whatever scan it
+        # just superseded (G#39/GH#69 PR #70 review, Finding #1). Joining the
+        # predecessor before starting a new one was considered and rejected:
+        # the whole reason this method holds only a weak self is that a scan
+        # can stall for an unbounded time, so blocking a new scan on an old
+        # one finishing would let one stuck Display() connection freeze
+        # detection entirely instead of merely delaying one indicator update.
+        # Instead, each scan is stamped with a monotonically increasing
+        # sequence number (self._poll_seq, touched only here, on the main
+        # thread) and handed back to _apply_scan() below, which drops any
+        # result older than the newest one already applied -- so an
+        # orphaned, slower scan landing after a newer one can no longer
+        # clobber it, no matter which thread finishes first or how long the
+        # older one takes.
         weak = weakref.ref(self)
+        self._poll_seq += 1
+        seq = self._poll_seq
 
         def scan():
             me = weak()
@@ -3116,7 +3136,7 @@ class AfkAutoclicker:
             running = detect_running(profiles)
             me = weak()
             if me is not None:
-                me._ui(me._mark_running, running)
+                me._ui(me._apply_scan, seq, running)
         # Tracked (not fire-and-forget) so on_close() can join it: every
         # rebuild calls _poll_games() again (_build_ui()'s own tail, so the
         # running-games indicator survives a theme/scale change), and nothing
@@ -3129,6 +3149,28 @@ class AfkAutoclicker:
         self._poll_thread = threading.Thread(target=scan, daemon=True)
         self._poll_thread.start()
         self._timers["poll_games"] = self.root.after(5000, self._poll_games)
+
+    def _apply_scan(self, seq, running):
+        """
+        Main-thread gate in front of _mark_running(), for real scan results
+        only: drops `running` if `seq` is older than the newest scan already
+        applied, so a slow scan orphaned by a later, faster one (see
+        _poll_games()'s own comment) can't land afterward and overwrite
+        fresher data with stale window state (G#39/GH#69 PR #70 review).
+        Both self._poll_seq (assigned) and self._poll_applied_seq (compared)
+        are only ever touched from the main thread -- this method itself
+        runs via _drain_ui(), and _poll_games() runs via a Tk callback/
+        after(), so there is no cross-thread race on either counter.
+        _mark_running() itself keeps its existing signature and behaviour
+        unchanged for every other, non-scan caller (this test suite calls it
+        directly via self.ui._ui(self.ui._mark_running, ...) in several
+        places, deliberately bypassing sequencing -- a hand-queued value
+        isn't a scan result and has no sequence number to compare).
+        """
+        if seq < self._poll_applied_seq:
+            return
+        self._poll_applied_seq = seq
+        self._mark_running(running)
 
     def _mark_running(self, running_ids):
         for gid, item in self.items.items():
