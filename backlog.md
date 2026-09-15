@@ -65,7 +65,7 @@ Bugs and residue:
       shipped in 0.6.0 (PR #65). Leo also wanted the shipped script to keep a step log
       (`update.log` in the settings dir) — done, same PR; the in-app "send us the log"
       prompt was split out as G#36 / GH#64, now also done below.
-- [x] **`Segmented` never calls `trace_remove`**, so a destroyed widget's trace stays
+- [x] github: true — no ticket (predates the ticketing rule) — **`Segmented` never calls `trace_remove`**, so a destroyed widget's trace stays
       registered on its variable. Found during story #24's end-to-end pass: writing to
       `appearance_var`/`ui_scale_var` after closing Settings (without reopening) hits
       the dangling trace of the destroyed `Segmented`. Confirmed by grep that **no code
@@ -152,7 +152,7 @@ Bugs and residue:
       §3 assumption that `_dpi_s >= 1.0` was simply wrong about macOS. Decide whether
       to add the `fs(base, s)` floor across the ~20 font call sites, drop 90 % on
       low-DPI displays, or accept it. Only verifiable via CI — no real Mac here (G#4).
-- [ ] **RECURRED 2026-09-14** on PR #65's macOS leg (run 34906199873, commit
+- [ ] G#39 / GH#69 — github: true — **RECURRED 2026-09-14** on PR #65's macOS leg (run 34906199873, commit
       `9aa7e81`, a diff touching only `tests/test_updater.py` and docs), same
       assertion: `'minecraft'` missing after a rebuild. So the `_poll_games` stub
       below does not close every path; something else still races the queued
@@ -220,7 +220,7 @@ Bugs and residue:
       **`- [ ]` open, mitigated, trigger unconfirmed** — this closes a
       completeness gap the reviewer found in the fix itself, independent of
       whether H1 is ever confirmed as G#39's real-world cause.
-- [x] **The test suite intermittently aborts at interpreter shutdown** —
+- [x] github: true — no ticket (predates the ticketing rule) — **The test suite intermittently aborts at interpreter shutdown** —
       `Tcl_AsyncDelete: async handler deleted by the wrong thread`, exit 134, and
       unittest's summary never prints, so a run that passed looks like a failure.
       Reproduced on clean `main` at roughly 1 run in 4 (and at a similar rate on the
@@ -306,7 +306,7 @@ Bugs and residue:
       above and the `restart()` repro just above this note — but none of them can
       abort the suite anymore, since nothing is left to finalise them off the main
       thread. Full account: `docs/implementation.md`.
-- [ ] **The trace-registration-order hazard is overclaimed in merged code and in the
+- [ ] G#43 / GH#82 — github: true — **The trace-registration-order hazard is overclaimed in merged code and in the
       story's spec** — `_apply_appearance`'s own comment (~`afk_clicker.py:1939-1958`)
       and `docs/spec.md` §2 both attribute Theme's safety to registering `trace_add`
       after the `Segmented(...)` call. Verified empirically during the feature 4 cycle
@@ -318,7 +318,7 @@ Bugs and residue:
       Feature-3 comment and the spec text were left alone as out of scope for that
       feature. Worth a small separate pass so the next person isn't misled.
 
-- [ ] **`TabBar` accepts a `height` it then ignores when repainting** — found by
+- [ ] G#44 / GH#83 — github: true — **`TabBar` accepts a `height` it then ignores when repainting** — found by
       the critical review of PR #40 (non-blocking). `TabBar.__init__`
       (`afk_clicker.py:1269`) takes a `height` override and sizes the canvas with
       it, but `_paint()` (`afk_clicker.py:1314`) repositions the underline using
@@ -336,7 +336,7 @@ binding constraint, since nothing here scrolls and a lower floor puts Eating's
 lower rows out of reach. Took five rounds; `docs/history/ac-28-*` records why.
 Two follow-ups from its review are below.
 
-- [ ] **`_rebuild_ui()` does not cancel `_pane_fill_after_id`** the way it cancels
+- [ ] G#45 / GH#84 — github: true — **`_rebuild_ui()` does not cancel `_pane_fill_after_id`** the way it cancels
       `_rebuild_after_id` immediately above. Verified empirically harmless today —
       a pending pane fill landing across a rebuild does no damage — but it is an
       undocumented invariant rather than a guaranteed one, and the coalescing
@@ -360,23 +360,14 @@ Two follow-ups from its review are below.
       collapse threshold and the per-rebuild cost of `_rebuild_ui()` during a drag
       resize.
 - [ ] G#13 / GH#15 — github: true — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
-- [ ] G#12 / GH#14 — github: true — Calibration suite for the review agent. Rebase its branch first.
+- [ ] G#12 / GH#14 — github: true — Calibration suite for the review agent. Rebase its branch first: it (and G#13's, which contains its `2bdf55f`) is stacked on `901f0a4`, whose FIFO tests fail on Windows.
 
 Housekeeping:
-- [ ] **Clean up the remote branches** (Leo, 2026-09-13, from GitHub's branch list):
-  - `feature/ac-33/rename-app-to-clickwork`: merged in PR #61 (0 ahead), delete it.
-  - `release/0.5.0`: 2 commits ahead of `main` (`9f995bb` "Release 0.5.0", which
-    carries the `__version__` bump, and `ebd2c0d`, a CI re-run). **Merge it back
-    into `main` first.** `main` still says `0.3.1`, and the next release branch's
-    version-match step compares against `__version__`. Tag `v0.5.0` preserves the
-    release, so the branch can go once merged.
-  - `feature/ac-12/review-calibration-suite` (2 ahead, 109 behind, CI 2/3 red) and
-    `feature/ac-13/story-macros-tab` (2 ahead, 109 behind, CI 2/3 red): both need a
-    rebase onto `main` before anything else. ac-13 was branched off ac-12 and
-    contains its `2bdf55f`, so rebase ac-12 first, or drop that commit from ac-13.
-    Find out which CI leg fails after the rebase, not before. Most of 109 commits
-    of drift is story #24's layout work.
-- [ ] **A flake "fix" tends to work by blinding the test — sabotage-verify every
+- [ ] G#46 / GH#85 — github: true — **Delete merged remote branches** (Leo, 2026-09-13). As of
+      2026-09-15, 15 branches on `github` are fully merged, listed on the ticket. Keep
+      `feature/ac-12/…`/`feature/ac-13/…`; they are unmerged and tracked on G#12/G#13.
+      Confirm the list with Leo before deleting.
+- Lesson (not a backlog item): **A flake "fix" tends to work by blinding the test — sabotage-verify every
       one.** Three cases in two days, each caught only by deliberately breaking the
       product and checking the test still failed: a settling loop added to a *test*
       drove panes to a state the app never reached (289/289 green while a row was
@@ -388,7 +379,7 @@ Housekeeping:
       Removing a flake means removing variation, and the test's own sensitivity is
       the easiest variation to remove. **The acceptance test is not "it stopped
       failing" but "it still fails when the product is broken."**
-- [ ] **Anything matching on a command line matches the process doing the matching.**
+- Lesson (not a backlog item): **Anything matching on a command line matches the process doing the matching.**
       `pgrep -f` / `pkill -f` see the full command line **including the shell running
       them**, so `pkill -f foo.py` inside a `bash -c` containing that string SIGKILLs
       itself and leaves the target alive (hit twice on 2026-09-13, exit 144 both
@@ -397,33 +388,25 @@ Housekeeping:
       sleep 2; done` — and bracket **every** alternative: a loop whose pattern was
       `"[u]nittest ...\|fullsuite"` matched its own command line on the second
       alternative and spun for 15 hours, burning a core, noticed only from the host.
-- [ ] **`ps` CPU and elapsed-time accounting is broken in this container.** Process
+- Lesson (not a backlog item): **`ps` CPU and elapsed-time accounting is broken in this container.** Process
       ages read as ~130 years and `%CPU` shows ~0 even for a pegged core; a
       `/proc`-based age calculation comes out *negative*. To tell whether a process
       is working or hung, sample `utime+stime` from `/proc/<pid>/stat` twice a few
       seconds apart — zero delta with state `S` means blocked. Use `top` in the
       container, or ask the host session for cgroup figures, when real numbers matter.
-- [ ] **"CI didn't run" usually means the PR is unmergeable, not that GitHub dropped
+- Lesson (not a backlog item): **"CI didn't run" usually means the PR is unmergeable, not that GitHub dropped
       it.** A `pull_request` run cannot be created while `mergeable_state` is
       `dirty`, and nothing in the runs list or check-runs API says so — it simply
       shows nothing. Two pushes and a close/reopen were spent before checking
       `mergeable` on PR #57 (2026-09-13). Check `mergeable_state` first.
-- [ ] Branches `feature/ac-12/…` and `feature/ac-13/…` are stacked on `901f0a4`, whose FIFO tests fail on Windows. They stay red on CI until rebased onto `main`.
-- [ ] **Release 0.5.0 is built and waiting on the owner's approval.** Run
-      https://github.com/LeTe0301/afk-clicker/actions/runs/34723400064 — `version`,
-      `test` and all three `build` jobs green; `publish` is parked at the `release`
-      environment's required-reviewers gate. Nothing is on the Releases page until it
-      is approved, which is why the in-app updater still reports "up to date".
-      **GitHub mobile cannot approve deployment gates** — it needs a desktop browser
-      ("Review deployments" on the run page), or `actions: write` on the token.
-- [ ] **The GitHub token lacks `actions: write`**, which blocked four different
+- [ ] G#47 / GH#86 — github: true — **The GitHub token lacks `actions: write`**, which blocked four different
       things on 2026-09-13: approving the 0.5.0 release, re-running a failed job
       (four times, each costing an empty commit), `workflow_dispatch`, and a
       subagent's attempt to post a PR comment via `gh`. Reads work fine — the
       `pending_deployments` endpoint even reports `current_user_can_approve: true`,
       which is about the *user*, not the token's scope. Adding `actions: write`
       would remove all four.
-- [ ] **Stress-testing the suite needs two Xvfb displays, not one.** There is no
+- [ ] G#48 / GH#87 — github: true — **Stress-testing the suite needs two Xvfb displays, not one.** There is no
       window manager, so X input focus is a single global resource:
       `UITestCase.setUp` (`tests/test_ui.py:74-79`) calls `root.focus_force()` to
       acquire it, and the moment a second Tk process does the same, the first
@@ -434,7 +417,7 @@ Housekeeping:
       flaky focus test, run the load loop on `:98` and the test under scrutiny on
       `:99` — a shared display manufactures its own failures. Worth a comment
       beside `focus_force()` so the next person doesn't rediscover it.
-- [ ] **Unmapped-widget geometry passes on Linux and fails only on Windows.** On
+- Lesson (not a backlog item): **Unmapped-widget geometry passes on Linux and fails only on Windows.** On
       X11 a widget whose pane was packed then `pack_forget()`'d keeps returning its
       last real `winfo_rootx()`/`winfo_width()`; on Windows Tk returns 0 and 1 for
       the same unmapped widget. A test measuring a widget in a hidden pane therefore
@@ -443,7 +426,7 @@ Housekeeping:
       `winfo_x()` (parent-relative, assigned at pack time, valid while unmapped)
       from `winfo_rootx()` (absolute screen position, not valid). Cost story #24
       feature 2 a CI round. Make the pane genuinely visible before measuring.
-- [ ] **Xvfb has no window manager, so WM-driven events never fire locally.** Most
+- Lesson (not a backlog item): **Xvfb has no window manager, so WM-driven events never fire locally.** Most
       importantly it never generates the root-targeted `<Configure>` a real WM
       (macOS WindowServer, Windows) sends after mapping. Story #24 feature 3 shipped
       the same crash twice behind this: binding `<Configure>` before `__init__`'s
