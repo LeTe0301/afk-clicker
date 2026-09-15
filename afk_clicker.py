@@ -794,7 +794,9 @@ def fetch_checksums(asset, timeout=30):
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) == 2 and len(parts[0]) == 64:
-            sums[parts[1].lstrip("*").strip()] = parts[0].lower()
+            digest = parts[0].lower()
+            if all(c in "0123456789abcdef" for c in digest):
+                sums[parts[1].lstrip("*").strip()] = digest
     return sums
 
 
@@ -814,9 +816,19 @@ def _safe_names(names, destination):
     """
     Reject any archive entry that would land outside the destination.
 
-    zipfile and tarfile both happily write "../../.bashrc": the name is used as
-    given. Publishing digests and then unpacking unsafely would leave open the
-    hole the digests were meant to close.
+    zipfile's own extraction (extractall/extract, both branches below) has
+    stripped ".."/"."/drive-letter/absolute-path components before joining
+    onto the destination since Python 3.6.2 -- verified by reading the
+    installed zipfile._extract_member source on both this sandbox's 3.11.2
+    and this project's CI/release-pinned 3.12. The check below is defense
+    in depth for zip: real security, not dependent on trusting a name string
+    it never gets a chance to misuse.
+
+    tarfile is the one that actually needs this: extractall(filter="data")
+    -- the argument that closes the identical hole -- only exists from
+    Python 3.12 and is only the default from 3.14. On 3.11 a bare
+    extractall() silently restores every hole a crafted archive can hide
+    (see _safe_tar_members's own docstring for the verified symlink escape).
     """
     root = os.path.realpath(destination)
     for name in names:
@@ -1326,15 +1338,16 @@ class Store:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(self.data, fh, indent=2)
             os.replace(tmp, self.path)     # atomic: never leave a half-written file
+            return True
         except OSError:
-            pass                           # read-only home is not worth crashing over
+            return False                   # read-only home is not worth crashing over
 
     def game(self, game_id):
         return self.data["games"].setdefault(game_id, {})
 
     def put_game(self, game_id, values):
         self.data["games"][game_id] = values
-        self.save()
+        return self.save()
 
 
 # ── game profiles ─────────────────────────────────────────────────────────
@@ -2272,9 +2285,14 @@ class AfkAutoclicker:
         self._poll_thread = None
         self._poll_seq = 0             # bumped once per _poll_games() call,
         self._poll_applied_seq = 0     # compared in _apply_scan() -- see there
+        self._check_seq = 0            # bumped once per check_update() call,
+                                        # compared in _apply_check() -- see there
         self.right_held = False
         self.settings = {}
         self._pending = None
+        self._save_failed = False      # last self.store.save()/put_game()
+                                        # outcome seen by _note_save() -- see
+                                        # there
         self._log_dialog = None        # the update-log Toplevel (G#36/GH#64),
                                         # if one is currently open -- None
                                         # otherwise. It IS a genuine child of
@@ -2667,6 +2685,12 @@ class AfkAutoclicker:
             if self._pending is not None:
                 self._offer_update(self._pending[0])
             self._set_update_state(*overlay)
+            # G#21/GH#32 item 4: replay a still-outstanding save-failure
+            # notice the same way the update state above just was -- a
+            # failed _apply_appearance() save is itself what triggers this
+            # rebuild, so self._save_failed can already be True the moment
+            # self.save_failed_label exists again.
+            self._paint_save_notice()
         else:
             self._build_content(s)
             self._select(self.current, persist=False)
@@ -3007,6 +3031,17 @@ class AfkAutoclicker:
                   [("90", "90%"), ("100", "100%"), ("115", "115%"), ("130", "130%")],
                   self.ui_scale_var, s, width=220).pack()
 
+        # G#21/GH#32 item 4 (docs/design.md): a single, non-blocking notice
+        # for a Store.save() failure. Not packed here -- _paint_save_notice()
+        # (called from _build_ui()'s tail, alongside its existing update-
+        # state replay) shows/hides it based on self._save_failed, which
+        # survives a rebuild since it lives on self, not on this (torn-down-
+        # and-rebuilt) pane's own widgets.
+        self.save_failed_label = tk.Label(
+            ap, text="Couldn't save settings — changes won't be kept after closing",
+            bg=CARD, fg=BAD, font=("Segoe UI", int(9.5 * s)),
+            wraplength=int(CARD_INNER_W * s), justify="left", anchor="w")
+
         # Detected at most once per process (docs/history/ac-17-f3a-spec.md §4) -- if nothing
         # has needed the real OS theme yet (appearance started as "light"/
         # "dark", so __main__ never detected it), this is that first need;
@@ -3066,9 +3101,58 @@ class AfkAutoclicker:
 
         self._set_settings_tab(self._settings_tab)   # hide the inactive pane last
 
+    def _note_save(self, ok):
+        """Every direct caller of self.store.save()/put_game() routes its
+        result through here (docs/CODING-GUIDELINES.md "Failure behaviour":
+        name a read-only config directory instead of a silent no-op). Only
+        acts on a *change* in outcome -- a run of keystroke-driven _persist()
+        failures while a directory stays read-only repaints nothing after
+        the first one, and a later successful save clears the notice --
+        so this never re-announces the same, still-ongoing failure.
+
+        Every one of the five call sites (_apply_appearance, _apply_ui_
+        scale, _select's persist branch, _persist()/put_game, apply_hotkey)
+        runs on the main thread already -- none of them is reachable from a
+        background thread today -- so this touches self.save_failed_label
+        directly rather than routing through self._ui()/_drain_ui().
+
+        test-review.md round 1, Defect 1: self._rebuilding is True for the
+        exact window where this must NOT touch self.save_failed_label --
+        _rebuild_ui()'s own leading self._persist() call runs after the old
+        widget tree has been (or is about to be) torn down and before
+        _build_ui() has built a fresh one, so the label either doesn't
+        exist yet (a session's first-ever _show_settings()) or still points
+        at an already-destroyed widget (Settings closed once, then
+        reopened after a save failed while it was closed). The outcome is
+        still recorded unconditionally -- only the repaint is deferred --
+        so _build_ui()'s own tail (which calls _paint_save_notice()
+        directly, unconditionally, once the fresh tree -- and, if
+        self._settings_open, a fresh self.save_failed_label -- exists)
+        picks up exactly this flag and paints correctly."""
+        if ok == (not self._save_failed):
+            return
+        self._save_failed = not ok
+        if self._rebuilding:
+            return
+        self._paint_save_notice()
+
+    def _paint_save_notice(self):
+        # Appearance-pane-local, mirroring _set_update_state()'s own
+        # if-not-open-remember-and-return pattern: the flag survives
+        # regardless of which pane is currently showing (a hotkey apply or a
+        # game-field edit can fail to save while sitting on a different
+        # tab), and gets painted the next time Appearance is (re)built too,
+        # via _build_ui()'s own tail (docs/design.md).
+        if not (self._settings_open and self._settings_tab == "appearance"):
+            return
+        if self._save_failed:
+            self.save_failed_label.pack(fill="x", pady=(int(8 * self.s), 0))
+        else:
+            self.save_failed_label.pack_forget()
+
     def _apply_appearance(self, value):
         self.store.data["appearance"] = value
-        self.store.save()
+        self._note_save(self.store.save())
         resolved = resolve_appearance(value, self._os_theme)
         if value == "system" and self._os_theme is None:
             self._os_theme = resolved   # memoize -- a later System pick this
@@ -3125,7 +3209,7 @@ class AfkAutoclicker:
         if value not in UI_SCALE_FACTORS:
             value = UI_SCALE_DEFAULT
         self.store.data["ui_scale"] = value
-        self.store.save()
+        self._note_save(self.store.save())
         self.s = self._dpi_s * UI_SCALE_FACTORS[value]
         self._apply_minsize(grow_only=True)
         self._request_rebuild()
@@ -3283,6 +3367,14 @@ class AfkAutoclicker:
         # why this is routed through _request_pane_fill() (G#28/GH#48
         # round 5).
         self._request_pane_fill(value)
+        # G#21/GH#32 item 4: a save failure that happened while Updates was
+        # showing (self._save_failed already True, but _paint_save_notice()
+        # returned early -- it only ever paints while Appearance itself is
+        # the active tab) must become visible the moment the user switches
+        # to Appearance, not only on the next full rebuild -- switching
+        # tabs alone never rebuilds either pane, so nothing else would ever
+        # call this again.
+        self._paint_save_notice()
 
     # ---------- game list ----------
 
@@ -3355,7 +3447,7 @@ class AfkAutoclicker:
 
         if persist:
             self.store.data["selected"] = game_id
-            self.store.save()
+            self._note_save(self.store.save())
         self._persist()
 
     def _persist(self):
@@ -3374,7 +3466,7 @@ class AfkAutoclicker:
         if profile.get("custom"):
             values["_profile"] = {"id": profile["id"], "name": profile["name"],
                                   "title": profile["titles"][0]}
-        self.store.put_game(self.current, values)
+        self._note_save(self.store.put_game(self.current, values))
 
     def add_current_game(self):
         def scan():
@@ -3410,31 +3502,60 @@ class AfkAutoclicker:
         # checksum/verification error still leaves self._pending set, so
         # retrying the same install stays possible.
         self._pending = None
+        self._check_seq += 1
+        seq = self._check_seq
         self.settings_item.set_state(has_update=False)
         if self._settings_open:
             self.update_button.command = self.check_update
         self._set_update_state("Checking…", enabled=False)
-        threading.Thread(target=self._check_worker, daemon=True).start()
+        threading.Thread(target=self._check_worker, args=(seq,), daemon=True).start()
 
-    def _check_worker(self):
+    def _check_worker(self, seq):
         try:
             release = latest_release()
         except NoReleases:
-            self._ui(self._set_update_state, "No releases published yet", True)
+            self._ui(self._apply_check_state, seq, "No releases published yet", True)
             return
         if release is None:
-            self._ui(self._set_update_state, "GitHub unreachable", True, BAD)
+            self._ui(self._apply_check_state, seq, "GitHub unreachable", True, BAD)
             return
         tag = release.get("tag_name", "")
         if not is_newer(tag):
-            self._ui(self._set_update_state, f"Up to date · {__version__}", True)
+            self._ui(self._apply_check_state, seq, f"Up to date · {__version__}", True)
             return
         asset = pick_asset(release)
         if asset is None:
-            self._ui(self._set_update_state, f"{tag}: no build for this OS", True, BAD)
+            self._ui(self._apply_check_state, seq, f"{tag}: no build for this OS", True, BAD)
+            return
+        self._ui(self._apply_check, seq, tag, asset, release)
+
+    def _apply_check_state(self, seq, text, enabled=True, colour=None):
+        # test-review.md round 1, Finding 2: the same stale-result guard as
+        # _apply_check() below, for _check_worker's four non-offer branches
+        # (NoReleases/unreachable/not-newer/no-build-for-OS). Without this,
+        # an orphaned older worker's "Up to date"/"GitHub unreachable"/etc.
+        # could still land -- and overwrite the button/version-label text --
+        # after a newer worker's offer has already been applied, the exact
+        # supersession bug _apply_check()'s own gate exists to close, just
+        # on the non-offer branches the spec's own proposed diff didn't
+        # gate.
+        if seq != self._check_seq:
+            return
+        self._set_update_state(text, enabled, colour)
+
+    def _apply_check(self, seq, tag, asset, release):
+        # Main-thread gate, mirroring _apply_scan()'s stale-scan guard
+        # (G#39/GH#69, afk_clicker.py's own _poll_games()/_apply_scan()): an
+        # orphaned older worker (started by a check_update() call a newer
+        # one has already superseded) must not overwrite self._pending/the
+        # offer state with a stale release once a newer check has moved
+        # past it. Also the only place self._pending is ever written now --
+        # always from here, always on the main thread via _ui()/_drain_ui(),
+        # never directly from _check_worker's own background thread.
+        if seq != self._check_seq:
             return
         self._pending = (tag, asset, release)
-        self._ui(self._offer_update, tag)
+        self._offer_update(tag)
 
     def _offer_update(self, tag):
         self._update_text = (f"Install {tag}", True, None)
@@ -4091,7 +4212,7 @@ class AfkAutoclicker:
             return
         self.registered_hotkey = self.hotkey
         self.store.data["hotkey"] = self.hotkey.to_json()
-        self.store.save()
+        self._note_save(self.store.save())
         self.hotkey_label.config(text=self.hotkey.label(), fg=INK)
         self.apply_button.set_enabled(False)
         self.status.set("OFF", BAD, f"{self.hotkey.label()} toggles")

@@ -173,13 +173,18 @@ class Checksums(unittest.TestCase):
         blob = (f"{digest}  plain.zip\n"
                 f"{digest.upper()}  *binary-mode.tar.gz\n"
                 "not a checksum line\n"
-                f"{'b' * 63}  too-short.zip\n")
+                f"{'b' * 63}  too-short.zip\n"
+                f"{'g' * 64}  garbage.zip\n")
         path = os.path.join(tempfile.mkdtemp(), "SHA256SUMS")
         open(path, "w").write(blob)
         sums = app.fetch_checksums(
             {"browser_download_url": pathlib.Path(path).as_uri()})
         # The leading "*" marks binary mode and is not part of the name; the
-        # digest is normalised to lower case so comparison cannot miss.
+        # digest is normalised to lower case so comparison cannot miss. A
+        # 64-character token that is not hex ("g" is not a hex digit) is not
+        # a real digest, however length-plausible -- rejected outright rather
+        # than accepted and left to fail only much later, at the real
+        # digest comparison.
         self.assertEqual(sums, {"plain.zip": digest, "binary-mode.tar.gz": digest})
 
     def test_file_digest_matches_hashlib(self):
@@ -284,7 +289,9 @@ class StagingSafety(unittest.TestCase):
         self.assertEqual(set(os.listdir(os.path.dirname(path))) - before, set())
 
     def test_an_entry_escaping_the_directory_is_refused(self):
-        # zipfile writes the member name as given; "../.." lands outside.
+        # zipfile's own extraction already strips ".."/drive components
+        # (Python 3.6.2+) -- this check is defense in depth for zip and the
+        # actual guard for tar (afk_clicker.py:_safe_names's own docstring).
         path = self._zip({"../../escaped.txt": "gotcha"})
         asset = self._asset(path)
         with self.assertRaises(app.ChecksumError) as caught:
