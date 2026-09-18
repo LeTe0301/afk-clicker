@@ -2835,18 +2835,6 @@ class AfkAutoclicker:
             collapsed_changed = collapsed != self._rail_collapsed
             if collapsed_changed:
                 self._rail_collapsed = collapsed
-            # G#38/GH#67 round 4 (PR #89 review, Defect 2): temporary,
-            # env-var-gated instrumentation -- inert unless
-            # AFK_DEBUG_AUTO_RESIZE is set, so this is a no-op in every
-            # normal run/CI leg except the one throwaway debug push this is
-            # for. Remove once the Windows CI values are captured.
-            if os.environ.get("AFK_DEBUG_AUTO_RESIZE"):
-                print(f"AFK_DEBUG_AUTO_RESIZE event=({event.width},{event.height}) "
-                      f"bootstrap_wh={self._auto_bootstrap_wh} "
-                      f"is_bootstrap_echo={is_bootstrap_echo} "
-                      f"s_changed={s_changed} collapsed_changed={collapsed_changed} "
-                      f"self.s={self.s} rail_collapsed={self._rail_collapsed}",
-                      flush=True)
             if (s_changed or collapsed_changed) and not is_bootstrap_echo:
                 self._request_auto_settle()
             return

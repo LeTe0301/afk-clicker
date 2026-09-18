@@ -4267,15 +4267,6 @@ class UIScaleAuto(UITestCase):
         self.assertEqual(len(calls), 1)
 
     def test_shrinking_past_the_threshold_collapses_the_rail_under_auto(self):
-        # G#38/GH#67 round 4 (PR #89 review, Defect 2): temporary
-        # instrumentation for the still-open Windows CI failure -- prints
-        # every _on_root_resize() Auto-mode decision this test's own
-        # events drive, gated behind AFK_DEBUG_AUTO_RESIZE (inert
-        # everywhere else). Remove this os.environ set/cleanup and
-        # afk_clicker.py's own matching print once the real Windows values
-        # are captured from this throwaway debug push.
-        os.environ["AFK_DEBUG_AUTO_RESIZE"] = "1"
-        self.addCleanup(lambda: os.environ.pop("AFK_DEBUG_AUTO_RESIZE", None))
         # Mirrors WindowResize.test_shrinking_past_the_threshold_collapses_
         # the_rail, but self.s here is Auto's own live, continuously-
         # recomputed value rather than a fixed one -- and the settled
@@ -4303,6 +4294,31 @@ class UIScaleAuto(UITestCase):
         # below back up to that stale floor.
         self.root.minsize(1, 1)
         self._suppress_apply_minsize_side_effects()
+        # Round 4 (PR #89 review, Defect 2): force a known, un-collapsed
+        # baseline before computing the shrink target, and sync the real
+        # widget tree to it, rather than trusting whatever self.ui.s/
+        # self.ui._rail_collapsed construction already left in place.
+        # Root-caused via a throwaway AFK_DEBUG_AUTO_RESIZE instrumented
+        # push against real Windows CI (removed once the values below were
+        # captured): on a real WM whose own screen makes construction's
+        # own bootstrap self-correction land self.s at (or near) the clamp
+        # ceiling, the rail is already *logically* collapsed
+        # (self._rail_collapsed already True) before this test's own
+        # resize -- correctly never rebuilt, per round 2's own "widget
+        # tree lags self.s" tradeoff for a bootstrap echo. This test's own
+        # target_w/h, computed relative to that already-saturated s
+        # (compounded by target_h's own round-3-documented aspect-
+        # inconsistency, which independently pulls self.s back toward the
+        # same ceiling), can land at the exact same self.s/collapsed state
+        # again -- s_changed and collapsed_changed both False, so no
+        # settle/rebuild ever gets requested, and self.ui.side is left
+        # showing construction's own stale, expanded width forever.
+        # Captured directly from Windows CI: both events this test's own
+        # resize produced showed self.s already pinned at the ceiling and
+        # rail_collapsed already True beforehand.
+        self.ui.s = self.ui._dpi_s * 1.0
+        self.ui._rail_collapsed = False
+        self.ui._rebuild_ui()
         s = self.ui.s
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
@@ -4330,6 +4346,19 @@ class UIScaleAuto(UITestCase):
         # root.minsize() is reset first.
         self.root.minsize(1, 1)
         self._suppress_apply_minsize_side_effects()
+        # Round 4 (PR #89 review, Defect 2): same known-baseline reset as
+        # this test's shrinking sibling -- without it, this test's own
+        # initial shrink-to-collapse phase is exposed to the identical
+        # pre-saturated-construction risk (a real WM's own screen already
+        # landing self.s at the clamp ceiling and the rail already
+        # logically collapsed before this test's first resize), even
+        # though it wasn't the one observed failing on Windows CI this
+        # round -- this test's own later "worst_case_threshold"-based grow
+        # margin already happened to be robust to a saturated starting s,
+        # which is likely why only its shrinking sibling actually failed.
+        self.ui.s = self.ui._dpi_s * 1.0
+        self.ui._rail_collapsed = False
+        self.ui._rebuild_ui()
         s = self.ui.s
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
