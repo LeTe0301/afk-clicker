@@ -3976,44 +3976,86 @@ class UIScaleAuto(UITestCase):
         self.root.geometry(f"{default_w}x{default_h}")
         self.pump_until(lambda: (self.root.winfo_width(), self.root.winfo_height())
                                  == (default_w, default_h))
+        # _apply_ui_scale("auto")'s own tail call to _apply_minsize() sets
+        # root.minsize() again for the newly-computed self.s -- confirmed
+        # directly that Tk's own root.minsize() can silently grow the real
+        # window to meet a new floor on its own, no geometry() call
+        # involved (a bare root.minsize(500, 500) on a 300x300 Tk() grows
+        # it to 500x500). Stubbed for the rest of this test so the window
+        # just carefully placed at the app's own default geometry above
+        # stays there while self.s gets computed from it -- root.minsize()
+        # itself isn't what this test is about.
+        self._stub_minsize_without_growth_side_effect()
         self.ui._apply_ui_scale("auto")
         self.root.update()
         self.assertAlmostEqual(self.ui.s, self.ui._dpi_s,
                                delta=max(self.ui._dpi_s * 0.02, 0.01))
 
-    def _grow_real_window_past_every_tested_floor(self):
-        """Round 3 (PR #89 review): a real root.geometry() call, once, to a
-        size that comfortably exceeds AUTO_SCALE_MAX's own minsize floor
-        (672x806 unscaled at the app's own fixed pixel constants) -- small
-        enough that any real screen a CI runner has should still grant it
-        (unlike the *fake*, forced _screen_w/_screen_h below, which is
-        only ever used as the _auto_scale_factor() calculation's own
-        denominator, never as a real window size request).
+    def _stub_minsize_without_growth_side_effect(self):
+        """Round 3 (PR #89 review): monkeypatch-and-restore (this repo's
+        own established style for a seam like this -- see
+        SaveFailureNotice._break_saves()/_fix_saves() -- no unittest.mock).
 
-        Without this, _on_root_resize()'s own _apply_minsize(grow_only=True)
-        call -- triggered by each synthetic <Configure> below -- finds the
-        *real* window still at its small construction-time size, below the
-        new minsize floor the synthetic event's self.s implies, and issues
-        its OWN real geometry() growth call. That real call's own resulting
-        Configure (carrying the *real*, small window's dimensions, not the
-        synthetic event's fake ones) then recomputes self.s a second time
-        against the forced screen, silently overwriting the intended value
-        with whatever the tiny real geometry works out to (observed: pinned
-        at AUTO_SCALE_MIN for every factor from 1.1 up, once minsize's own
-        height floor first exceeded the real window's construction-time
-        height). Growing the real window past every tested floor up front
-        means grow_only never needs to touch real geometry again for the
-        rest of the test, so only the synthetic events drive self.s.
+        Confirmed directly, not assumed: a bare root.minsize(500, 500) on
+        a fresh 300x300 Tk() window grows the *real* window to 500x500 on
+        its own -- no root.geometry() call involved at all. _apply_minsize()
+        calls root.minsize() unconditionally, every time self.s changes,
+        so this side effect alone (independent of its own explicit
+        grow_only geometry() call) is enough to trigger a further real
+        <Configure>, which Auto mode feeds straight back into
+        _auto_scale_factor(), which can then call _apply_minsize() again --
+        a cascade with no natural end on a real window manager whose own
+        confirmation timing this suite can't control (traced one such
+        cascade directly: requested (613, 729), landed at (672, 806) after
+        two further self-triggered rounds).
 
-        Waits for the real window to actually reach this size (not just a
-        single root.update()) -- a real window manager's own confirmation
-        of a geometry() request is asynchronous, and the very first
-        synthetic <Configure> below would otherwise still find the real
-        window at its small, unconverged construction-time size, causing
-        exactly the same corruption this method exists to prevent."""
-        self.root.geometry("720x850")
-        self.pump_until(lambda: (self.root.winfo_width(), self.root.winfo_height())
-                                 == (720, 850))
+        Tracked here in a plain Python dict instead, so a later
+        root.minsize() *query* -- which every caller of this helper still
+        depends on -- returns whatever was last "set", without the real Tk
+        command's growth side effect ever firing."""
+        original_minsize = self.root.minsize
+        tracked_minsize = original_minsize()
+
+        def minsize_stub(width=None, height=None):
+            nonlocal tracked_minsize
+            if width is None:
+                return tracked_minsize
+            tracked_minsize = (width, height)
+            return None
+
+        self.root.minsize = minsize_stub
+        self.addCleanup(lambda: setattr(self.root, "minsize", original_minsize))
+
+    def _suppress_self_triggered_real_growth(self):
+        """Round 3 (PR #89 review): _on_root_resize()'s own
+        _apply_minsize(grow_only=True) call -- triggered by every
+        synthetic <Configure> below -- finds the *real* window still at
+        whatever small size this fixture's construction left it at, below
+        the new minsize floor the synthetic event's self.s implies, and
+        issues its OWN real root.geometry() growth call (in addition to
+        root.minsize()'s own growth side effect, see
+        _stub_minsize_without_growth_side_effect() above). Either one's
+        resulting real Configure (carrying the *real*, small window's
+        dimensions, not the synthetic event's fake ones) recomputes self.s
+        a second time against the forced screen, silently overwriting the
+        intended value with whatever the tiny real geometry works out to
+        (observed: pinned at AUTO_SCALE_MIN for every factor from 1.1 up,
+        once minsize's own floor first exceeded the real window's current
+        size).
+
+        Both stubbed here (geometry() as a flat no-op, minsize() via the
+        shared helper above), so every real resize this test never asked
+        for is impossible outright, regardless of what the real screen can
+        or can't grant, rather than trying to out-race it (an earlier
+        version of this fix grew the real window once, up front, to a size
+        comfortably past every tested factor's own floor -- correct in
+        principle, but a real macOS CI runner's own screen turned out not
+        to be tall enough for it, reproducing the identical symptom
+        anyway)."""
+        original_geometry = self.root.geometry
+        self.root.geometry = lambda *a, **kw: None
+        self.addCleanup(lambda: setattr(self.root, "geometry", original_geometry))
+        self._stub_minsize_without_growth_side_effect()
 
     def test_s_strictly_increases_with_increasing_window_size(self):
         # Forced to a screen much larger than the app's own fixed-pixel
@@ -4031,7 +4073,7 @@ class UIScaleAuto(UITestCase):
         # debounce/rail tests below already use successfully) drives the
         # exact same code path without requesting any such real resize.
         self.ui._screen_w, self.ui._screen_h = 3840, 2160
-        self._grow_real_window_past_every_tested_floor()
+        self._suppress_self_triggered_real_growth()
         prev_s = None
         for factor in (0.92, 1.0, 1.1, 1.2, 1.28):
             with self.subTest(factor=factor):
@@ -4052,13 +4094,13 @@ class UIScaleAuto(UITestCase):
         # what _apply_minsize() just set regardless of whether any real
         # window ever actually reaches that size.
         self.ui._screen_w, self.ui._screen_h = 3840, 2160
-        self._grow_real_window_past_every_tested_floor()
-        # Grow (via a synthetic event now, not a real one -- see
-        # _grow_real_window_past_every_tested_floor()) so there's real room
-        # to shrink through in one continuous sequence (docs/spec.md's own
-        # named edge case: a naive "only touch self.s at settle" design
-        # would have let a single shrink drag overshoot the true live
-        # floor).
+        self._suppress_self_triggered_real_growth()
+        # Grow (via a synthetic event, no real geometry() call possible
+        # while _suppress_self_triggered_real_growth() is in effect) so
+        # there's real room to shrink through in one continuous sequence
+        # (docs/spec.md's own named edge case: a naive "only touch self.s
+        # at settle" design would have let a single shrink drag overshoot
+        # the true live floor).
         start_w, start_h = self._wh_for_factor(1.28)
         self.root.event_generate("<Configure>", width=start_w, height=start_h)
         self.root.update()
@@ -4125,23 +4167,27 @@ class UIScaleAuto(UITestCase):
         # rebuild (not just the flag) must reflect it, since Auto defers
         # the actual widget-tree rebuild to AUTO_SETTLE_MS's timer instead
         # of fixed-step mode's immediate after_idle.
+        #
+        # Round 3 (PR #89 review): this helper's own target_h (fixed
+        # "700", not derived from the app's own aspect ratio, same as
+        # WindowResize's pre-Auto equivalent) can feed back into Auto's
+        # own live self.s at a fill fraction that pulls it toward
+        # AUTO_SCALE_MAX -- root.minsize()'s own growth side effect (see
+        # _stub_minsize_without_growth_side_effect()'s own docstring) can
+        # then keep moving the real window past what this test requested,
+        # in a cascade with no natural end on a real window manager.
+        # Stubbed so this test's own single, deliberate geometry() call
+        # below is the last real resize that happens; the flag (and the
+        # final self.s-derived assertion, which reads self.ui.s fresh
+        # rather than the s captured here) is what the test actually
+        # cares about either way.
+        self._stub_minsize_without_growth_side_effect()
         s = self.ui.s
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
         target_w = (threshold + floor) // 2
         target_h = int(700 * s)
         self.root.geometry(f"{target_w}x{target_h}")
-        # Round 3 (PR #89 review): waits for the collapse flag itself, not
-        # the literal requested geometry -- this helper's own target_h
-        # (fixed "700", not derived from the app's own aspect ratio, same
-        # as WindowResize's pre-Auto equivalent) can feed back into Auto's
-        # own live self.s at a fill fraction that pulls it toward
-        # AUTO_SCALE_MAX, after which _apply_minsize's own grow_only
-        # branch can grow the real window past what was originally
-        # requested -- the flag (and the final self.s-derived assertion
-        # below, which reads self.ui.s fresh rather than the s captured
-        # above) is what the test actually cares about, and is robust to
-        # exactly where the window ends up landing.
         self.pump_until(lambda: self.ui._rail_collapsed)
         self.assertTrue(self.ui._rail_collapsed)
         # A condition-based wait for the settled rebuild, not a fixed
@@ -4158,7 +4204,9 @@ class UIScaleAuto(UITestCase):
         # Round 3 (PR #89 review): see test_shrinking_past_the_threshold_
         # collapses_the_rail_under_auto's own comment for why this waits
         # on the flag/final-state conditions themselves rather than the
-        # literal requested geometry or a fixed sleep.
+        # literal requested geometry or a fixed sleep, and why
+        # root.minsize()'s own growth side effect is stubbed.
+        self._stub_minsize_without_growth_side_effect()
         s = self.ui.s
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
