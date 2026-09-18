@@ -3979,8 +3979,18 @@ class UIScaleAuto(UITestCase):
         self.root.winfo_height = lambda: default_h
         self.addCleanup(lambda: setattr(self.root, "winfo_width", original_winfo_width))
         self.addCleanup(lambda: setattr(self.root, "winfo_height", original_winfo_height))
+        # No root.update() here, deliberately: _apply_ui_scale("auto")
+        # computes self.s synchronously, in plain Python, from the
+        # winfo_width()/winfo_height() stubs above -- nothing about that
+        # needs the event loop pumped. Pumping it here risks processing a
+        # real, still-in-flight <Configure> this fixture's own
+        # construction left queued (this round's own recurring theme: a
+        # real window manager's own confirmation can arrive later than
+        # any single synchronization point this suite controls), which
+        # would fire _on_root_resize() and overwrite self.s with a value
+        # computed from the *real* window's own current size, not the
+        # stubbed one this test is actually about.
         self.ui._apply_ui_scale("auto")
-        self.root.update()
         self.assertAlmostEqual(self.ui.s, self.ui._dpi_s,
                                delta=max(self.ui._dpi_s * 0.02, 0.01))
 
@@ -4202,7 +4212,13 @@ class UIScaleAuto(UITestCase):
         # the last real resize that happens; the flag (and the final
         # self.s-derived assertion, which reads self.ui.s fresh rather
         # than the s captured here) is what the test actually cares about
-        # either way.
+        # either way. root.minsize() reset to (1, 1) first, before
+        # suppressing _apply_minsize() -- once suppressed, nothing ever
+        # relaxes whatever floor this fixture's own construction-time
+        # self-correction may have already left in place, which could
+        # otherwise silently clamp this test's own geometry() request
+        # below back up to that stale floor.
+        self.root.minsize(1, 1)
         self._suppress_apply_minsize_side_effects()
         s = self.ui.s
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
@@ -4219,15 +4235,17 @@ class UIScaleAuto(UITestCase):
         # once before it actually fires, on a real window manager whose
         # own confirmation timing this suite can't control.
         self.pump_until(lambda: self.ui.side.winfo_width()
-                                 == int(app.SIDEBAR_RAIL_W * self.ui.s), timeout=3.0)
+                                 == int(app.SIDEBAR_RAIL_W * self.ui.s), timeout=5.0)
         self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_RAIL_W * self.ui.s))
 
     def test_growing_back_past_the_threshold_re_expands_the_rail_under_auto(self):
         # Round 3 (PR #89 review): see test_shrinking_past_the_threshold_
         # collapses_the_rail_under_auto's own comment for why this waits
         # on the flag/final-state conditions themselves rather than the
-        # literal requested geometry or a fixed sleep, and why
-        # _apply_minsize()'s own side effects are suppressed.
+        # literal requested geometry or a fixed sleep, why
+        # _apply_minsize()'s own side effects are suppressed, and why
+        # root.minsize() is reset first.
+        self.root.minsize(1, 1)
         self._suppress_apply_minsize_side_effects()
         s = self.ui.s
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
@@ -4242,7 +4260,7 @@ class UIScaleAuto(UITestCase):
         self.pump_until(lambda: not self.ui._rail_collapsed)
         self.assertFalse(self.ui._rail_collapsed)
         self.pump_until(lambda: self.ui.side.winfo_width()
-                                 == int(app.SIDEBAR_W * self.ui.s), timeout=3.0)
+                                 == int(app.SIDEBAR_W * self.ui.s), timeout=5.0)
         self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_W * self.ui.s))
 
     def test_settings_shows_auto_selected_by_default(self):
