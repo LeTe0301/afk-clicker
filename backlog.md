@@ -373,17 +373,33 @@ Two follow-ups from its review are below.
       change, not a bug, and check the window height floor (`WINDOW_MIN_H`) still
       holds with top alignment. The Macros tab branch (G#13, below) builds its
       settings on the same centered panes, so it needs the same change.
-- [ ] **G#38 / GH#67 — github: true — UI scale should follow the window size** (Leo, 2026-09-13). Today it's a
-      fixed Settings choice (90/100/115/130%). Leo wants it to scale with the window.
-      Open design questions for the spec: replace the manual choice or make it an
-      "Auto" option next to it, what the reference size is, whether it steps or
-      scales continuously, and how it interacts with `WINDOW_MIN_H`, the rail
-      collapse threshold and the per-rebuild cost of `_rebuild_ui()` during a drag
-      resize.
+- [ ] **In review, PR #89 (`4266900`).** G#38 / GH#67 — github: true — UI scale should follow the
+      window size (Leo, 2026-09-13). Today it's a fixed Settings choice (90/100/115/130%).
+      Built 2026-09-18: "Auto" prepended to the `Segmented` control and made the new-install
+      default, continuous scale from window-fill fraction against a 1920x1080 reference,
+      clamped, reuses G#23's `fs(base, s)` floor. Cycle review: approve with 2 non-blocking
+      follow-ups (filed as G#49/GH#90 and G#50/GH#91, see Housekeeping). **Independent PR
+      review round 1: ANOTHER ROUND** — macOS/Windows CI failed because making `"auto"` the
+      default meant every real launch (and every `UITestCase`) now gets a real WM's post-map
+      `<Configure>`, which Xvfb never sends, arming a live settle timer that rebuilt mid-test.
+      **Round 2 pushed (`4266900`)**: gate the settle-arm on the event reporting the app's own
+      bootstrap geometry echoed unchanged (content, not order), and unbind `<Configure>` at
+      the top of `on_close()` so a late echo during teardown can't re-arm the job. 3 sabotage-
+      verified regression tests, 437 tests green locally. **Next: a fresh independent review of
+      the new diff (never a re-review of the already-reviewed one), then merge on MERGE + green
+      CI on all three platforms.**
 - [ ] G#13 / GH#15 — github: true — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
 - [ ] G#12 / GH#14 — github: true — Calibration suite for the review agent. Rebase its branch first: it (and G#13's, which contains its `2bdf55f`) is stacked on `901f0a4`, whose FIFO tests fail on Windows.
 
 Housekeeping:
+- [ ] G#49 / GH#90 — github: true — Follow-up from PR #89's cycle review (G#38): the Auto UI-scale
+      clamp's regression test doesn't actually exercise out-of-range factors — every back-solved
+      test value already sits inside `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]`. Sabotage-verified: removing
+      the clamp leaves the test green. Add a `subTest` with a genuinely out-of-range back-solved
+      factor asserting `self.ui.s` lands at the clamp boundary.
+- [ ] G#50 / GH#91 — github: true — Follow-up from PR #89's cycle review (G#38): `README.md` still
+      describes UI scale as only the 4 fixed percentage steps, doesn't mention the new Auto default.
+      One-sentence fix.
 - [ ] G#46 / GH#85 — github: true — **Delete merged remote branches** (Leo, 2026-09-13). As of
       2026-09-15, 15 branches on `github` are fully merged, listed on the ticket. Keep
       `feature/ac-12/…`/`feature/ac-13/…`; they are unmerged and tracked on G#12/G#13.
@@ -685,10 +701,55 @@ release comes after 0.8.0.
 1. ~~G#4 / GH#6 — click interval measures 25–40% slow on macOS CI.~~ **Closed
    2026-09-18, accept-and-document, no code/PR** — see the checkbox entry
    above and `tests/test_ui.py`'s `darwin_timing` comment for the finding.
-2. G#38 / GH#67 — UI scale follows the window size (reuses G#23's `fs()`).
+2. ~~G#38 / GH#67 — UI scale follows the window size (reuses G#23's `fs()`).~~
+   **In review, PR #89** — see the checkbox entry above and the continued
+   handoff below.
 3. G#12 / GH#14 — calibration suite for the review agent. Rebase first.
 4. G#13 / GH#15 — Macros tab story. Blocked on the settings schema version
    bump (ROADMAP); resolve that first, then run as a `story` workflow.
 
-Smaller opportunistic items (G#40, G#41, G#42, G#44, G#45, G#46, G#47, G#48)
-are unchanged from the 2026-09-15 (night) list above.
+Smaller opportunistic items (G#40, G#41, G#42, G#44, G#45, G#46, G#47, G#48,
+and the two new ones filed this session, G#49, G#50) are unchanged/additive
+from the 2026-09-15 (night) list above.
+
+## Session handoff — 2026-09-18 (continued)
+
+`main` is unchanged at `99c9344` since the handoff above — **G#38 is not yet
+merged**, still in flight on `feature/ac-38/ui-scale-follows-window`.
+
+Full cycle ran: product-manager → ux-designer → developer → cycle reviewer
+(**approve with follow-ups**, 2 non-blocking items filed as G#49/GH#90 and
+G#50/GH#91) → pushed, PR #89 opened. Independent critical PR review round 1
+returned **ANOTHER ROUND**: `ubuntu-latest` passed but `macos-latest` and
+`windows-latest` both failed (20 failures each) against `main`'s green
+baseline — a real regression, not flakiness. Root cause: making `"auto"`
+the new default means every real launch (and every `UITestCase`, since
+tests don't override the default) now runs in Auto mode, and a real WM's
+post-map `<Configure>` — which Xvfb never sends, so this was invisible in
+local/Linux testing — armed a live 150ms settle timer that rebuilt the
+widget tree mid-test.
+
+**Round 2 pushed (`4266900`)**: gates the settle-arm on the `<Configure>`
+event reporting the app's own already-known bootstrap geometry echoed back
+unchanged (content, not order — an order-based "first event" heuristic was
+tried and rejected, since Xvfb's first *synthetic* event in a test is never
+actually the real echo, so it broke existing tests); also unbinds
+`<Configure>` at the very top of `on_close()`, before the existing after-id
+cancellation, so a late echo during teardown can't re-arm a job nothing
+after that point cancels — the same hazard class already hit once for
+`_log_report_after_id` (`afk_clicker.py:3974-3979`). 3 new sabotage-verified
+regression tests, 437 tests green locally (Linux/Xvfb only — the actual fix
+for the macOS/Windows failures can only be confirmed once this round's CI
+runs). Status posted to PR #89 and Gitea #38.
+
+**Session paused here, deliberately, before dispatching the next stage.**
+The immediate next step for whoever picks this up: dispatch a **fresh**
+independent critical PR review of the new diff (`4266900`) — never a
+re-review of the round-1 diff already marked ANOTHER ROUND — then merge on
+`MERGE` + green CI on all three platforms. `docs/spec.md`/`design.md`/
+`implementation.md`/`test-review.md` are still sitting uncommitted in the
+working tree (this project's normal per-cycle scratch state — archive them
+into `docs/history/ac-38-*.md` as the last step once the PR merges, same as
+every prior cycle). `0.8.0` is still unpublished, parked on Leo's
+deployment-gate approval, untouched this session (Leo's own call, "hold off
+for now" as of the last check-in) — it does not include G#38 either way.
