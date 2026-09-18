@@ -1150,7 +1150,21 @@ class WindowMinimumHeight(UITestCase):
     WINDOW_MIN_H replaces the bare 690 literal with a smaller, named
     constant re-derived from the tallest pane's own real content span --
     these tests prove it both shrank and still fits that pane, construction-
-    true, rather than trusting a hardcoded pixel value."""
+    true, rather than trusting a hardcoded pixel value.
+
+    G#38/GH#67 round 4 (PR #89 review, real macOS CI): generic, non-Auto
+    mechanics (docs/spec.md's own non-goal), same reasoning as WindowResize's
+    own INITIAL_UI_SCALE above -- test_default_launch_height_equals_the_floor
+    reads self.ui.s and self.root.winfo_height() and assumes they stay in
+    lockstep, which a real WM's own construction-time Auto self-correction
+    can legitimately break: a downward correction (self.s ends up lower than
+    the bootstrap value) never shrinks the already-larger real window
+    (_apply_minsize()'s grow_only never shrinks), leaving self.ui.s and the
+    real window's height genuinely, correctly out of sync until the next
+    trigger (round 2's own documented, accepted widget-tree-lag tradeoff) --
+    observed for real on macOS CI once Defect 1's fix let the clamp actually
+    reach below the bootstrap value instead of always clamping upward."""
+    INITIAL_UI_SCALE = "100"
 
     def test_minimum_height_shrunk_from_the_pre_tab_split_floor(self):
         self.assertLess(app.WINDOW_MIN_H, 690)
@@ -4000,15 +4014,24 @@ class UIScaleAuto(UITestCase):
         self.assertAlmostEqual(self.ui.s, self.ui._dpi_s,
                                delta=max(self.ui._dpi_s * 0.02, 0.01))
 
-    def test_auto_is_not_floored_at_the_raw_clamp_on_a_low_dpi_display(self):
-        # G#38/GH#67 round 4 (PR #89 review, Defect 1): every fixed step's
+        # Round 4 (PR #89 review, Defect 1), folded into this test rather
+        # than a standalone method -- see docs/implementation.md's own
+        # "Round 3, follow-up push" precedent for why this suite's own
+        # UITestCase count is deliberately not grown further (each instance
+        # opens its own never-released pynput.mouse.Controller() Xlib
+        # connection, and ubuntu-latest's default Xvfb build's own
+        # max-clients budget is already marginal). Every fixed step's
         # self.s is self._dpi_s * UI_SCALE_FACTORS[value] -- DPI-*relative*.
         # Auto's own clamp must land in that same DPI-relative range, not
-        # the raw [AUTO_SCALE_MIN, AUTO_SCALE_MAX] literal. Forces
+        # the raw [AUTO_SCALE_MIN, AUTO_SCALE_MAX] literal. Re-forces
         # self.ui._dpi_s to macOS CI's own observed value (~0.75, an
         # ordinary non-Retina headless-VM number, well under
         # AUTO_SCALE_MIN=0.9) -- the same "force the attribute directly"
-        # technique FontSizeFloorAtWorstCaseScale already uses for _dpi_s.
+        # technique FontSizeFloorAtWorstCaseScale already uses for _dpi_s --
+        # and re-derives default_w/h and re-applies the winfo_width/height
+        # stubs for the new _dpi_s (the addCleanup calls above already
+        # restore the originals once, so re-stubbing here just overwrites
+        # them again with the same lambda pattern for this second phase).
         # Before the fix, self.ui.s pins at the raw 0.9 floor here --
         # *larger* than even the fixed "100%" step would give on this same
         # hardware (_dpi_s * 1.0 ~= 0.75), unreachable-below no matter the
@@ -4016,15 +4039,10 @@ class UIScaleAuto(UITestCase):
         # test-review (Finding 1) flagged and that let the bug ship three
         # rounds in a row (docs/test-review.md, Defect 1).
         self.ui._dpi_s = 0.75
-        self.ui._screen_w, self.ui._screen_h = app.AUTO_REF_SCREEN_W, app.AUTO_REF_SCREEN_H
-        default_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * self.ui._dpi_s)
-        default_h = int(app.WINDOW_MIN_H * self.ui._dpi_s)
-        original_winfo_width = self.root.winfo_width
-        original_winfo_height = self.root.winfo_height
-        self.root.winfo_width = lambda: default_w
-        self.root.winfo_height = lambda: default_h
-        self.addCleanup(lambda: setattr(self.root, "winfo_width", original_winfo_width))
-        self.addCleanup(lambda: setattr(self.root, "winfo_height", original_winfo_height))
+        low_dpi_default_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * self.ui._dpi_s)
+        low_dpi_default_h = int(app.WINDOW_MIN_H * self.ui._dpi_s)
+        self.root.winfo_width = lambda: low_dpi_default_w
+        self.root.winfo_height = lambda: low_dpi_default_h
         self.ui._apply_ui_scale("auto")
         self.assertNotAlmostEqual(self.ui.s, app.AUTO_SCALE_MIN, places=2,
                                   msg="Auto must not pin self.s at the raw, "
@@ -4145,15 +4163,24 @@ class UIScaleAuto(UITestCase):
         self.ui._screen_w, self.ui._screen_h = 3840, 2160
         self._suppress_self_triggered_real_growth()
         prev_s = None
+        # Round 4 (PR #89 review, Defect 1): _wh_for_factor()'s own
+        # "raw factor" input must land inside [self._dpi_s * MIN,
+        # self._dpi_s * MAX] post-fix, not the raw [MIN, MAX] literal
+        # range -- each base factor here is scaled by self.ui._dpi_s so it
+        # stays proportionally within (dpi_s*0.9, dpi_s*1.3) regardless of
+        # what _dpi_s this box/CI runner reports. On a real low-DPI screen
+        # (macOS CI's own observed ~0.75), several of these base factors
+        # used to all clamp to the same DPI-*absolute* ceiling, breaking
+        # strict monotonicity for a reason unrelated to the mechanism under
+        # test.
         for factor in (0.92, 1.0, 1.1, 1.2, 1.28):
             with self.subTest(factor=factor):
-                w, h = self._wh_for_factor(factor)
+                w, h = self._wh_for_factor(self.ui._dpi_s * factor)
                 self.root.event_generate("<Configure>", width=w, height=h)
                 self.root.update()
-                # Round 4 (PR #89 review, Defect 1): self.ui.s is now
-                # self._dpi_s * clamped_factor -- DPI-relative, like every
-                # fixed step -- so the bounds are self._dpi_s * [MIN, MAX],
-                # not the raw literals.
+                # self.ui.s is self._dpi_s * clamped_factor -- DPI-relative,
+                # like every fixed step -- so the bounds are
+                # self._dpi_s * [MIN, MAX], not the raw literals.
                 self.assertGreaterEqual(self.ui.s, self.ui._dpi_s * app.AUTO_SCALE_MIN)
                 self.assertLessEqual(self.ui.s, self.ui._dpi_s * app.AUTO_SCALE_MAX)
                 if prev_s is not None:
@@ -4175,13 +4202,18 @@ class UIScaleAuto(UITestCase):
         # (docs/spec.md's own named edge case: a naive "only touch self.s
         # at settle" design would have let a single shrink drag overshoot
         # the true live floor).
-        start_w, start_h = self._wh_for_factor(1.28)
+        # Round 4 (PR #89 review, Defect 1): every raw factor below is
+        # scaled by self.ui._dpi_s, same reasoning as
+        # test_s_strictly_increases_with_increasing_window_size above --
+        # keeps each one proportionally within the post-fix, DPI-relative
+        # clamp range regardless of what _dpi_s this box/CI runner reports.
+        start_w, start_h = self._wh_for_factor(self.ui._dpi_s * 1.28)
         self.root.event_generate("<Configure>", width=start_w, height=start_h)
         self.root.update()
         prev_minw = None
         for factor in (1.2, 1.1, 1.0, 0.95):
             with self.subTest(factor=factor):
-                w, h = self._wh_for_factor(factor)
+                w, h = self._wh_for_factor(self.ui._dpi_s * factor)
                 self.root.event_generate("<Configure>", width=w, height=h)
                 self.root.update()
                 expected_minw = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * self.ui.s)
@@ -4467,7 +4499,23 @@ class UIScaleAuto(UITestCase):
         # Proves the fix didn't widen into "skip every event this
         # instance ever sees", and that a genuine resize after a self-
         # triggered growth (round 3's own new gap) still settles too.
-        w, h = self._wh_for_factor(1.15)
+        # Round 4 (PR #89 review, Defect 1): a fixed raw factor literal
+        # (1.15) isn't guaranteed to actually change self.s post-fix -- on
+        # a low-DPI real screen (self._dpi_s * AUTO_SCALE_MAX can be well
+        # under 1.15), it can clamp to the exact same ceiling self.s is
+        # already at from the growth step above, making this event a
+        # silent no-op for s_changed. Picks whichever clamp extreme is
+        # furthest from self.ui.s's own current value instead -- same
+        # "diverge regardless of where construction/prior steps already
+        # left self.s" technique
+        # test_the_bootstrap_echo_configure_does_not_arm_a_live_settle_timer
+        # already uses.
+        dpi_s = self.ui._dpi_s
+        low_target = dpi_s * (app.AUTO_SCALE_MIN + 0.02)
+        high_target = dpi_s * (app.AUTO_SCALE_MAX - 0.02)
+        target_s = (high_target if abs(self.ui.s - low_target) > abs(self.ui.s - high_target)
+                    else low_target)
+        w, h = self._wh_for_factor(target_s)
         self.root.event_generate("<Configure>", width=w, height=h)
         self.root.update()
         self.assertIsNotNone(self.ui._auto_settle_after_id,
