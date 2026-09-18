@@ -4267,6 +4267,15 @@ class UIScaleAuto(UITestCase):
         self.assertEqual(len(calls), 1)
 
     def test_shrinking_past_the_threshold_collapses_the_rail_under_auto(self):
+        # G#38/GH#67 round 4 (PR #89 review, Defect 2): temporary
+        # instrumentation for the still-open Windows CI failure -- prints
+        # every _on_root_resize() Auto-mode decision this test's own
+        # events drive, gated behind AFK_DEBUG_AUTO_RESIZE (inert
+        # everywhere else). Remove this os.environ set/cleanup and
+        # afk_clicker.py's own matching print once the real Windows values
+        # are captured from this throwaway debug push.
+        os.environ["AFK_DEBUG_AUTO_RESIZE"] = "1"
+        self.addCleanup(lambda: os.environ.pop("AFK_DEBUG_AUTO_RESIZE", None))
         # Mirrors WindowResize.test_shrinking_past_the_threshold_collapses_
         # the_rail, but self.s here is Auto's own live, continuously-
         # recomputed value rather than a fixed one -- and the settled
