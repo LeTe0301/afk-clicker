@@ -373,21 +373,29 @@ Two follow-ups from its review are below.
       change, not a bug, and check the window height floor (`WINDOW_MIN_H`) still
       holds with top alignment. The Macros tab branch (G#13, below) builds its
       settings on the same centered panes, so it needs the same change.
-- [ ] **In review, PR #89 (`4266900`).** G#38 / GH#67 — github: true — UI scale should follow the
-      window size (Leo, 2026-09-13). Today it's a fixed Settings choice (90/100/115/130%).
-      Built 2026-09-18: "Auto" prepended to the `Segmented` control and made the new-install
-      default, continuous scale from window-fill fraction against a 1920x1080 reference,
-      clamped, reuses G#23's `fs(base, s)` floor. Cycle review: approve with 2 non-blocking
-      follow-ups (filed as G#49/GH#90 and G#50/GH#91, see Housekeeping). **Independent PR
-      review round 1: ANOTHER ROUND** — macOS/Windows CI failed because making `"auto"` the
-      default meant every real launch (and every `UITestCase`) now gets a real WM's post-map
-      `<Configure>`, which Xvfb never sends, arming a live settle timer that rebuilt mid-test.
-      **Round 2 pushed (`4266900`)**: gate the settle-arm on the event reporting the app's own
-      bootstrap geometry echoed unchanged (content, not order), and unbind `<Configure>` at
-      the top of `on_close()` so a late echo during teardown can't re-arm the job. 3 sabotage-
-      verified regression tests, 437 tests green locally. **Next: a fresh independent review of
-      the new diff (never a re-review of the already-reviewed one), then merge on MERGE + green
-      CI on all three platforms.**
+- [x] **Merged 2026-09-18, PR #89.** G#38 / GH#67 — github: true — UI scale should follow the
+      window size (Leo, 2026-09-13). Was a fixed Settings choice (90/100/115/130%); "Auto" is
+      now prepended to the `Segmented` control and is the new-install default, a continuous
+      scale from window-fill fraction against a 1920x1080 reference, clamped, reusing G#23's
+      `fs(base, s)` floor. Cycle review: approve with 2 non-blocking follow-ups (filed as
+      G#49/GH#90 and G#50/GH#91, see Housekeeping). **Independent PR review round 1: ANOTHER
+      ROUND** — macOS/Windows CI failed because making `"auto"` the default meant every real
+      launch (and every `UITestCase`) got a real WM's post-map `<Configure>`, which Xvfb never
+      sends, arming a live settle timer that rebuilt mid-test. **Round 2 (`4266900`)**: gated
+      the settle-arm on the event reporting the app's own bootstrap geometry echoed unchanged.
+      Cycle testing pass then found this still left ~20 failures/platform on CI, traced to a
+      real production bug — round 3 (5 pushes, `f18164d`) fixed `_apply_minsize`'s own later
+      `geometry()`/`minsize()` calls self-triggering unrecognized echoes, plus test-
+      infrastructure hardening; got CI down to 1 failure/platform. Cycle testing pass round 2:
+      **BLOCKED** — found the real DPI-relative-vs-absolute clamp bug behind the macOS failure
+      (Auto's `self.s` pinned unreachably at 0.9 on any `_dpi_s < 0.9` machine) plus a
+      tautological regression test. **Round 4 (4 pushes, `20ce68c`)** fixed both, plus the
+      Windows failure's real cause (a test trusting post-construction state without verifying
+      sync with the real widget tree) — all three CI legs green. Cycle review: **APPROVE**.
+      **Independent PR review round 2: MERGE** (0 blockers; 2 more non-blocking follow-ups
+      filed as G#51/G#52, see Housekeeping) — merged into `main` same day. GitHub side of the
+      review comment and G#49–53's GitHub mirrors are pending: the repo's `gh` token currently
+      lacks Issues/PR write scope, needs Leo to grant it.
 - [ ] G#13 / GH#15 — github: true — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
 - [ ] G#12 / GH#14 — github: true — Calibration suite for the review agent. Rebase its branch first: it (and G#13's, which contains its `2bdf55f`) is stacked on `901f0a4`, whose FIFO tests fail on Windows.
 
@@ -400,6 +408,20 @@ Housekeeping:
 - [ ] G#50 / GH#91 — github: true — Follow-up from PR #89's cycle review (G#38): `README.md` still
       describes UI scale as only the 4 fixed percentage steps, doesn't mention the new Auto default.
       One-sentence fix.
+- [ ] G#51 — github: true — sync pending: GitHub — Follow-up from PR #89's round-4 independent
+      review (G#38): `docs/spec.md` §2 and its AC at line 130 still describe Auto's clamp as the
+      raw DPI-absolute `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]` range; the shipped round-4 fix is
+      DPI-relative (`self._dpi_s * [AUTO_SCALE_MIN, AUTO_SCALE_MAX]`). Code/tests correct, spec
+      text stale. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/51
+- [ ] G#52 — github: true — sync pending: GitHub — Follow-up from PR #89's round-4 independent
+      review (G#38): `UIScaleAuto.test_the_settle_timer_resets_on_each_new_event_not_just_the_first`
+      (tests/test_ui.py:4243-4267) uses a brittle fixed-duration `pump()` chain instead of
+      `pump_until`; recurred as a macOS flake across rounds 3-4. Rewrite using `pump_until`.
+      https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/52
+- [ ] G#53 — github: true — sync pending: GitHub — Found during PR #89 round 3 (G#38):
+      `pynput.mouse.Controller()` never closes its Xlib connection, so a large local test run can
+      hit Xvfb's max-clients ceiling. Pre-existing, out of scope for G#38. Find/use pynput's own
+      connection-close path. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/53
 - [ ] G#46 / GH#85 — github: true — **Delete merged remote branches** (Leo, 2026-09-13). As of
       2026-09-15, 15 branches on `github` are fully merged, listed on the ticket. Keep
       `feature/ac-12/…`/`feature/ac-13/…`; they are unmerged and tracked on G#12/G#13.
