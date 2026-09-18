@@ -3953,39 +3953,32 @@ class UIScaleAuto(UITestCase):
         # actually use it. self.s lands within a small tolerance of
         # self._dpi_s * 1.0, per the acceptance criterion's own wording.
         self.ui._screen_w, self.ui._screen_h = app.AUTO_REF_SCREEN_W, app.AUTO_REF_SCREEN_H
-        # Round 3 (PR #89 review): explicitly (re-)request the app's own
-        # default launch geometry and wait for winfo_width()/height() to
-        # actually reflect it before reading them, rather than trusting
-        # whatever _apply_ui_scale("auto") finds the window already at --
-        # on a real window manager, a geometry() request is asynchronous,
-        # and a single root.update() is not a synchronization point with
-        # an out-of-process WM (Xvfb, with no WM at all, made this a
-        # non-issue locally). Cleared to (1, 1) first: this fixture's own
-        # construction may already have self-corrected to a screen-derived
-        # self.s (docs/spec.md's own "first launch" edge case), leaving a
-        # real minsize() floor in effect that could otherwise silently
-        # clamp the geometry() request below back up, well before this
-        # test's own _apply_ui_scale("auto") call gets a chance to
-        # recompute the right one for the new self.s. pump_until returns
-        # without failing if this never converges, so a genuinely
-        # too-small real screen still surfaces as an honest assertion
-        # failure below, not a hang.
+        # Round 3 (PR #89 review), second follow-up: forces
+        # winfo_width()/winfo_height() directly -- the same "force the
+        # attribute/method directly" technique FontSizeFloorAtWorstCaseScale
+        # already uses for _dpi_s -- rather than requesting a real
+        # root.geometry() and hoping it lands there. Tried three
+        # progressively more careful real-resize attempts across this
+        # round (waiting via pump_until, resetting minsize() first,
+        # suppressing _apply_minsize()'s own side effects) and this
+        # specific test still landed away from the requested default
+        # geometry on macOS CI every time -- an async real-WM round trip
+        # this suite has no way to bound with certainty. This test's own
+        # docstring says what it's actually about: the *wiring*
+        # (_apply_ui_scale("auto") must call _auto_scale_factor() with
+        # the window's current size and use the result), not reproducing
+        # a literal on-screen resize -- which _apply_minsize()'s own
+        # bootstrap call (__init__, unconditionally run, exercised by
+        # every other UITestCase-based test already) is what actually
+        # requests the real default geometry in the first place.
         default_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * self.ui._dpi_s)
         default_h = int(app.WINDOW_MIN_H * self.ui._dpi_s)
-        self.root.minsize(1, 1)
-        self.root.geometry(f"{default_w}x{default_h}")
-        self.pump_until(lambda: (self.root.winfo_width(), self.root.winfo_height())
-                                 == (default_w, default_h))
-        # _apply_ui_scale("auto")'s own tail call to _apply_minsize() sets
-        # root.minsize() again for the newly-computed self.s -- confirmed
-        # directly that Tk's own root.minsize() can silently grow the real
-        # window to meet a new floor on its own, no geometry() call
-        # involved (a bare root.minsize(500, 500) on a 300x300 Tk() grows
-        # it to 500x500). Stubbed for the rest of this test so the window
-        # just carefully placed at the app's own default geometry above
-        # stays there while self.s gets computed from it -- root.minsize()
-        # itself isn't what this test is about.
-        self._stub_minsize_without_growth_side_effect()
+        original_winfo_width = self.root.winfo_width
+        original_winfo_height = self.root.winfo_height
+        self.root.winfo_width = lambda: default_w
+        self.root.winfo_height = lambda: default_h
+        self.addCleanup(lambda: setattr(self.root, "winfo_width", original_winfo_width))
+        self.addCleanup(lambda: setattr(self.root, "winfo_height", original_winfo_height))
         self.ui._apply_ui_scale("auto")
         self.root.update()
         self.assertAlmostEqual(self.ui.s, self.ui._dpi_s,
@@ -4025,6 +4018,35 @@ class UIScaleAuto(UITestCase):
 
         self.root.minsize = minsize_stub
         self.addCleanup(lambda: setattr(self.root, "minsize", original_minsize))
+
+    def _suppress_apply_minsize_side_effects(self):
+        """Round 3 (PR #89 review), second follow-up: for a test that
+        needs its *own* single, deliberate root.geometry() call to be a
+        real resize (unlike test_s_strictly_increases_with_increasing_
+        window_size/test_minsize_tracks_the_live_scale_during_a_
+        continuous_shrink above, which drive self.s entirely through
+        synthetic events and need no real resize at all),
+        _stub_minsize_without_growth_side_effect() alone isn't enough:
+        _apply_minsize()'s own explicit grow_only root.geometry() call
+        (separate from root.minsize()'s own growth side effect) is a
+        second, independent source of the exact same self-triggered
+        cascade, and it goes through the very same self.root.geometry
+        this test's own call does -- there's no way to stub just the
+        *other* caller's use of it.
+
+        _apply_minsize() is only ever called from _on_root_resize() (via
+        this fixture's own auto-mode resize handling) and __init__()/
+        _apply_ui_scale() (neither reachable once a test is already
+        running) -- self._rail_collapsed and the settled rebuild this
+        test actually cares about don't depend on it at all (both come
+        from _on_root_resize()'s own self.s/collapsed-flag bookkeeping,
+        and _rebuild_ui()'s own use of self.s directly). No-opping it here
+        removes both of its side effects at once, for the rest of this
+        test only, while leaving this test's own explicit
+        root.geometry() call -- the real premise it exercises -- alone."""
+        original_apply_minsize = self.ui._apply_minsize
+        self.ui._apply_minsize = lambda grow_only=False: None
+        self.addCleanup(lambda: setattr(self.ui, "_apply_minsize", original_apply_minsize))
 
     def _suppress_self_triggered_real_growth(self):
         """Round 3 (PR #89 review): _on_root_resize()'s own
@@ -4172,16 +4194,16 @@ class UIScaleAuto(UITestCase):
         # "700", not derived from the app's own aspect ratio, same as
         # WindowResize's pre-Auto equivalent) can feed back into Auto's
         # own live self.s at a fill fraction that pulls it toward
-        # AUTO_SCALE_MAX -- root.minsize()'s own growth side effect (see
-        # _stub_minsize_without_growth_side_effect()'s own docstring) can
-        # then keep moving the real window past what this test requested,
-        # in a cascade with no natural end on a real window manager.
-        # Stubbed so this test's own single, deliberate geometry() call
-        # below is the last real resize that happens; the flag (and the
-        # final self.s-derived assertion, which reads self.ui.s fresh
-        # rather than the s captured here) is what the test actually
-        # cares about either way.
-        self._stub_minsize_without_growth_side_effect()
+        # AUTO_SCALE_MAX -- _apply_minsize()'s own side effects (see
+        # _suppress_apply_minsize_side_effects()'s own docstring) can then
+        # keep moving the real window past what this test requested, in a
+        # cascade with no natural end on a real window manager. Suppressed
+        # so this test's own single, deliberate geometry() call below is
+        # the last real resize that happens; the flag (and the final
+        # self.s-derived assertion, which reads self.ui.s fresh rather
+        # than the s captured here) is what the test actually cares about
+        # either way.
+        self._suppress_apply_minsize_side_effects()
         s = self.ui.s
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
@@ -4205,8 +4227,8 @@ class UIScaleAuto(UITestCase):
         # collapses_the_rail_under_auto's own comment for why this waits
         # on the flag/final-state conditions themselves rather than the
         # literal requested geometry or a fixed sleep, and why
-        # root.minsize()'s own growth side effect is stubbed.
-        self._stub_minsize_without_growth_side_effect()
+        # _apply_minsize()'s own side effects are suppressed.
+        self._suppress_apply_minsize_side_effects()
         s = self.ui.s
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
