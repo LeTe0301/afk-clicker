@@ -131,6 +131,29 @@ UI_SCALE_FACTORS = {"90": 0.9, "100": 1.0, "115": 1.15, "130": 1.3}
 UI_SCALE_DEFAULT = "100"
 
 
+# G#23/GH#35: macOS reports tk scaling ~0.75 (its 72-dpi-native convention vs.
+# this app's 96-dpi baseline), so self.s can land well under 1.0 even before
+# the 90% UI-scale step multiplies it further (worst case _dpi_s * 0.9 ~= 0.675,
+# see backlog.md's compound-scale lesson). int() truncates, so an
+# already-small base like 8 crosses from 6pt (100%, ships today) to 5pt (90%,
+# illegible) purely from that one extra multiply. FONT_SIZE_FLOOR is chosen to
+# match the smaller of those two, not raise it: 6 leaves every already-shipping
+# size (mac 100%, and every non-mac step -- none of which are under 6 today)
+# untouched, and only lifts the newly-broken 90% case up to parity with 100%.
+# G#38 (UI scale follows window size) will reuse this unmodified for its own
+# continuous-s scaling -- keep it a pure function of (base, s), not tied to
+# the four discrete UI_SCALE_FACTORS keys.
+FONT_SIZE_FLOOR = 6
+
+
+def fs(base, s):
+    """int(base * s), floored at FONT_SIZE_FLOOR so no label renders
+    illegibly small on a low-DPI display. Truncates (matches every existing
+    call site's int() today) rather than rounds -- rounding would silently
+    change already-shipped sizes at scale steps this ticket isn't about."""
+    return max(FONT_SIZE_FLOOR, int(base * s))
+
+
 def resolve_appearance(value, cached_os_theme=None):
     """"system"/"light"/"dark" -> a THEMES key. cached_os_theme, if given,
     is reused instead of calling detect_os_theme() again -- story.md:
@@ -1622,7 +1645,7 @@ class Button(tk.Canvas):
         w, h = int(width * s), int(height * s)
         self.shape = self.create_rectangle(1, 1, w - 1, h - 1, fill=CARD, outline=LINE)
         self.label = self.create_text(w / 2, h / 2, text=text, fill=INK,
-                                      font=("Segoe UI", int(9.5 * s), "bold"))
+                                      font=("Segoe UI", fs(9.5, s), "bold"))
         self.bind("<Enter>", lambda e: self._paint(hover=True))
         self.bind("<Leave>", lambda e: self._paint())
         self.bind("<Button-1>", self._click)
@@ -1673,7 +1696,7 @@ class Segmented(tk.Canvas):
                                           fill=CARD_HI, outline="")
         self.texts = [
             self.create_text(seg * i + seg / 2, self.h / 2, text=lbl, fill=MUTED,
-                             font=("Segoe UI", int(9 * s)))
+                             font=("Segoe UI", fs(9, s)))
             for i, (_v, lbl) in enumerate(options)
         ]
         self.bind("<Button-1>", self._click)
@@ -1723,7 +1746,7 @@ class ToggleCheckbox(tk.Canvas):
         self.px = px
         self.box = self.create_rectangle(1, 1, px - 1, px - 1, fill=CARD, outline=MUTED)
         self.check = self.create_text(px / 2, px / 2, text="✓", fill=INK,
-                                      font=("Segoe UI", int(8 * s), "bold"),
+                                      font=("Segoe UI", fs(8, s), "bold"),
                                       state="hidden")
         self.focus_ring = self.create_rectangle(
             0, 0, px, px, outline=ACCENT, width=2, dash=(2, 2), state="hidden")
@@ -1767,8 +1790,9 @@ class TabBar(tk.Canvas):
         # the active tab going bold never shifts anything else -- all
         # geometry is computed once here, and only fill colors and the
         # underline's position change afterward, in _paint().
-        font = ("Segoe UI", int(9.5 * s), "bold")
-        measurer = tkfont.Font(family="Segoe UI", size=int(9.5 * s), weight="bold")
+        font_size = fs(9.5, s)
+        font = ("Segoe UI", font_size, "bold")
+        measurer = tkfont.Font(family="Segoe UI", size=font_size, weight="bold")
         gap = int(TAB_GAP * s)
         x = 0
         self._tabs = []                       # [(value, label, x1, x2, text_id), ...]
@@ -1825,9 +1849,9 @@ class StatusPill(tk.Canvas):
         self.dot = self.create_oval(20 * s, h / 2 - 4.5 * s, 29 * s, h / 2 + 4.5 * s,
                                     fill=BAD, outline="")
         self.text = self.create_text(42 * s, h / 2, anchor="w", text="OFF", fill=INK,
-                                     font=("Segoe UI", int(11.5 * s), "bold"))
+                                     font=("Segoe UI", fs(11.5, s), "bold"))
         self.hint = self.create_text(w - 20 * s, h / 2, anchor="e", text="", fill=MUTED,
-                                     font=("Segoe UI", int(8.5 * s)))
+                                     font=("Segoe UI", fs(8.5, s)))
 
     def set(self, text, color, hint=""):
         self.itemconfig(self.text, text=text, fill=color)
@@ -1858,7 +1882,7 @@ def section(parent, text, s, top=14, action_factory=None):
     row = tk.Frame(parent, bg=BG)
     row.pack(fill="x", pady=(int(top * s), int(6 * s)))
     label = tk.Label(row, text=text, bg=BG, fg=MUTED, anchor="w",
-                     font=("Segoe UI", int(10 * s), "bold"))
+                     font=("Segoe UI", fs(10, s), "bold"))
     label.pack(side="left")
     if action_factory is not None:
         action_factory(row).pack(side="right")
@@ -2073,12 +2097,12 @@ class GameItem(tk.Canvas):
                                         fill=LINE, outline="")
             initial = profile["name"][:1].upper() if profile["name"] else "?"
             self.text = self.create_text(cx, cy, anchor="center", text=initial,
-                                         fill=MUTED, font=("Segoe UI", int(10.5 * s), "bold"))
+                                         fill=MUTED, font=("Segoe UI", fs(10.5, s), "bold"))
         else:
             self.dot = self.create_oval(12 * s, h / 2 - 3.5 * s, 19 * s, h / 2 + 3.5 * s,
                                         fill=LINE, outline="")
             self.text = self.create_text(30 * s, h / 2, anchor="w", text=profile["name"],
-                                         fill=MUTED, font=("Segoe UI", int(9.5 * s)))
+                                         fill=MUTED, font=("Segoe UI", fs(9.5, s)))
         self.bind("<Enter>", lambda e: self._paint(hover=True))
         self.bind("<Leave>", lambda e: self._paint())
         self.bind("<Button-1>", lambda e: self.on_click(self.profile["id"]))
@@ -2134,7 +2158,7 @@ class SettingsItem(tk.Canvas):
             self.dot = self.create_oval(cx - d / 2, cy - d / 2, cx + d / 2, cy + d / 2,
                                         fill=LINE, outline="")
             self.text = self.create_text(cx, cy, anchor="center", text="S",
-                                         fill=MUTED, font=("Segoe UI", int(10.5 * s), "bold"))
+                                         fill=MUTED, font=("Segoe UI", fs(10.5, s), "bold"))
             # The small ACCENT corner dot is the collapsed-mode stand-in for
             # the expanded "Settings · Update" text swap -- always created
             # (state toggled by _paint(), not re-created), same "itemconfig
@@ -2149,7 +2173,7 @@ class SettingsItem(tk.Canvas):
             self.dot = None
             self.update_dot = None
             self.text = self.create_text(16 * s, h / 2, anchor="w", text="Settings",
-                                         fill=MUTED, font=("Segoe UI", int(9.5 * s)))
+                                         fill=MUTED, font=("Segoe UI", fs(9.5, s)))
         self.bind("<Enter>", lambda e: self._paint(hover=True))
         self.bind("<Leave>", lambda e: self._paint())
         self.bind("<Button-1>", lambda e: self.on_click())
@@ -2199,7 +2223,7 @@ class Row(tk.Frame):
         text.grid(row=0, column=0, sticky="w")
         tk.Label(text, text=label, bg=CARD, fg=INK, anchor="w", justify="left",
                  wraplength=int(ROW_LABEL_W * s),
-                 font=("Segoe UI", int(9.5 * s))).pack(fill="x")
+                 font=("Segoe UI", fs(9.5, s))).pack(fill="x")
         self.hint_label = None
         if mutable_hint:
             # G#22/GH#33 round 2 (docs/design.md Revision 2, Decision A2):
@@ -2210,7 +2234,7 @@ class Row(tk.Frame):
             # mutable_hint=True; every plain hint= site (auto-stop) falls
             # through to the elif below, byte-for-byte as before this
             # feature ever existed.
-            self._hint_size = int(8 * s)
+            self._hint_size = fs(8, s)
             self._hint_default = hint
             self.hint_label = tk.Label(
                 text, bg=CARD, anchor="w", justify="left",
@@ -2220,7 +2244,7 @@ class Row(tk.Frame):
         elif hint:
             tk.Label(text, text=hint, bg=CARD, fg=MUTED, anchor="w", justify="left",
                      wraplength=int(ROW_LABEL_W * s),
-                     font=("Segoe UI", int(8 * s))).pack(fill="x")
+                     font=("Segoe UI", fs(8, s))).pack(fill="x")
         self.control = tk.Frame(self, bg=CARD)
         self.control.grid(row=0, column=1, sticky="w")
 
@@ -2250,13 +2274,13 @@ class NumBox(tk.Frame):
     def __init__(self, parent, default, unit, s, width=6):
         super().__init__(parent, bg=CARD)
         tk.Label(self, text=unit, bg=CARD, fg=MUTED, width=4, anchor="w",
-                 font=("Segoe UI", int(9 * s))).pack(side="right")
+                 font=("Segoe UI", fs(9, s))).pack(side="right")
         self.var = tk.StringVar(value=str(default))
         wrap = tk.Frame(self, bg=LINE, padx=1, pady=1)
         wrap.pack(side="right", padx=(0, int(8 * s)))
         entry = tk.Entry(wrap, textvariable=self.var, width=width, bg=BG, fg=INK,
                          relief="flat", insertbackground=ACCENT, justify="right",
-                         font=("Consolas", int(10 * s)), highlightthickness=0)
+                         font=("Consolas", fs(10, s)), highlightthickness=0)
         # justify="right" pins the digits to the entry's own right edge, which
         # sits directly against wrap's 1px border -- pack's ipadx can't fix that
         # on one side only, it pads both. This spacer carries the field's own
@@ -2669,7 +2693,7 @@ class AfkAutoclicker:
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Label(header, text="Clickwork", bg=CARD, fg=INK,
-                 font=("Segoe UI", int(12 * s), "bold")).pack(side="left",
+                 font=("Segoe UI", fs(12, s), "bold")).pack(side="left",
                                                               padx=int(16 * s))
         self.status = StatusPill(header, s, width=250, height=36)
         self.status.pack(side="right", padx=int(14 * s))
@@ -2689,7 +2713,7 @@ class AfkAutoclicker:
         # own count_label.config(text=...) call stays legal on an unpacked
         # widget, so it needs no guard either.
         self.count_label = tk.Label(side, text="GAMES", bg=BG, fg=MUTED, anchor="w",
-                                    font=("Segoe UI", int(8 * s), "bold"))
+                                    font=("Segoe UI", fs(8, s), "bold"))
         if not self._rail_collapsed:
             self.count_label.pack(fill="x", padx=int(14 * s), pady=(int(14 * s), int(6 * s)))
         self.list_frame = tk.Frame(side, bg=BG)
@@ -2921,14 +2945,14 @@ class AfkAutoclicker:
         title = tk.Frame(body, bg=BG)
         title.pack(fill="x")
         self.game_title = tk.Label(title, text="", bg=BG, fg=INK, anchor="w",
-                                   font=("Segoe UI", int(14 * s), "bold"))
+                                   font=("Segoe UI", fs(14, s), "bold"))
         self.game_title.pack(side="left")
         self.game_state = tk.Label(title, text="", bg=BG, fg=MUTED, anchor="e",
-                                   font=("Segoe UI", int(9 * s)))
+                                   font=("Segoe UI", fs(9, s)))
         self.game_state.pack(side="right")
         self.game_note = tk.Label(body, text="", bg=BG, fg=MUTED, anchor="w",
                                   justify="left", wraplength=int((CONTENT_W - 32) * s),
-                                  font=("Segoe UI", int(8.5 * s)))
+                                  font=("Segoe UI", fs(8.5, s)))
         self.game_note.pack(fill="x", pady=(int(2 * s), int(12 * s)))
 
         # ── tab bar (story #24 feature 2): Hotkey | Clicking ──
@@ -2973,7 +2997,7 @@ class AfkAutoclicker:
         row = Row(hk, "Toggle", s)
         row.pack(fill="x")
         self.hotkey_label = tk.Label(row.control, text="Not set", bg=CARD, fg=MUTED,
-                                     font=("Consolas", int(10 * s)))
+                                     font=("Consolas", fs(10, s)))
         self.hotkey_label.pack(side="right", padx=(0, int(8 * s)))
         btns = tk.Frame(hk, bg=CARD)
         btns.pack(fill="x", pady=(int(8 * s), 0))
@@ -3065,7 +3089,7 @@ class AfkAutoclicker:
         title = tk.Frame(body, bg=BG)
         title.pack(fill="x")
         tk.Label(title, text="Settings", bg=BG, fg=INK, anchor="w",
-                 font=("Segoe UI", int(14 * s), "bold")).pack(side="left")
+                 font=("Segoe UI", fs(14, s), "bold")).pack(side="left")
 
         # ── tab bar (story #24 feature 2): Appearance | Updates ──
         self.settings_tab_var = tk.StringVar(value=self._settings_tab)
@@ -3128,7 +3152,7 @@ class AfkAutoclicker:
         # and-rebuilt) pane's own widgets.
         self.save_failed_label = tk.Label(
             ap, text="Couldn't save settings — changes won't be kept after closing",
-            bg=CARD, fg=BAD, font=("Segoe UI", int(9.5 * s)),
+            bg=CARD, fg=BAD, font=("Segoe UI", fs(9.5, s)),
             wraplength=int(CARD_INNER_W * s), justify="left", anchor="w")
 
         # Detected at most once per process (docs/history/ac-17-f3a-spec.md §4) -- if nothing
@@ -3138,7 +3162,7 @@ class AfkAutoclicker:
         if self._os_theme is None:
             self._os_theme = detect_os_theme()
         tk.Label(ap, text=f"System is currently {self._os_theme}", bg=CARD, fg=MUTED,
-                 anchor="w", font=("Segoe UI", int(8 * s))).pack(fill="x", pady=(int(6 * s), 0))
+                 anchor="w", font=("Segoe UI", fs(8, s))).pack(fill="x", pady=(int(6 * s), 0))
         appearance_bottom = tk.Frame(self.appearance_pane, bg=BG, height=0)
         appearance_bottom.pack(fill="x")
         self._pane_fills["appearance"] = (self.appearance_pane, appearance_top, appearance_bottom)
@@ -3177,7 +3201,7 @@ class AfkAutoclicker:
         row = Row(up, "Version", s)
         row.pack(fill="x")
         self.version_label = tk.Label(row.control, text=f"v{__version__}", bg=CARD,
-                                      fg=MUTED, font=("Consolas", int(9 * s)))
+                                      fg=MUTED, font=("Consolas", fs(9, s)))
         self.version_label.pack()
         self.update_button = Button(up, "Check for updates", self.check_update, s,
                                     width=CARD_INNER_W)
@@ -3914,7 +3938,7 @@ class AfkAutoclicker:
         self._log_dialog_ctx["body"] = body
 
         tk.Label(body, text="Update failed", bg=BG, fg=INK, anchor="w",
-                font=("Segoe UI", int(14 * s), "bold")).pack(fill="x", pady=(0, int(8 * s)))
+                font=("Segoe UI", fs(14, s), "bold")).pack(fill="x", pady=(0, int(8 * s)))
 
         explanation = ("The last update didn't finish. Your clicker still "
                       "works — this just notifies us of the failure."
@@ -3922,11 +3946,11 @@ class AfkAutoclicker:
                       "The last update relaunched the old version. Your "
                       "clicker still works — this just notifies us of the failure.")
         tk.Label(body, text=explanation, bg=BG, fg=MUTED, anchor="w", justify="left",
-                wraplength=int(560 * s), font=("Segoe UI", int(9 * s))
+                wraplength=int(560 * s), font=("Segoe UI", fs(9, s))
                 ).pack(fill="x", pady=(0, int(12 * s)))
 
         tk.Label(body, text="Preview of what will be sent to GitHub:", bg=BG, fg=MUTED,
-                anchor="w", font=("Segoe UI", int(9 * s))).pack(fill="x", pady=(0, int(4 * s)))
+                anchor="w", font=("Segoe UI", fs(9, s))).pack(fill="x", pady=(0, int(4 * s)))
 
         preview_frame = tk.Frame(body, bg=CARD, highlightthickness=1, highlightbackground=LINE)
         preview_frame.pack(fill="both", expand=True, pady=(0, int(16 * s)))
@@ -3940,7 +3964,7 @@ class AfkAutoclicker:
         # expand=True still lets it grow into any extra space the person
         # resizes the window to.
         preview = tk.Text(preview_frame, bg=BG, fg=INK, wrap="word", relief="flat",
-                          font=("Consolas", int(10 * s)), height=12,
+                          font=("Consolas", fs(10, s)), height=12,
                           padx=int(CARD_PAD * s), pady=int(CARD_PAD * s))
         scrollbar = tk.Scrollbar(preview_frame, command=preview.yview)
         preview.config(yscrollcommand=scrollbar.set)
@@ -3953,7 +3977,7 @@ class AfkAutoclicker:
         checkbox = ToggleCheckbox(checkbox_row, show_paths_var, s)
         checkbox.pack(side="left")
         tk.Label(checkbox_row, text="Show full local paths", bg=BG, fg=INK,
-                font=("Segoe UI", int(9.5 * s))).pack(side="left", padx=(int(8 * s), 0))
+                font=("Segoe UI", fs(9.5, s))).pack(side="left", padx=(int(8 * s), 0))
         show_paths_var.trace_add("write", lambda *_a: self._refresh_log_preview())
 
         button_row = tk.Frame(body, bg=BG)
@@ -4118,7 +4142,7 @@ class AfkAutoclicker:
         # failure mode to attach to.
         entry = tk.Entry(fallback_row, fg=INK, relief="flat",
                          highlightthickness=1, highlightbackground=LINE,
-                         font=("Consolas", int(9 * s)))
+                         font=("Consolas", fs(9, s)))
         entry.insert(0, url)
         entry.config(state="readonly", readonlybackground=BG)
         entry.pack(fill="x", pady=(0, int(8 * s)))

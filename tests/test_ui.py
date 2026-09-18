@@ -18,6 +18,7 @@ from .context import app, kb, needs_display, hotkey
 
 if app is not None:
     import tkinter as tk
+    from tkinter import font as tkfont
 
 
 class FakeMouse:
@@ -2612,6 +2613,39 @@ class Lighten(unittest.TestCase):
                     app._lighten(bad, 0.5)
 
 
+class FontSizeFloor(unittest.TestCase):
+    """G#23/GH#35: the pure fs(base, s) helper behind the macOS font-size
+    floor -- no theme or canvas involved, same shape as Lighten's own
+    pure-helper tests above. macOS reports tk scaling ~0.75 (_dpi_s), which
+    can compound with the 90% UI-scale step to s ~= 0.675 -- the worst case
+    docs/spec.md's Acceptance criteria enumerates."""
+
+    def test_mac_100_percent_already_shipping_case_is_unchanged(self):
+        self.assertEqual(app.fs(8, 0.75), 6)
+
+    def test_mac_90_percent_worst_case_is_floored(self):
+        # The ticket's own reported case: int(8 * 0.675) == 5 today
+        # (illegible); fs() floors it to 6.
+        self.assertEqual(app.fs(8, 0.675), 6)
+
+    def test_an_unaffected_base_at_worst_case_scale_is_a_no_op(self):
+        # 9.5 * 0.675 = 6.4125 -> int() already gives 6; fs() changes
+        # nothing here.
+        self.assertEqual(app.fs(9.5, 0.675), 6)
+
+    def test_windows_linux_100_percent_is_unchanged(self):
+        self.assertEqual(app.fs(8, 1.0), 8)
+
+    def test_windows_linux_90_percent_is_unchanged(self):
+        self.assertEqual(app.fs(8, 0.9), 7)
+
+    def test_mac_115_percent_floor_is_a_no_op(self):
+        self.assertEqual(app.fs(8, 0.8625), 6)
+
+    def test_mac_130_percent_floor_is_a_no_op(self):
+        self.assertEqual(app.fs(8, 0.975), 7)
+
+
 @needs_display
 class SetActiveThemeUnknownName(unittest.TestCase):
     """detect_os_theme() only ever produces "dark"/"light", so this branch
@@ -3731,6 +3765,39 @@ class UIScale(UITestCase):
         self.root.update()
         self.assertEqual(self.ui.ui_scale_var.get(), "130")
         self.assertEqual(self.ui.s, self.ui._dpi_s * app.UI_SCALE_FACTORS["130"])
+
+
+class FontSizeFloorAtWorstCaseScale(UITestCase):
+    """G#23/GH#35: FontSizeFloor above proves fs() itself is correct in
+    isolation; this proves a real widget built from one of its "actually
+    changes" call sites (afk_clicker.py:2213, the jitter row's mutable
+    hint, base 8) actually renders at the floored size rather than the 5pt
+    plain int() would give. Reuses WindowMinimumHeight's own
+    _dpi_s/_apply_ui_scale simulation pattern (test_ui.py:1148-1168) --
+    there is no real Mac available to run this suite on, so this is the
+    only local stand-in; docs/spec.md's Risk notes still call for a green
+    macOS CI leg as the real verification."""
+
+    def _hint_font_size(self):
+        widget = self.ui.jitter_row.hint_label
+        return tkfont.Font(font=widget.cget("font")).actual("size")
+
+    def test_worst_case_mac_90_percent_floors_to_six(self):
+        # _dpi_s is a plain instance attribute, safe to force directly --
+        # never rewritten by any rebuild path (same note as
+        # WindowMinimumHeight's own worst-case test).
+        self.ui._dpi_s = 0.75
+        self.ui._apply_ui_scale("90")
+        self.root.update()
+        self.assertEqual(self._hint_font_size(), 6)
+
+    def test_mac_100_percent_baseline_is_still_six(self):
+        # Proves the floor didn't accidentally shift the already-shipping
+        # baseline -- same simulated DPI, the already-accepted scale step.
+        self.ui._dpi_s = 0.75
+        self.ui._apply_ui_scale("100")
+        self.root.update()
+        self.assertEqual(self._hint_font_size(), 6)
 
 
 class SettingsNavigation(UITestCase):
