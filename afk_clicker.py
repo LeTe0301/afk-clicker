@@ -128,7 +128,25 @@ def set_active_theme(name):
 # float. See docs/history/ac-17-f4-spec.md §1 for why 4 explicit percentage steps rather than
 # a slider or named sizes.
 UI_SCALE_FACTORS = {"90": 0.9, "100": 1.0, "115": 1.15, "130": 1.3}
-UI_SCALE_DEFAULT = "100"
+# G#38/GH#67: "auto" is a 5th valid ui_scale value, not one more key in
+# UI_SCALE_FACTORS itself -- it has no single fixed multiplier, self.s is
+# derived continuously from the window size instead (_auto_scale_factor()
+# below). Now the default for fresh installs; an existing install's
+# already-saved fixed step round-trips unchanged (docs/spec.md's Risk notes).
+UI_SCALE_DEFAULT = "auto"
+
+# Auto is clamped to the same range the fixed steps already cover -- reusing
+# the existing numbers rather than inventing new bounds also prevents a
+# shrink/grow feedback runaway (docs/spec.md "The debounce decision").
+AUTO_SCALE_MIN = UI_SCALE_FACTORS["90"]
+AUTO_SCALE_MAX = UI_SCALE_FACTORS["130"]
+# A calibration anchor only, not a hardcoded target screen -- see
+# AUTO_REFERENCE_FILL below (defined after WINDOW_MIN_H/CONTENT_PAD exist).
+AUTO_REF_SCREEN_W, AUTO_REF_SCREEN_H = 1920, 1080
+# The debounce window for Auto's settle-then-rebuild (docs/spec.md "The
+# debounce decision") -- an initial value, not empirically tuned (Xvfb can't
+# validate perceived responsiveness).
+AUTO_SETTLE_MS = 150
 
 
 # G#23/GH#35: macOS reports tk scaling ~0.75 (its 72-dpi-native convention vs.
@@ -232,6 +250,19 @@ CARD_INNER_W = CONTENT_W - 2 * CONTENT_PAD - 2 * CARD_PAD    # a full-width
     # card's real inner width: body sits CONTENT_PAD in from CONTENT_W on
     # each side before the card's own CARD_PAD padding starts, so a control
     # sized off CONTENT_W alone (skipping the body inset) overruns the card.
+
+# G#38/GH#67: Auto's calibration anchor, derived the same way CARD_INNER_W
+# above is derived from other constants -- must come after SIDEBAR_W/
+# CONTENT_W/WINDOW_MIN_H exist, so it can't sit next to UI_SCALE_FACTORS
+# itself. The app's own existing default launch geometry
+# ((SIDEBAR_W+1+CONTENT_W) x WINDOW_MIN_H, unscaled) sitting on a 1920x1080
+# screen (AUTO_REF_SCREEN_W/H, the most common desktop resolution, used only
+# as the calibration anchor) is defined to yield an Auto factor of ~1.0 --
+# i.e. on a typical screen, Auto's very first computed value lands at parity
+# with today's "100%" step (docs/spec.md §2).
+AUTO_REFERENCE_FILL = (((SIDEBAR_W + 1 + CONTENT_W) * WINDOW_MIN_H
+                        / (AUTO_REF_SCREEN_W * AUTO_REF_SCREEN_H)) ** 0.5)
+
 ROW_LABEL_W = 140    # widest existing Row label ("Mouse button"/"Random
     # jitter", ~88px measured @ s=1) plus headroom for font-metric
     # differences on the real target font.
@@ -1353,7 +1384,7 @@ class Store:
         # Same contract, one more key: a garbage on-disk "ui_scale" (wrong
         # type, an old/foreign value, a hand-edited "120") is as
         # untrustworthy as a damaged file -- self.s never sees it unvalidated.
-        if self.data["ui_scale"] not in UI_SCALE_FACTORS:
+        if self.data["ui_scale"] not in UI_SCALE_FACTORS and self.data["ui_scale"] != "auto":
             self.data["ui_scale"] = UI_SCALE_DEFAULT
 
         # _persist() writes this value to disk automatically the first time
@@ -2309,7 +2340,23 @@ class AfkAutoclicker:
         # unchanged, never re-reads "tk scaling" (docs/history/ac-17-f4-spec.md §2: the DPI
         # half is still detected once, at startup).
         self._dpi_s = root.tk.call("tk", "scaling") / 1.333  # 1.0 at 96 dpi
-        self.s = s = self._dpi_s * UI_SCALE_FACTORS[self.store.data["ui_scale"]]
+        # G#38/GH#67: detected once at startup, same "never re-read mid-
+        # session" policy _dpi_s itself already documents -- dragging the
+        # window to a different-resolution monitor mid-session doesn't
+        # re-anchor Auto's reference until restart (docs/spec.md's Edge
+        # cases, a named/accepted limitation).
+        self._screen_w = root.winfo_screenwidth()
+        self._screen_h = root.winfo_screenheight()
+        # Auto has no mapped window size to derive from yet at this point in
+        # construction (the same chicken-and-egg the <Configure> bind below
+        # already avoids) -- bootstrap to the DPI factor alone, same value
+        # "100" always gave, for this very first _build_ui()/_apply_minsize()
+        # call. The first genuine post-map root <Configure> then recomputes
+        # self.s for real against the actual mapped size (docs/spec.md §3).
+        if self.store.data["ui_scale"] == "auto":
+            self.s = s = self._dpi_s * 1.0
+        else:
+            self.s = s = self._dpi_s * UI_SCALE_FACTORS[self.store.data["ui_scale"]]
         # Feature 2's detect_os_theme(), if it already ran once in __main__
         # to resolve a saved "system" appearance -- never re-detected from
         # here, only ever read or (once) lazily filled in, see
@@ -2491,6 +2538,11 @@ class AfkAutoclicker:
         self._rebuild_wanted = False   # a rebuild was requested while
                                         # _rebuilding was True; _rebuild_ui()
                                         # schedules exactly one follow-up
+        self._auto_settle_after_id = None  # the one after(AUTO_SETTLE_MS, ...)
+            # job currently pending, if any (G#38/GH#67) -- same
+            # single-slot cancel-or-schedule shape as _rebuild_after_id/
+            # _pane_fill_after_id above, but a real timed after() rather
+            # than after_idle -- see _request_auto_settle()/_on_auto_settle().
         self._pane_fill_after_id = None  # the one after_idle(self._run_pane_fill)
             # job currently pending, if any (G#28/GH#48 round 5) -- see
             # _request_pane_fill()/_run_pane_fill().
@@ -2626,6 +2678,41 @@ class AfkAutoclicker:
         elif self._rebuild_after_id is None:
             self._rebuild_after_id = self.root.after_idle(self._rebuild_ui)
 
+    def _auto_scale_factor(self, width, height):
+        """G#38/GH#67: Auto mode's continuous scale -- an area-based "how
+        much of the screen does the window fill" fraction (square-rooted so
+        it scales roughly linearly with window size, the way the fixed
+        percentage steps already do -- doubling both axes, 4x the area,
+        yields 2x the factor, not 4x), calibrated against
+        AUTO_REFERENCE_FILL so a typical desktop lands at parity with
+        today's "100%" step (docs/spec.md §2). Clamped to
+        [AUTO_SCALE_MIN, AUTO_SCALE_MAX], the same range the four fixed
+        steps already cover -- this is also what prevents a shrink/grow
+        feedback runaway."""
+        fill = ((width * height) / (self._screen_w * self._screen_h)) ** 0.5
+        factor = fill / AUTO_REFERENCE_FILL
+        return min(AUTO_SCALE_MAX, max(AUTO_SCALE_MIN, factor))
+
+    def _request_auto_settle(self):
+        """Auto mode's drag-settle debounce (docs/spec.md "The debounce
+        decision") -- deliberately NOT _request_rebuild()'s after_idle
+        coalescing: after_idle fires the next time Tk's event loop is idle,
+        which during a live OS-level drag is typically between every single
+        native resize callback, not after the drag as a whole settles. This
+        mirrors that same single-slot cancel-or-schedule shape
+        (_rebuild_after_id/_pane_fill_after_id) but with a real timeout
+        instead, cancelled the same way in on_close()."""
+        if self._auto_settle_after_id is not None:
+            self.root.after_cancel(self._auto_settle_after_id)
+        self._auto_settle_after_id = self.root.after(AUTO_SETTLE_MS, self._on_auto_settle)
+
+    def _on_auto_settle(self):
+        self._auto_settle_after_id = None
+        self._request_rebuild()   # hands off into the existing coalesced-
+                                   # rebuild machinery unchanged -- this
+                                   # mechanism only changes WHEN a rebuild
+                                   # gets requested, never how it's run.
+
     def _on_root_resize(self, event):
         """Debounce the rail's collapse check, not the collapse itself (story
         #24 feature 3): a live resize drag fires <Configure> continuously,
@@ -2645,8 +2732,30 @@ class AfkAutoclicker:
         descendant's own <Configure> too, not just root's. Confirmed with a
         local trace during development: at construction alone, ~100+ calls
         land here for child Frames/Canvases (each with its own small
-        width), only one of which actually targets root."""
+        width), only one of which actually targets root.
+
+        G#38/GH#67: in Auto mode (self.store.data["ui_scale"] == "auto",
+        checked live so a mode switch mid-drag takes effect on the very
+        next event, docs/spec.md's Edge cases), self.s itself is no longer
+        constant across a resize -- every qualifying event recomputes it
+        and the window's minsize() (both cheap, no widget churn) so neither
+        ever lags behind the live drag, then only requests the actual
+        widget-tree rebuild (which repaints fonts/padding/rail state) via
+        the settled debounce (_request_auto_settle()), not the immediate
+        after_idle fixed-step mode uses -- see docs/spec.md §4/§5."""
         if event.widget is not self.root:
+            return
+        if self.store.data["ui_scale"] == "auto":
+            new_s = self._auto_scale_factor(event.width, event.height)
+            s_changed = new_s != self.s
+            self.s = new_s
+            self._apply_minsize(grow_only=True)
+            collapsed = event.width < int(RAIL_COLLAPSE_THRESHOLD * self.s)
+            collapsed_changed = collapsed != self._rail_collapsed
+            if collapsed_changed:
+                self._rail_collapsed = collapsed
+            if s_changed or collapsed_changed:
+                self._request_auto_settle()
             return
         collapsed = event.width < int(RAIL_COLLAPSE_THRESHOLD * self.s)
         if collapsed != self._rail_collapsed:
@@ -3128,21 +3237,21 @@ class AfkAutoclicker:
                   self.appearance_var, s, width=180).pack()
 
         # Second Row in the same card, below Theme
-        # (docs/history/ac-17-f4-spec.md §5) -- 4-option Segmented, narrower
-        # per-option (55px) than Theme's own 3-option control (60px/option)
-        # since "90%"/"100%"/"115%"/"130%" are shorter per-character than
-        # "System", the longest Theme label; still comfortably inside
-        # CARD_INNER_W (396) alongside Row's fixed ROW_LABEL_W +
-        # ROW_LABEL_GAP (152) label column, at every UI-scale step, since
-        # every quantity here scales by the same s (the invariant-ratio
-        # argument, docs/history/ac-17-f4-spec.md §1 -- 152 + 220 = 372 <= 396
-        # at s=1).
+        # (docs/history/ac-17-f4-spec.md §5) -- 5-option Segmented since
+        # G#38/GH#67 added "Auto" as the default, narrower per-option
+        # (48.8px) than Theme's own 3-option control (60px/option). 244px
+        # is CARD_INNER_W (396) minus Row's fixed ROW_LABEL_W + ROW_LABEL_GAP
+        # (152) label column -- the most 5 options can take without
+        # overflowing the card (docs/design.md's layout math), at every
+        # UI-scale step since every quantity here scales by the same s (the
+        # invariant-ratio argument, docs/history/ac-17-f4-spec.md §1).
         row2 = Row(ap, "UI scale", s)
         row2.pack(fill="x", pady=(int(8 * s), 0))
         self.ui_scale_var = tk.StringVar(value=self.store.data["ui_scale"])
         Segmented(row2.control,
-                  [("90", "90%"), ("100", "100%"), ("115", "115%"), ("130", "130%")],
-                  self.ui_scale_var, s, width=220).pack()
+                  [("auto", "Auto"), ("90", "90%"), ("100", "100%"),
+                   ("115", "115%"), ("130", "130%")],
+                  self.ui_scale_var, s, width=244).pack()
 
         # G#21/GH#32 item 4 (docs/design.md): a single, non-blocking notice
         # for a Store.save() failure. Not packed here -- _paint_save_notice()
@@ -3314,16 +3423,25 @@ class AfkAutoclicker:
         """Structurally parallel to _apply_appearance(): persist, apply the
         synchronous part of the change (self.s and the window's minsize),
         then request the shared coalesced rebuild. The `value not in
-        UI_SCALE_FACTORS` guard mirrors Store.__init__'s own sanitization --
-        the Segmented this is wired to only ever emits one of the four valid
-        keys, but an invalid self.s would be a visibly broken window, not
-        just a wrong color, so the same belt-and-suspenders defense is cheap
-        insurance here."""
-        if value not in UI_SCALE_FACTORS:
+        UI_SCALE_FACTORS and value != "auto"` guard mirrors Store.__init__'s
+        own sanitization -- the Segmented this is wired to only ever emits
+        one of the five valid keys, but an invalid self.s would be a
+        visibly broken window, not just a wrong color, so the same
+        belt-and-suspenders defense is cheap insurance here.
+
+        G#38/GH#67: picking "auto" computes self.s from the window's
+        *current* size immediately (the window is already mapped -- Settings
+        is only reachable post-launch), it does not wait for the next
+        resize and does not silently keep whatever self.s a previous fixed
+        step left behind (docs/spec.md §3)."""
+        if value not in UI_SCALE_FACTORS and value != "auto":
             value = UI_SCALE_DEFAULT
         self.store.data["ui_scale"] = value
         self._note_save(self.store.save())
-        self.s = self._dpi_s * UI_SCALE_FACTORS[value]
+        if value == "auto":
+            self.s = self._auto_scale_factor(self.root.winfo_width(), self.root.winfo_height())
+        else:
+            self.s = self._dpi_s * UI_SCALE_FACTORS[value]
         self._apply_minsize(grow_only=True)
         self._request_rebuild()
 
@@ -4589,6 +4707,16 @@ class AfkAutoclicker:
             except tk.TclError:
                 pass
             self._rebuild_after_id = None
+        # Same reasoning, for _request_auto_settle()'s own deferred job
+        # (G#38/GH#67): a live Auto-mode drag can still have a pending
+        # settle timer here (a <Configure> fired, _on_auto_settle() never
+        # got a chance to run).
+        if self._auto_settle_after_id is not None:
+            try:
+                self.root.after_cancel(self._auto_settle_after_id)
+            except tk.TclError:
+                pass
+            self._auto_settle_after_id = None
         # Same reasoning, for _request_pane_fill()'s own deferred job
         # (G#28/GH#48 round 5): a pane-fill can still be pending here (an
         # on_settle/<Configure> fired, _run_pane_fill() never got a chance
