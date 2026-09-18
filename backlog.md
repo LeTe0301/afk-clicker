@@ -380,6 +380,9 @@ Two follow-ups from its review are below.
       scales continuously, and how it interacts with `WINDOW_MIN_H`, the rail
       collapse threshold and the per-rebuild cost of `_rebuild_ui()` during a drag
       resize.
+- [ ] G#51 — github: true — sync pending: GitHub — docs/spec.md's Auto UI-scale clamp description is stale (still DPI-absolute, shipped fix is DPI-relative). Found in PR #89 round 4 critical review. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/51
+- [ ] G#52 — github: true — sync pending: GitHub — Flaky fixed-duration `pump()` chain in `UIScaleAuto.test_the_settle_timer_resets_on_each_new_event_not_just_the_first` (macOS), should use `pump_until`. Found in PR #89 round 4 critical review. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/52
+- [ ] G#53 — github: true — sync pending: GitHub — `pynput.mouse.Controller()` leaks its Xlib connection in the test suite, caps how many `UITestCase` instances can exist under Xvfb. Found in PR #89 round 3. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/53
 - [ ] G#13 / GH#15 — github: true — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
 - [ ] G#12 / GH#14 — github: true — Calibration suite for the review agent. Rebase its branch first: it (and G#13's, which contains its `2bdf55f`) is stacked on `901f0a4`, whose FIFO tests fail on Windows.
 
