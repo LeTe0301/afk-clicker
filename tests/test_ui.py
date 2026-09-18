@@ -527,11 +527,30 @@ class ClickLoop(UITestCase):
 
     # Timing on the macOS runner does not hold: measured medians of 0.251 s
     # and 0.283 s for a 200 ms interval across two runs, while Linux sits at
-    # 0.2001 s over 16 consecutive runs. Whether the click loop is genuinely
-    # slow on macOS or the runner cannot schedule a Python thread that tightly
-    # is unresolved -- and guessing would mean loosening the bound until it
-    # stops asking the question. Skipped there with the investigation tracked,
-    # rather than weakened everywhere. See issue #6.
+    # 0.2001 s over 16 consecutive runs. Skipped there with the investigation
+    # tracked, rather than weakened everywhere -- a bound loosened until it
+    # stops failing stops asking the question. See issue #6.
+    #
+    # Investigated a second time 2026-09-18, no new lead found, closed again
+    # as accept-and-document (backlog.md, G#4/GH#6):
+    #   - self.ui.mouse is FakeMouse here (see its class above), which never
+    #     makes a real OS call. So this overshoot cannot be pynput's macOS
+    #     click backend (Quartz/CGEventPost) -- it's pure Python-level
+    #     thread-scheduling precision (_sleep()'s worker thread racing this
+    #     test's own pump() for the GIL), on identical, unbranched code.
+    #   - The 2026-09-09 cycle already tried loosening pump()'s own cadence
+    #     on a GIL-contention theory (see pump()'s docstring above); that
+    #     made the median *worse* (0.251 -> 0.283 s), ruling out "the test's
+    #     own polling is too tight" as the mechanism.
+    #   - GitHub's own actions/runner-images repo has many long-running,
+    #     acknowledged macos-latest performance-degradation reports (2-10x
+    #     slower than expected, unrelated to any specific workload), ongoing
+    #     well past this ticket's filing -- consistent with a throttled/
+    #     oversubscribed shared runner rather than a defect in this loop.
+    # None of this rules out real macOS hardware also being ~25-40% coarser
+    # than Linux at this granularity -- that needs an actual Mac, which this
+    # project has never had access to. No further lead to chase from the code
+    # or CI logs alone, and no safe code change to make on a guess.
     darwin_timing = unittest.skipIf(
         __import__("sys").platform == "darwin",
         "macOS runner timing unattributed -- see issue #6")

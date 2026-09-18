@@ -153,7 +153,18 @@ Bugs and residue:
       command-injection finding — the GitHub release tag reached the swap script
       unvalidated, and a crafted tag could run a command. Fixed by validating the
       tag's shape before it's used at all.
-- [ ] G#4 / GH#6 — github: true — The click interval measures 25–40 % slow on the macOS CI runner. Needs a real Mac.
+- [x] **Closed 2026-09-18, accept-and-document (no code change, no PR).** G#4 / GH#6 —
+      github: true — The click interval measures 25–40% slow on the macOS CI runner.
+      Investigated twice (2026-09-09, 2026-09-18) with no real Mac available either time.
+      Both timing tests use `FakeMouse` (no real OS click call), so the overshoot is
+      thread-scheduling precision, not pynput's macOS click backend; the identical code
+      is precise on Linux; a prior GIL-contention fix attempt made it worse, not better;
+      GitHub's own `actions/runner-images` repo documents ongoing, unrelated `macos-latest`
+      performance degradation. Most likely a throttled/virtualized-runner artifact, though
+      a real Mac would be needed to fully rule out genuine macOS thread-scheduling
+      coarseness too — see the expanded comment above `darwin_timing` in
+      `tests/test_ui.py` for the full finding. Reopen only with new evidence (a real Mac,
+      or fresh CI data).
 - [x] **Done 2026-09-18, PR #88 (`91b75a5`, merge `99c9344`).** G#23 / GH#35 — github: true — macOS
       reported `_dpi_s` ~0.75, so the 90 % UI-scale step rendered 5 pt labels (6 pt at
       100 %, which already shipped). Added `fs(base, s) = max(FONT_SIZE_FLOOR, int(base*s))`
@@ -671,8 +682,9 @@ merge `release/0.8.0` back into `main` as usual, and G#23 ships in whatever
 release comes after 0.8.0.
 
 **Next up, per the queue recorded 2026-09-15 (night), continuing in order:**
-1. G#4 / GH#6 — click interval measures 25–40% slow on macOS CI. Investigation
-   only; may end in "accept and document." Needs a real Mac to fully resolve.
+1. ~~G#4 / GH#6 — click interval measures 25–40% slow on macOS CI.~~ **Closed
+   2026-09-18, accept-and-document, no code/PR** — see the checkbox entry
+   above and `tests/test_ui.py`'s `darwin_timing` comment for the finding.
 2. G#38 / GH#67 — UI scale follows the window size (reuses G#23's `fs()`).
 3. G#12 / GH#14 — calibration suite for the review agent. Rebase first.
 4. G#13 / GH#15 — Macros tab story. Blocked on the settings schema version
