@@ -892,6 +892,14 @@ class InstallWorker(UITestCase):
 class NumBoxFocus(UITestCase):
     """A field keeps eating keystrokes until something explicitly drops focus."""
 
+    # G#38/GH#67 round 3 (PR #89 review): unrelated to ui_scale, but a
+    # fresh fixture now boots in Auto mode by default -- on a real window
+    # manager, Auto's own construction-time self-correction to the real
+    # screen (docs/spec.md's own "first launch" edge case) can still land
+    # mid this class's own focus assertions. Pinned the same way
+    # WindowResize/RailCollapse/UIScale already are.
+    INITIAL_UI_SCALE = "100"
+
     def focus_and_settle(self, numbox):
         # focus_set()/event_generate() are no-ops on a widget inside an
         # unmapped ancestor (docs/spec.md's "Test impact", finding 1/2) --
@@ -1810,6 +1818,12 @@ class RowValueColumn(UITestCase):
     gap does not grow the way it did with the old pack-based Row -- extra
     width becomes trailing margin after the control instead."""
 
+    # G#38/GH#67 round 3 (PR #89 review): same reasoning as NumBoxFocus's
+    # own INITIAL_UI_SCALE above -- test_ui_scale_row_never_overflows_
+    # its_card_at_any_scale_step below already restarts per scale step of
+    # its own, unaffected by this fixture's initial construction step.
+    INITIAL_UI_SCALE = "100"
+
     def _right_edge(self, widget, ancestor):
         """widget's right edge, in pixels from ancestor's own left edge.
 
@@ -1936,6 +1950,10 @@ class MinecraftSweepHint(UITestCase):
     under the Interval row into the jitter row's already-reserved hint
     slot, height-neutral by construction. Read-only display -- never
     blocks or clamps click_ms/jitter_ms."""
+
+    # G#38/GH#67 round 3 (PR #89 review): same reasoning as NumBoxFocus's
+    # own INITIAL_UI_SCALE.
+    INITIAL_UI_SCALE = "100"
 
     STATIC_HINT = "spreads the rhythm so it is not exact"
 
@@ -3942,11 +3960,19 @@ class UIScaleAuto(UITestCase):
         # on a real window manager, a geometry() request is asynchronous,
         # and a single root.update() is not a synchronization point with
         # an out-of-process WM (Xvfb, with no WM at all, made this a
-        # non-issue locally). pump_until returns without failing if this
-        # never converges, so a genuinely too-small real screen still
-        # surfaces as an honest assertion failure below, not a hang.
+        # non-issue locally). Cleared to (1, 1) first: this fixture's own
+        # construction may already have self-corrected to a screen-derived
+        # self.s (docs/spec.md's own "first launch" edge case), leaving a
+        # real minsize() floor in effect that could otherwise silently
+        # clamp the geometry() request below back up, well before this
+        # test's own _apply_ui_scale("auto") call gets a chance to
+        # recompute the right one for the new self.s. pump_until returns
+        # without failing if this never converges, so a genuinely
+        # too-small real screen still surfaces as an honest assertion
+        # failure below, not a hang.
         default_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * self.ui._dpi_s)
         default_h = int(app.WINDOW_MIN_H * self.ui._dpi_s)
+        self.root.minsize(1, 1)
         self.root.geometry(f"{default_w}x{default_h}")
         self.pump_until(lambda: (self.root.winfo_width(), self.root.winfo_height())
                                  == (default_w, default_h))
@@ -3977,9 +4003,17 @@ class UIScaleAuto(UITestCase):
         height floor first exceeded the real window's construction-time
         height). Growing the real window past every tested floor up front
         means grow_only never needs to touch real geometry again for the
-        rest of the test, so only the synthetic events drive self.s."""
+        rest of the test, so only the synthetic events drive self.s.
+
+        Waits for the real window to actually reach this size (not just a
+        single root.update()) -- a real window manager's own confirmation
+        of a geometry() request is asynchronous, and the very first
+        synthetic <Configure> below would otherwise still find the real
+        window at its small, unconverged construction-time size, causing
+        exactly the same corruption this method exists to prevent."""
         self.root.geometry("720x850")
-        self.root.update()
+        self.pump_until(lambda: (self.root.winfo_width(), self.root.winfo_height())
+                                 == (720, 850))
 
     def test_s_strictly_increases_with_increasing_window_size(self):
         # Forced to a screen much larger than the app's own fixed-pixel
@@ -4095,24 +4129,50 @@ class UIScaleAuto(UITestCase):
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
         target_w = (threshold + floor) // 2
-        self.root.geometry(f"{target_w}x{int(700 * s)}")
-        self.root.update()
+        target_h = int(700 * s)
+        self.root.geometry(f"{target_w}x{target_h}")
+        # Round 3 (PR #89 review): waits for the collapse flag itself, not
+        # the literal requested geometry -- this helper's own target_h
+        # (fixed "700", not derived from the app's own aspect ratio, same
+        # as WindowResize's pre-Auto equivalent) can feed back into Auto's
+        # own live self.s at a fill fraction that pulls it toward
+        # AUTO_SCALE_MAX, after which _apply_minsize's own grow_only
+        # branch can grow the real window past what was originally
+        # requested -- the flag (and the final self.s-derived assertion
+        # below, which reads self.ui.s fresh rather than the s captured
+        # above) is what the test actually cares about, and is robust to
+        # exactly where the window ends up landing.
+        self.pump_until(lambda: self.ui._rail_collapsed)
         self.assertTrue(self.ui._rail_collapsed)
-        self.pump(app.AUTO_SETTLE_MS / 1000 + 0.2)
+        # A condition-based wait for the settled rebuild, not a fixed
+        # AUTO_SETTLE_MS + margin sleep: a cascade of self-triggered
+        # minsize corrections (the same one that can move the window past
+        # the requested size above) can re-arm the settle timer more than
+        # once before it actually fires, on a real window manager whose
+        # own confirmation timing this suite can't control.
+        self.pump_until(lambda: self.ui.side.winfo_width()
+                                 == int(app.SIDEBAR_RAIL_W * self.ui.s), timeout=3.0)
         self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_RAIL_W * self.ui.s))
 
     def test_growing_back_past_the_threshold_re_expands_the_rail_under_auto(self):
+        # Round 3 (PR #89 review): see test_shrinking_past_the_threshold_
+        # collapses_the_rail_under_auto's own comment for why this waits
+        # on the flag/final-state conditions themselves rather than the
+        # literal requested geometry or a fixed sleep.
         s = self.ui.s
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
         target_w = (threshold + floor) // 2
-        self.root.geometry(f"{target_w}x{int(700 * s)}")
-        self.root.update()
+        target_h = int(700 * s)
+        self.root.geometry(f"{target_w}x{target_h}")
+        self.pump_until(lambda: self.ui._rail_collapsed)
         self.assertTrue(self.ui._rail_collapsed)
-        self.root.geometry(f"{threshold + 200}x{int(700 * s)}")
-        self.root.update()
+        grown_w = threshold + 200
+        self.root.geometry(f"{grown_w}x{target_h}")
+        self.pump_until(lambda: not self.ui._rail_collapsed)
         self.assertFalse(self.ui._rail_collapsed)
-        self.pump(app.AUTO_SETTLE_MS / 1000 + 0.2)
+        self.pump_until(lambda: self.ui.side.winfo_width()
+                                 == int(app.SIDEBAR_W * self.ui.s), timeout=3.0)
         self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_W * self.ui.s))
 
     def test_settings_shows_auto_selected_by_default(self):
@@ -4154,7 +4214,18 @@ class UIScaleAuto(UITestCase):
         # forces self.ui._dpi_s, then reproduced with the same synthetic-
         # <Configure> technique this class already uses elsewhere.
         w, h = self.ui._auto_bootstrap_wh
-        self.ui._screen_w, self.ui._screen_h = 1024, 768
+        # Round 3 (PR #89 review): picks whichever clamp extreme is
+        # furthest from self.ui.s's own *current* value, rather than a
+        # fixed 1024x768 -- on a real screen where this fixture's own
+        # construction already self-corrected self.s all the way to
+        # AUTO_SCALE_MIN or AUTO_SCALE_MAX (a real, observed macOS CI
+        # case), a fixed forced screen can land on the *same* clamped
+        # value from both sides, tripping the no-op guard below for real,
+        # not because the fix stopped working.
+        if self.ui.s >= (app.AUTO_SCALE_MIN + app.AUTO_SCALE_MAX) / 2:
+            self.ui._screen_w, self.ui._screen_h = 100000, 100000
+        else:
+            self.ui._screen_w, self.ui._screen_h = 10, 10
         self.assertNotEqual(self.ui._auto_scale_factor(w, h), self.ui.s,
                             "fixture didn't actually diverge self.s -- test is a no-op")
         self.root.event_generate("<Configure>", width=w, height=h)
@@ -4166,12 +4237,53 @@ class UIScaleAuto(UITestCase):
         self.assertAlmostEqual(self.ui.s, self.ui._auto_scale_factor(w, h))
 
     def test_a_genuine_resize_still_settles_even_at_the_bootstrap_pixel_size(self):
+        # Round 3 (PR #89 review, folded in here rather than as new test
+        # methods -- see docs/implementation.md's own "Key decisions" on
+        # why this suite's UITestCase count is deliberately not grown
+        # further): round 2's is_bootstrap_echo only ever compared an
+        # incoming <Configure> against the ONE geometry recorded at
+        # construction -- but _apply_minsize(grow_only=True) (called from
+        # every qualifying Auto-mode <Configure>) can itself issue a
+        # SECOND real geometry() call, when the newly recomputed minsize
+        # floor exceeds the window's current real size. Sabotage-verified
+        # against real production code (not just reasoned). Reset to a
+        # small, known real size first (minsize(1, 1) clears whatever real
+        # floor this fixture's own construction-time self-correction may
+        # already have left in effect -- observed on a real, large-screen
+        # macOS CI runner reaching self.s == AUTO_SCALE_MAX by
+        # construction alone, leaving no room left to grow from) rather
+        # than assuming the fresh fixture starts small.
+        self.root.minsize(1, 1)
+        self.root.geometry("400x400")
+        self.pump_until(lambda: (self.root.winfo_width(), self.root.winfo_height())
+                                 == (400, 400))
+        self.ui.s = app.AUTO_SCALE_MAX
+        self.ui._apply_minsize(grow_only=True)
+        self.assertNotEqual(self.ui._auto_bootstrap_wh, (400, 400),
+                            "fixture didn't actually trigger a self-requested "
+                            "growth -- test is a no-op")
+        grown_w, grown_h = self.ui._auto_bootstrap_wh
+        # A real window manager's own later confirmation of that self-
+        # requested growth -- not a genuine user resize -- must not be
+        # mistaken for one, even though the grown rectangle's own aspect
+        # ratio differs from the app's (grow_only only ever corrects the
+        # axis that actually falls short), so self.s itself still
+        # legitimately changes when this echo is processed.
+        self.root.event_generate("<Configure>", width=grown_w, height=grown_h)
+        self.root.update()
+        self.assertIsNone(self.ui._auto_settle_after_id,
+                          "a real WM's own confirmation of a self-triggered "
+                          "minsize correction armed a live settle timer")
+
         # The suppression above is keyed on (width, height) matching
         # self._auto_bootstrap_wh, not on "is this the first event" -- a
-        # later, real resize back to that exact pixel size (a coincidence,
-        # but a possible one) must still settle normally, and an earlier
-        # genuine resize away from it must too. Proves the fix didn't widen
-        # into "skip every event this instance ever sees".
+        # later, real resize away from it (here: shrinking back down, per
+        # the original round-2 docstring's own name for this test) must
+        # still settle normally, whether or not it also happens to be the
+        # self-triggered growth's own most-recently-tracked value above.
+        # Proves the fix didn't widen into "skip every event this
+        # instance ever sees", and that a genuine resize after a self-
+        # triggered growth (round 3's own new gap) still settles too.
         w, h = self._wh_for_factor(1.15)
         self.root.event_generate("<Configure>", width=w, height=h)
         self.root.update()
@@ -4201,57 +4313,6 @@ class UIScaleAuto(UITestCase):
             self.ui._release_right = original_release
         self.assertIsNone(self.ui._auto_settle_after_id,
                           "a late <Configure> during teardown re-armed the settle timer")
-
-    # ---------- round 3 (PR #89 review): the macOS/Windows CI regression ----------
-
-    def test_a_self_triggered_minsize_growth_is_tracked_as_the_new_expected_echo(self):
-        # Round 3: round 2's is_bootstrap_echo only ever compared an
-        # incoming <Configure> against the ONE geometry recorded at
-        # construction -- but _apply_minsize(grow_only=True) (called from
-        # every qualifying Auto-mode <Configure>, including this one) can
-        # itself issue a SECOND real geometry() call, when the newly
-        # recomputed minsize floor now exceeds the window's current real
-        # size. Reproduced and sabotage-verified against real production
-        # code (not just reasoned): setting self.s directly to
-        # AUTO_SCALE_MAX -- comfortably above any realistic bootstrap
-        # dpi_s (FontSizeFloorAtWorstCaseScale's own worst case is 0.75,
-        # not above 1.0) -- so its height floor exceeds this fixture's own
-        # real window, same "force the attribute directly" technique this
-        # class already uses, and calling _apply_minsize(grow_only=True)
-        # exactly the way _on_root_resize() itself does.
-        original_bwh = self.ui._auto_bootstrap_wh
-        self.ui.s = app.AUTO_SCALE_MAX
-        self.assertIsNone(self.ui._auto_settle_after_id)
-        self.ui._apply_minsize(grow_only=True)
-        self.assertNotEqual(self.ui._auto_bootstrap_wh, original_bwh,
-                            "fixture didn't actually trigger a self-requested "
-                            "growth -- test is a no-op")
-        w, h = self.ui._auto_bootstrap_wh
-        # A real window manager's own later confirmation of that self-
-        # requested growth -- not a genuine user resize -- must not be
-        # mistaken for one, even though the grown rectangle's own aspect
-        # ratio differs from the app's (grow_only only ever corrects the
-        # axis that actually falls short), so self.s itself still
-        # legitimately changes when this echo is processed.
-        self.root.event_generate("<Configure>", width=w, height=h)
-        self.root.update()
-        self.assertIsNone(self.ui._auto_settle_after_id,
-                          "a real WM's own confirmation of a self-triggered "
-                          "minsize correction armed a live settle timer")
-
-    def test_a_genuine_resize_after_a_self_triggered_growth_still_settles(self):
-        # The suppression above is keyed on matching the most recently
-        # self-requested geometry, not "skip every event after the first
-        # correction" -- a later, unrelated genuine resize must still
-        # settle normally.
-        self.ui.s = app.AUTO_SCALE_MAX
-        self.ui._apply_minsize(grow_only=True)
-        w, h = self._wh_for_factor(0.95)
-        self.root.event_generate("<Configure>", width=w, height=h)
-        self.root.update()
-        self.assertIsNotNone(self.ui._auto_settle_after_id,
-                             "a genuine resize after a self-triggered growth "
-                             "failed to arm the settle timer")
 
 
 class FontSizeFloorAtWorstCaseScale(UITestCase):
@@ -4392,6 +4453,10 @@ class SettingsUpdates(UITestCase):
     _set_update_state()/_offer_update(), the sidebar's has_update signal)
     that relocating update_button/version_label out of the sidebar makes
     necessary. See docs/history/ac-17-f3b-spec.md §3/§4."""
+
+    # G#38/GH#67 round 3 (PR #89 review): same reasoning as NumBoxFocus's
+    # own INITIAL_UI_SCALE.
+    INITIAL_UI_SCALE = "100"
 
     def tearDown(self):
         super().tearDown()
@@ -4981,6 +5046,10 @@ class AfterJobsAreNotDuplicated(UITestCase):
 
 
 class BindAllBoundOnce(UITestCase):
+    # G#38/GH#67 round 3 (PR #89 review): same reasoning as NumBoxFocus's
+    # own INITIAL_UI_SCALE.
+    INITIAL_UI_SCALE = "100"
+
     def tearDown(self):
         super().tearDown()
         app.set_active_theme("dark")
