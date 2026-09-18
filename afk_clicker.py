@@ -2660,7 +2660,23 @@ class AfkAutoclicker:
         G#38/GH#67 round 2 (PR #89 review): the not-grow_only branch also
         records the exact (width, height) it just requested, in
         self._auto_bootstrap_wh -- see _on_root_resize()'s own comment for
-        why."""
+        why.
+
+        G#38/GH#67 round 3 (PR #89 review, macOS/Windows CI regression):
+        the grow_only branch now records its own geometry() request there
+        too, not just the original bootstrap one. Round 2 only ever
+        compared an incoming <Configure> against the single value recorded
+        at construction -- but a live Auto-mode drag can itself call this
+        method with grow_only=True and issue a *second* self-requested
+        geometry() (when the newly-recomputed minsize floor now exceeds
+        the window's current size), and a real window manager's own later
+        confirmation of *that* request was never recognized as an echo --
+        it reported a genuine-looking size change nothing requested,
+        re-arming a live settle timer from self-correction alone. Tracking
+        whichever self-requested geometry is most recent (there is only
+        ever one in flight at a time -- both branches are called from the
+        same single-threaded event handling) closes that gap the same way
+        the original bootstrap echo was closed."""
         minw, minh = (int((SIDEBAR_RAIL_W + 1 + CONTENT_W) * self.s),
                       int(WINDOW_MIN_H * self.s))
         self.root.minsize(minw, minh)
@@ -2673,6 +2689,7 @@ class AfkAutoclicker:
         new_w, new_h = max(cur_w, minw), max(cur_h, minh)
         if (new_w, new_h) != (cur_w, cur_h):
             self.root.geometry(f"{new_w}x{new_h}")
+            self._auto_bootstrap_wh = (new_w, new_h)
 
     def _request_rebuild(self):
         """The coalescing tail shared by _apply_appearance() and
@@ -2776,7 +2793,15 @@ class AfkAutoclicker:
         from a fresh instance (as several of UIScaleAuto's own tests do,
         with no natural bootstrap echo to consume under Xvfb) must still
         settle exactly like today; only an event reporting the *exact*
-        bootstrap geometry back unchanged is ever a candidate."""
+        bootstrap geometry back unchanged is ever a candidate.
+
+        Round 3 (PR #89 review, macOS/Windows CI regression): self.
+        _auto_bootstrap_wh is no longer only the one-time construction
+        value -- _apply_minsize()'s own grow_only branch now updates it
+        every time *it* issues a geometry() call too (see its own
+        docstring), so a real WM's later confirmation of a self-triggered
+        minsize correction is also recognized as an echo, not just the
+        original bootstrap map."""
         if event.widget is not self.root:
             return
         if self.store.data["ui_scale"] == "auto":
