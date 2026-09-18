@@ -154,11 +154,14 @@ Bugs and residue:
       unvalidated, and a crafted tag could run a command. Fixed by validating the
       tag's shape before it's used at all.
 - [ ] G#4 / GH#6 — github: true — The click interval measures 25–40 % slow on the macOS CI runner. Needs a real Mac.
-- [ ] G#23 / GH#35 — github: true — macOS reports `_dpi_s` ~0.75, so the 90 % UI-scale step renders
-      5 pt labels (6 pt at 100 %, which already ships). Not a regression; the spec's
-      §3 assumption that `_dpi_s >= 1.0` was simply wrong about macOS. Decide whether
-      to add the `fs(base, s)` floor across the ~20 font call sites, drop 90 % on
-      low-DPI displays, or accept it. Only verifiable via CI — no real Mac here (G#4).
+- [x] **Done 2026-09-18, PR #88 (`91b75a5`, merge `99c9344`).** G#23 / GH#35 — github: true — macOS
+      reported `_dpi_s` ~0.75, so the 90 % UI-scale step rendered 5 pt labels (6 pt at
+      100 %, which already shipped). Added `fs(base, s) = max(FONT_SIZE_FLOOR, int(base*s))`
+      (`FONT_SIZE_FLOOR = 6`) and swept all 33 font call sites onto it — no visual
+      change above the floor, no `WINDOW_MIN_H`/scale-step change, no G#38 scope.
+      Verified on the real macOS CI leg (pulled the job log directly), not just the
+      local `_dpi_s` simulation. One in-depth cycle review + one independent critical
+      PR review, both MERGE, CI green on all three platforms.
 - [ ] G#39 / GH#69 — github: true — **RECURRED 2026-09-14** on PR #65's macOS leg (run 34906199873, commit
       `9aa7e81`, a diff touching only `tests/test_updater.py` and docs), same
       assertion: `'minecraft'` missing after a rebuild. So the `_poll_games` stub
@@ -607,7 +610,7 @@ Leo before it produced anything — safe to just start it again.
 
 **Updated queue, in order** (continues after G#23):
 
-1. ~~G#23 / GH#35 — macOS font-size floor.~~ **In progress**, see above.
+1. ~~G#23 / GH#35 — macOS font-size floor.~~ **Done, PR #88 (`91b75a5` → `99c9344`).**
 2. G#4 / GH#6 — click interval measures 25–40% slow on macOS CI. Investigation
    only; may end in "accept and document." Needs a real Mac to fully resolve.
 3. G#38 / GH#67 — UI scale follows the window size. Leo's decisions recorded as
@@ -650,3 +653,30 @@ reaching a real `apply_hotkey()` listener SIGTRAPs macOS CI unless `app.HotkeyWa
 is stubbed (see `docs/history/ac-21-implementation.md` round 3). Design docs have
 gotten WCAG contrast arithmetic wrong three separate times this session — always
 recompute from the literal `THEMES` hex values before trusting a design doc's numbers.
+
+## Session handoff — 2026-09-18
+
+`main` is at `99c9344`. G#23/GH#35 (macOS font-size floor) is done: full
+product-manager → ux-designer → developer → reviewer cycle, PR #88 (`91b75a5`),
+independent critical PR review confirmed MERGE with its own venv run, revert-
+and-watch-it-fail check, and a pull of the real macOS CI job log (not just the
+green checkmark) — CI green on all three platforms, merged `99c9344`. Both
+trackers closed (Gitea #23, GitHub #35).
+
+**0.8.0 is still unpublished**, parked on Leo's deployment-gate approval since
+2026-09-15 (`release/0.8.0` from `70e5751`, run 35026463043) — this session did
+not touch it, that's his call. It does **not** include this G#23 merge, since
+`release/0.8.0` branched before G#23 landed on `main`; once 0.8.0 publishes,
+merge `release/0.8.0` back into `main` as usual, and G#23 ships in whatever
+release comes after 0.8.0.
+
+**Next up, per the queue recorded 2026-09-15 (night), continuing in order:**
+1. G#4 / GH#6 — click interval measures 25–40% slow on macOS CI. Investigation
+   only; may end in "accept and document." Needs a real Mac to fully resolve.
+2. G#38 / GH#67 — UI scale follows the window size (reuses G#23's `fs()`).
+3. G#12 / GH#14 — calibration suite for the review agent. Rebase first.
+4. G#13 / GH#15 — Macros tab story. Blocked on the settings schema version
+   bump (ROADMAP); resolve that first, then run as a `story` workflow.
+
+Smaller opportunistic items (G#40, G#41, G#42, G#44, G#45, G#46, G#47, G#48)
+are unchanged from the 2026-09-15 (night) list above.
