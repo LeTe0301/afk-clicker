@@ -2377,6 +2377,9 @@ class AfkAutoclicker:
         # explicit size the body collapses to zero height and only the header
         # shows. minsize keeps the window from ever being resized below the
         # size the layout was tuned at, so nothing clips.
+        self._auto_bootstrap_wh = None   # set by _apply_minsize()'s own
+            # not-grow_only branch below, right before it returns -- see
+            # _on_root_resize()'s own comment (G#38/GH#67 round 2).
         self._apply_minsize()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind_all("<Button-1>", self._maybe_drop_focus)  # bound once, here --
@@ -2652,13 +2655,19 @@ class AfkAutoclicker:
         stays a single WINDOW_MIN_H-derived number used for both minsize()
         and (when not grow_only) geometry()'s height (see docs/spec.md's
         "Why height doesn't get the width axis's floor/default split",
-        G#28/GH#48)."""
+        G#28/GH#48).
+
+        G#38/GH#67 round 2 (PR #89 review): the not-grow_only branch also
+        records the exact (width, height) it just requested, in
+        self._auto_bootstrap_wh -- see _on_root_resize()'s own comment for
+        why."""
         minw, minh = (int((SIDEBAR_RAIL_W + 1 + CONTENT_W) * self.s),
                       int(WINDOW_MIN_H * self.s))
         self.root.minsize(minw, minh)
         if not grow_only:
             default_w = int((SIDEBAR_W + 1 + CONTENT_W) * self.s)
             self.root.geometry(f"{default_w}x{minh}")
+            self._auto_bootstrap_wh = (default_w, minh)
             return
         cur_w, cur_h = self.root.winfo_width(), self.root.winfo_height()
         new_w, new_h = max(cur_w, minw), max(cur_h, minh)
@@ -2742,10 +2751,36 @@ class AfkAutoclicker:
         ever lags behind the live drag, then only requests the actual
         widget-tree rebuild (which repaints fonts/padding/rail state) via
         the settled debounce (_request_auto_settle()), not the immediate
-        after_idle fixed-step mode uses -- see docs/spec.md §4/§5."""
+        after_idle fixed-step mode uses -- see docs/spec.md §4/§5.
+
+        Round 2 (PR #89 review, macOS/Windows CI): a real window manager
+        sends a post-map root <Configure> shortly after construction,
+        reporting exactly the geometry _apply_minsize()'s own bootstrap
+        call already requested (self._auto_bootstrap_wh) -- nothing has
+        actually resized yet, it is the WM merely confirming the map. On a
+        real screen that isn't near AUTO_REF_SCREEN_W/H (any CI runner's
+        own virtual display), _auto_scale_factor() still computes a
+        different self.s purely from the screen-size term, which used to
+        arm a real AUTO_SETTLE_MS timer from this echo alone -- every fresh
+        UITestCase fixture boots in Auto mode now, and that timer firing
+        later, mid-test (or after a *different* test's own teardown, since
+        150ms comfortably outlives most test bodies), tore down/rebuilt the
+        widget tree out from under a test that never asked for a rebuild.
+        self.s/minsize()/the rail-collapse flag still get corrected live
+        below regardless (matching every other event) -- only the settle-
+        triggered rebuild itself is skipped for this one echo, so a
+        genuine subsequent resize (or an explicit Settings > Appearance
+        pick, which calls _apply_ui_scale() directly, bypassing this
+        method) still settles normally. Compared by (width, height), not
+        by "is this the first event" -- a burst of real resizes starting
+        from a fresh instance (as several of UIScaleAuto's own tests do,
+        with no natural bootstrap echo to consume under Xvfb) must still
+        settle exactly like today; only an event reporting the *exact*
+        bootstrap geometry back unchanged is ever a candidate."""
         if event.widget is not self.root:
             return
         if self.store.data["ui_scale"] == "auto":
+            is_bootstrap_echo = (event.width, event.height) == self._auto_bootstrap_wh
             new_s = self._auto_scale_factor(event.width, event.height)
             s_changed = new_s != self.s
             self.s = new_s
@@ -2754,7 +2789,7 @@ class AfkAutoclicker:
             collapsed_changed = collapsed != self._rail_collapsed
             if collapsed_changed:
                 self._rail_collapsed = collapsed
-            if s_changed or collapsed_changed:
+            if (s_changed or collapsed_changed) and not is_bootstrap_echo:
                 self._request_auto_settle()
             return
         collapsed = event.width < int(RAIL_COLLAPSE_THRESHOLD * self.s)
@@ -4676,6 +4711,17 @@ class AfkAutoclicker:
                     var.trace_remove(modes, cbname)
 
     def on_close(self):
+        # G#38/GH#67 round 2 (PR #89 review): unbound first, before anything
+        # below cancels a single already-pending _auto_settle_after_id job.
+        # That cancellation only ever guards a job armed BEFORE on_close()
+        # started -- with _on_root_resize still bound, a <Configure> firing
+        # any time later in this same teardown (root.destroy() itself can
+        # generate one) would re-arm a fresh job that nothing after that
+        # point ever cancels again, later firing into a destroyed
+        # interpreter. Unbinding here closes that off outright, the same
+        # "make it impossible outright" preference the _rebuild_after_id
+        # cancellation below already documents for its own job.
+        self.root.unbind("<Configure>")
         self._persist()
         # The update-log dialog (G#36/GH#64), in whatever state it's
         # currently in -- the ordinary preview or the browser-failed

@@ -4034,6 +4034,74 @@ class UIScaleAuto(UITestCase):
         self.ui.on_close()   # must not raise
         self.assertIsNone(self.ui._auto_settle_after_id)
 
+    # ---------- round 2 (PR #89 review): the macOS/Windows CI regression ----------
+
+    def test_the_bootstrap_echo_configure_does_not_arm_a_live_settle_timer(self):
+        # Gap 1: a real window manager's own post-map <Configure> reports
+        # exactly self._auto_bootstrap_wh back unchanged -- nothing has
+        # actually resized, it's the WM merely confirming the map. On a
+        # real screen far from AUTO_REF_SCREEN_W/H (any CI runner's own
+        # virtual display), that alone used to still arm a live
+        # AUTO_SETTLE_MS timer purely from the screen-size term -- and
+        # since UI_SCALE_DEFAULT is now "auto", every fresh UITestCase
+        # fixture (not just this class's own tests) boots in Auto mode and
+        # hits this path on a real WM. That timer firing later, mid-test
+        # (or after a *different* test's own teardown, since 150ms
+        # comfortably outlives most test bodies) tore down/rebuilt the
+        # widget tree out from under a test that never asked for a
+        # rebuild -- PR #89's macOS/Windows CI regression. Forced the same
+        # "force the attribute directly" way FontSizeFloorAtWorstCaseScale
+        # forces self.ui._dpi_s, then reproduced with the same synthetic-
+        # <Configure> technique this class already uses elsewhere.
+        w, h = self.ui._auto_bootstrap_wh
+        self.ui._screen_w, self.ui._screen_h = 1024, 768
+        self.assertNotEqual(self.ui._auto_scale_factor(w, h), self.ui.s,
+                            "fixture didn't actually diverge self.s -- test is a no-op")
+        self.root.event_generate("<Configure>", width=w, height=h)
+        self.root.update()
+        self.assertIsNone(self.ui._auto_settle_after_id,
+                          "the bootstrap echo armed a live settle timer")
+        # Only the settle-triggered rebuild is skipped for this one echo --
+        # self.s itself still tracks live, exactly like every other event.
+        self.assertAlmostEqual(self.ui.s, self.ui._auto_scale_factor(w, h))
+
+    def test_a_genuine_resize_still_settles_even_at_the_bootstrap_pixel_size(self):
+        # The suppression above is keyed on (width, height) matching
+        # self._auto_bootstrap_wh, not on "is this the first event" -- a
+        # later, real resize back to that exact pixel size (a coincidence,
+        # but a possible one) must still settle normally, and an earlier
+        # genuine resize away from it must too. Proves the fix didn't widen
+        # into "skip every event this instance ever sees".
+        w, h = self._wh_for_factor(1.15)
+        self.root.event_generate("<Configure>", width=w, height=h)
+        self.root.update()
+        self.assertIsNotNone(self.ui._auto_settle_after_id,
+                             "a genuine, non-echo resize failed to arm the settle timer")
+
+    def test_a_late_configure_during_teardown_does_not_re_arm_the_settle_timer(self):
+        # Gap 2: on_close() used to cancel a pending _auto_settle_after_id
+        # only once, near the top -- but _on_root_resize stayed bound
+        # through the rest of teardown, including root.destroy() itself,
+        # so a late <Configure> arriving after that one cancellation could
+        # re-arm a job nothing after that point ever cancels again, later
+        # firing into a destroyed interpreter. Reproduced by hooking
+        # _release_right -- on_close()'s own last call before
+        # root.destroy() -- the same "last point before destroy" position
+        # UpdateLogPrompt.test_on_close_before_the_startup_idle_job_ever_ran_cancels_it
+        # already uses to inspect state right before teardown finishes.
+        w, h = self._wh_for_factor(1.15)
+        original_release = self.ui._release_right
+        def patched_release():
+            original_release()
+            self.root.event_generate("<Configure>", width=w, height=h)
+        self.ui._release_right = patched_release
+        try:
+            self.ui.on_close()   # must not raise
+        finally:
+            self.ui._release_right = original_release
+        self.assertIsNone(self.ui._auto_settle_after_id,
+                          "a late <Configure> during teardown re-armed the settle timer")
+
 
 class FontSizeFloorAtWorstCaseScale(UITestCase):
     """G#23/GH#35: FontSizeFloor above proves fs() itself is correct in
