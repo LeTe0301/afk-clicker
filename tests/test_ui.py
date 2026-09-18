@@ -3942,6 +3942,12 @@ class UIScaleAuto(UITestCase):
         # FontSizeFloorAtWorstCaseScale forces self.ui._dpi_s directly) --
         # docs/spec.md §2's calibration: the app's own default launch
         # geometry on a 1920x1080 screen must land at factor == 1.0.
+        # Round 4 (PR #89 review, Defect 1): _auto_scale_factor() now
+        # multiplies the clamped raw fill-ratio by self._dpi_s (DPI-relative,
+        # like every fixed step), so this pure-formula check also forces
+        # self._dpi_s = 1.0 to isolate the calibration constant itself from
+        # whatever DPI this box happens to report.
+        self.ui._dpi_s = 1.0
         self.ui._screen_w, self.ui._screen_h = app.AUTO_REF_SCREEN_W, app.AUTO_REF_SCREEN_H
         default_w = app.SIDEBAR_W + 1 + app.CONTENT_W
         default_h = app.WINDOW_MIN_H
@@ -3991,6 +3997,38 @@ class UIScaleAuto(UITestCase):
         # computed from the *real* window's own current size, not the
         # stubbed one this test is actually about.
         self.ui._apply_ui_scale("auto")
+        self.assertAlmostEqual(self.ui.s, self.ui._dpi_s,
+                               delta=max(self.ui._dpi_s * 0.02, 0.01))
+
+    def test_auto_is_not_floored_at_the_raw_clamp_on_a_low_dpi_display(self):
+        # G#38/GH#67 round 4 (PR #89 review, Defect 1): every fixed step's
+        # self.s is self._dpi_s * UI_SCALE_FACTORS[value] -- DPI-*relative*.
+        # Auto's own clamp must land in that same DPI-relative range, not
+        # the raw [AUTO_SCALE_MIN, AUTO_SCALE_MAX] literal. Forces
+        # self.ui._dpi_s to macOS CI's own observed value (~0.75, an
+        # ordinary non-Retina headless-VM number, well under
+        # AUTO_SCALE_MIN=0.9) -- the same "force the attribute directly"
+        # technique FontSizeFloorAtWorstCaseScale already uses for _dpi_s.
+        # Before the fix, self.ui.s pins at the raw 0.9 floor here --
+        # *larger* than even the fixed "100%" step would give on this same
+        # hardware (_dpi_s * 1.0 ~= 0.75), unreachable-below no matter the
+        # window/screen ratio. This is the exact coverage gap round 1's own
+        # test-review (Finding 1) flagged and that let the bug ship three
+        # rounds in a row (docs/test-review.md, Defect 1).
+        self.ui._dpi_s = 0.75
+        self.ui._screen_w, self.ui._screen_h = app.AUTO_REF_SCREEN_W, app.AUTO_REF_SCREEN_H
+        default_w = int((app.SIDEBAR_W + 1 + app.CONTENT_W) * self.ui._dpi_s)
+        default_h = int(app.WINDOW_MIN_H * self.ui._dpi_s)
+        original_winfo_width = self.root.winfo_width
+        original_winfo_height = self.root.winfo_height
+        self.root.winfo_width = lambda: default_w
+        self.root.winfo_height = lambda: default_h
+        self.addCleanup(lambda: setattr(self.root, "winfo_width", original_winfo_width))
+        self.addCleanup(lambda: setattr(self.root, "winfo_height", original_winfo_height))
+        self.ui._apply_ui_scale("auto")
+        self.assertNotAlmostEqual(self.ui.s, app.AUTO_SCALE_MIN, places=2,
+                                  msg="Auto must not pin self.s at the raw, "
+                                      "DPI-absolute clamp floor on a low-DPI display")
         self.assertAlmostEqual(self.ui.s, self.ui._dpi_s,
                                delta=max(self.ui._dpi_s * 0.02, 0.01))
 
@@ -4112,8 +4150,12 @@ class UIScaleAuto(UITestCase):
                 w, h = self._wh_for_factor(factor)
                 self.root.event_generate("<Configure>", width=w, height=h)
                 self.root.update()
-                self.assertGreaterEqual(self.ui.s, app.AUTO_SCALE_MIN)
-                self.assertLessEqual(self.ui.s, app.AUTO_SCALE_MAX)
+                # Round 4 (PR #89 review, Defect 1): self.ui.s is now
+                # self._dpi_s * clamped_factor -- DPI-relative, like every
+                # fixed step -- so the bounds are self._dpi_s * [MIN, MAX],
+                # not the raw literals.
+                self.assertGreaterEqual(self.ui.s, self.ui._dpi_s * app.AUTO_SCALE_MIN)
+                self.assertLessEqual(self.ui.s, self.ui._dpi_s * app.AUTO_SCALE_MAX)
                 if prev_s is not None:
                     self.assertGreater(self.ui.s, prev_s)
                 prev_s = self.ui.s
@@ -4255,7 +4297,16 @@ class UIScaleAuto(UITestCase):
         self.root.geometry(f"{target_w}x{target_h}")
         self.pump_until(lambda: self.ui._rail_collapsed)
         self.assertTrue(self.ui._rail_collapsed)
-        grown_w = threshold + 200
+        # Round 4 (PR #89 review, Defect 1): a fixed "+200" margin off the
+        # *stale* threshold above isn't enough to guarantee escaping
+        # collapse -- growing the window also grows self.s (this test's
+        # own target_h isn't aspect-consistent, same round-3-documented
+        # quirk as its shrinking sibling), which grows the threshold too.
+        # Margin off the worst case self.s can ever reach
+        # (self._dpi_s * AUTO_SCALE_MAX, the clamp ceiling) instead, so
+        # this clears the threshold regardless of where s lands mid-grow.
+        worst_case_threshold = int(app.RAIL_COLLAPSE_THRESHOLD * self.ui._dpi_s * app.AUTO_SCALE_MAX)
+        grown_w = worst_case_threshold + 50
         self.root.geometry(f"{grown_w}x{target_h}")
         self.pump_until(lambda: not self.ui._rail_collapsed)
         self.assertFalse(self.ui._rail_collapsed)
@@ -4341,22 +4392,66 @@ class UIScaleAuto(UITestCase):
         # macOS CI runner reaching self.s == AUTO_SCALE_MAX by
         # construction alone, leaving no room left to grow from) rather
         # than assuming the fresh fixture starts small.
+        # Round 4 (PR #89 review): the reset itself, while Auto mode's own
+        # live _on_root_resize()/_apply_minsize() tracking is active, is
+        # itself a real self-triggered growth cascade -- a real <Configure>
+        # reporting 400x400 recomputes a small self.s, whose own minsize
+        # floor then exceeds 400, growing again, recomputing self.s again,
+        # ... converging back at the clamp ceiling rather than ever
+        # settling at 400x400 (traced directly: reproducibly lands at
+        # exactly self._dpi_s * AUTO_SCALE_MAX's own minw/minh). Suppressing
+        # _apply_minsize() (the same technique
+        # _suppress_apply_minsize_side_effects() uses elsewhere in this
+        # class) for this reset only breaks that chain -- _on_root_resize()
+        # can still recompute self.s live, it just never issues a follow-on
+        # geometry() call, so the real window actually lands at 400x400.
+        # _request_auto_settle() is suppressed too, not just _apply_minsize():
+        # _on_root_resize() arms a settle purely off self.s changing
+        # (unconditional on _apply_minsize() itself doing anything), so the
+        # 400x400 reset's own live self.s recompute would otherwise leave a
+        # stray pending settle job behind that has nothing to do with the
+        # echo mechanism this test actually exercises below.
+        original_apply_minsize = self.ui._apply_minsize
+        original_request_auto_settle = self.ui._request_auto_settle
+        self.ui._apply_minsize = lambda grow_only=False: None
+        self.ui._request_auto_settle = lambda: None
         self.root.minsize(1, 1)
         self.root.geometry("400x400")
         self.pump_until(lambda: (self.root.winfo_width(), self.root.winfo_height())
                                  == (400, 400))
+        self.ui._apply_minsize = original_apply_minsize
+        self.ui._request_auto_settle = original_request_auto_settle
+        self.assertIsNone(self.ui._auto_settle_after_id,
+                          "the 400x400 reset itself left a stray settle job pending")
         self.ui.s = app.AUTO_SCALE_MAX
-        self.ui._apply_minsize(grow_only=True)
-        self.assertNotEqual(self.ui._auto_bootstrap_wh, (400, 400),
+        # Round 4 (PR #89 review, Defect 3): the expected grown geometry is
+        # computed here, independently, from the same formula
+        # _apply_minsize()'s own grow_only branch uses (afk_clicker.py's
+        # own docstring/source) -- BEFORE calling it -- rather than reading
+        # self.ui._auto_bootstrap_wh back *after* the call and feeding that
+        # same value into the synthetic event below. The earlier version of
+        # this test did exactly that: whatever _auto_bootstrap_wh currently
+        # held, updated or stale, was by construction always what got
+        # echoed back, so the final assertIsNone(...) could never observe a
+        # tracking regression -- confirmed tautological via sabotage
+        # (docs/test-review.md's Defect 3): dropping _apply_minsize()'s own
+        # self._auto_bootstrap_wh update left this test green.
+        minw = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * self.ui.s)
+        minh = int(app.WINDOW_MIN_H * self.ui.s)
+        grown_w, grown_h = max(400, minw), max(400, minh)
+        self.assertNotEqual((grown_w, grown_h), (400, 400),
                             "fixture didn't actually trigger a self-requested "
                             "growth -- test is a no-op")
-        grown_w, grown_h = self.ui._auto_bootstrap_wh
-        # A real window manager's own later confirmation of that self-
-        # requested growth -- not a genuine user resize -- must not be
-        # mistaken for one, even though the grown rectangle's own aspect
-        # ratio differs from the app's (grow_only only ever corrects the
-        # axis that actually falls short), so self.s itself still
-        # legitimately changes when this echo is processed.
+        self.ui._apply_minsize(grow_only=True)
+        self.assertEqual(self.ui._auto_bootstrap_wh, (grown_w, grown_h),
+                         "_apply_minsize()'s own geometry() call wasn't "
+                         "tracked as the new expected self-requested echo")
+        # A real window manager's own later confirmation of that
+        # independently-computed grown size -- not a genuine user resize --
+        # must not be mistaken for one, even though the grown rectangle's
+        # own aspect ratio differs from the app's (grow_only only ever
+        # corrects the axis that actually falls short), so self.s itself
+        # still legitimately changes when this echo is processed.
         self.root.event_generate("<Configure>", width=grown_w, height=grown_h)
         self.root.update()
         self.assertIsNone(self.ui._auto_settle_after_id,

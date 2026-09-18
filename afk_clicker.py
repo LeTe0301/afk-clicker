@@ -2711,13 +2711,34 @@ class AfkAutoclicker:
         percentage steps already do -- doubling both axes, 4x the area,
         yields 2x the factor, not 4x), calibrated against
         AUTO_REFERENCE_FILL so a typical desktop lands at parity with
-        today's "100%" step (docs/spec.md §2). Clamped to
-        [AUTO_SCALE_MIN, AUTO_SCALE_MAX], the same range the four fixed
-        steps already cover -- this is also what prevents a shrink/grow
-        feedback runaway."""
+        today's "100%" step (docs/spec.md §2). `width`/`height` are real
+        window pixel dimensions, which already carry self._dpi_s baked in
+        (the window's own geometry is always sized off self.s, which is
+        itself self._dpi_s * something) -- so the raw fill/AUTO_REFERENCE_FILL
+        ratio already lands close to self._dpi_s for a window at its
+        "100%-equivalent" fill, with no separate multiplication needed.
+        Clamped to self._dpi_s * [AUTO_SCALE_MIN, AUTO_SCALE_MAX] -- the
+        same DPI-*relative* range every fixed step's own self.s already
+        covers (self._dpi_s * UI_SCALE_FACTORS[value]) -- which is also
+        what prevents a shrink/grow feedback runaway.
+
+        Round 4 (PR #89 review, Defect 1): before this fix, the clamp
+        bounds were the raw [AUTO_SCALE_MIN, AUTO_SCALE_MAX] literals --
+        DPI-*absolute*, not DPI-relative. On a real low-DPI display
+        (self._dpi_s < 0.9 -- an ordinary non-Retina headless-VM value,
+        not just a CI artifact), that pinned Auto's self.s at the raw 0.9
+        floor -- unreachable-below and *larger* than even the fixed "100%"
+        step would give on the same hardware. (A tempting-looking
+        alternative fix -- clamp the raw ratio to the plain [MIN, MAX]
+        range and then multiply the result by self._dpi_s -- double-counts
+        self._dpi_s, since it's already embedded in `width`/`height`;
+        verified this concretely against the macOS CI repro values below
+        before picking this version.) See
+        tests.test_ui.UIScaleAuto.test_auto_is_not_floored_at_the_raw_clamp_on_a_low_dpi_display."""
         fill = ((width * height) / (self._screen_w * self._screen_h)) ** 0.5
         factor = fill / AUTO_REFERENCE_FILL
-        return min(AUTO_SCALE_MAX, max(AUTO_SCALE_MIN, factor))
+        lo, hi = self._dpi_s * AUTO_SCALE_MIN, self._dpi_s * AUTO_SCALE_MAX
+        return min(hi, max(lo, factor))
 
     def _request_auto_settle(self):
         """Auto mode's drag-settle debounce (docs/spec.md "The debounce
