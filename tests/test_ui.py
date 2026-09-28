@@ -625,6 +625,50 @@ class SettingsSchemaVersion(UITestCase):
         self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 510)
 
 
+class StoreMacroFiltering(UITestCase):
+    """G#47/GH#15: a per-game "macros" list is filtered through
+    _validate_macro() at load time, the same "corrupt is dropped, never
+    fatal" contract Store.__init__ already applies to the games dict
+    itself -- a malformed macro must not crash startup or, worse, survive
+    into MacroRunner as real input."""
+
+    def _write(self, data):
+        with open(self.config, "w") as fh:
+            json.dump(data, fh)
+
+    def test_a_well_formed_macro_survives_a_load(self):
+        self._write({"games": {"minecraft": {"macros": [
+            {"id": "abc", "name": "Restock", "hotkey": None,
+             "steps": [{"type": "wait", "ms": 10}]},
+        ]}}})
+        store = app.Store(self.config)
+        macros = store.data["games"]["minecraft"]["macros"]
+        self.assertEqual(len(macros), 1)
+        self.assertEqual(macros[0]["name"], "Restock")
+
+    def test_a_malformed_macro_is_dropped_not_fatal(self):
+        self._write({"games": {"minecraft": {"macros": [
+            {"id": "abc", "name": "Good", "hotkey": None,
+             "steps": [{"type": "wait", "ms": 10}]},
+            {"name": "Bad -- no steps at all"},
+            {"name": "", "steps": []},   # empty name
+            "not even a dict",
+        ]}}})
+        store = app.Store(self.config)
+        macros = store.data["games"]["minecraft"]["macros"]
+        self.assertEqual([m["name"] for m in macros], ["Good"])
+
+    def test_a_non_list_macros_value_does_not_crash_the_load(self):
+        self._write({"games": {"minecraft": {"macros": "oops"}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"]["minecraft"].get("macros", []), [])
+
+    def test_a_missing_macros_key_defaults_to_empty_at_read_time(self):
+        self._write({"games": {"minecraft": {"click_ms": 700}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"]["minecraft"].get("macros", []), [])
+
+
 class ClickLoop(UITestCase):
     def setUp(self):
         super().setUp()
@@ -6755,6 +6799,348 @@ class UpdateLogPrompt(CapturesCallbackExceptions, unittest.TestCase):
 
     def test_fallback_is_not_clipped_at_130_percent(self):
         self._assert_fallback_not_clipped("130")
+
+
+class MacroValidation(unittest.TestCase):
+    """G#47/GH#15: _validate_macro()/_validate_macro_step() reject-not-coerce
+    contract, matching Hotkey.from_json()'s own reasoning -- a malformed
+    macro feeds MacroRunner real input, so anything not exactly well-formed
+    is dropped rather than silently repaired into a different, plausible-
+    looking macro. No Tk/display needed -- these are plain functions."""
+
+    def _valid_blob(self, **overrides):
+        blob = {
+            "name": "Restock hotbar",
+            "hotkey": {"mods": ["ctrl"], "keys": [["f8", None, None]]},
+            "steps": [
+                {"type": "key_down", "key": ["f1", None, None]},
+                {"type": "wait", "ms": 50},
+                {"type": "key_up", "key": ["f1", None, None]},
+                {"type": "click", "button": "left"},
+            ],
+        }
+        blob.update(overrides)
+        return blob
+
+    def test_a_well_formed_macro_is_accepted(self):
+        m = app._validate_macro(self._valid_blob())
+        self.assertIsNotNone(m)
+        self.assertEqual(m["name"], "Restock hotbar")
+        self.assertEqual(len(m["steps"]), 4)
+
+    def test_a_missing_id_is_assigned_one(self):
+        m = app._validate_macro(self._valid_blob())
+        self.assertIsInstance(m["id"], str)
+        self.assertTrue(m["id"])
+
+    def test_an_existing_id_survives_revalidation(self):
+        m = app._validate_macro(self._valid_blob())
+        m2 = app._validate_macro(m)
+        self.assertEqual(m["id"], m2["id"])
+
+    def test_a_macro_with_no_hotkey_is_accepted(self):
+        m = app._validate_macro(self._valid_blob(hotkey=None))
+        self.assertIsNotNone(m)
+        self.assertIsNone(m["hotkey"])
+
+    def test_not_a_dict_is_rejected(self):
+        self.assertIsNone(app._validate_macro(["not", "a", "dict"]))
+
+    def test_an_empty_name_is_rejected(self):
+        self.assertIsNone(app._validate_macro(self._valid_blob(name="")))
+        self.assertIsNone(app._validate_macro(self._valid_blob(name="   ")))
+        self.assertIsNone(app._validate_macro(self._valid_blob(name=None)))
+
+    def test_a_malformed_hotkey_rejects_the_whole_macro(self):
+        # {"keys": "nope"} is Hotkey.from_json()'s own canonical garbage
+        # case -- iterating a string hands back characters and would build
+        # a plausible-looking hotkey out of nothing.
+        self.assertIsNone(app._validate_macro(
+            self._valid_blob(hotkey={"keys": "nope"})))
+
+    def test_steps_must_be_a_list(self):
+        self.assertIsNone(app._validate_macro(self._valid_blob(steps="nope")))
+        self.assertIsNone(app._validate_macro(self._valid_blob(steps={"a": 1})))
+
+    def test_too_many_steps_is_rejected(self):
+        steps = [{"type": "wait", "ms": 1}] * (app.MACRO_MAX_STEPS + 1)
+        self.assertIsNone(app._validate_macro(self._valid_blob(steps=steps)))
+
+    def test_one_malformed_step_rejects_the_whole_macro(self):
+        steps = [{"type": "wait", "ms": 1}, {"type": "not_a_real_type"}]
+        self.assertIsNone(app._validate_macro(self._valid_blob(steps=steps)))
+
+    def test_click_button_must_be_a_known_value(self):
+        self.assertIsNone(app._validate_macro_step({"type": "click", "button": "up"}))
+        for button in app.MACRO_BUTTONS:
+            with self.subTest(button=button):
+                self.assertIsNotNone(
+                    app._validate_macro_step({"type": "click", "button": button}))
+
+    def test_wait_ms_must_be_a_non_negative_number_within_bounds(self):
+        self.assertIsNone(app._validate_macro_step({"type": "wait", "ms": -1}))
+        self.assertIsNone(app._validate_macro_step(
+            {"type": "wait", "ms": app.MACRO_MAX_WAIT_MS + 1}))
+        # bool is an int subclass -- isinstance(True, int) is True -- so a
+        # bare isinstance check alone would accept True/False as 1/0 ms.
+        self.assertIsNone(app._validate_macro_step({"type": "wait", "ms": True}))
+        self.assertIsNotNone(app._validate_macro_step({"type": "wait", "ms": 0}))
+        self.assertIsNotNone(
+            app._validate_macro_step({"type": "wait", "ms": app.MACRO_MAX_WAIT_MS}))
+
+    def test_key_down_and_key_up_reuse_hotkeys_own_key_record_vocabulary(self):
+        # Same malformed shapes Hotkey.from_json() rejects for a chord key.
+        for bad_key in (None, "f1", [], [None, None, None, None],
+                        [True, None, None], ["not_a_real_key_name", None, None]):
+            with self.subTest(bad_key=bad_key):
+                self.assertIsNone(app._validate_macro_step(
+                    {"type": "key_down", "key": bad_key}))
+        self.assertIsNotNone(app._validate_macro_step(
+            {"type": "key_down", "key": ["f1", None, None]}))
+
+    def test_an_unknown_step_type_is_rejected(self):
+        self.assertIsNone(app._validate_macro_step({"type": "teleport"}))
+
+
+class FakeKeyboard:
+    """Records what MacroRunner asked for instead of sending real key
+    events -- same style as FakeMouse above."""
+
+    def __init__(self):
+        self.pressed = []
+        self.released = []
+
+    def press(self, key):
+        self.pressed.append(key)
+
+    def release(self, key):
+        self.released.append(key)
+
+
+class MacroRunnerReleasesHeldKeys(unittest.TestCase):
+    """G#47/GH#15's own explicit acceptance criterion: 'every key a macro
+    presses must be tracked and released on any exit path' -- the click
+    loop already proved this discipline necessary for one fixed mouse
+    button (AfkAutoclicker.loop's own finally/_release_right, and a review
+    round found the test covering that passed with the finally deleted).
+    No Tk/display needed -- MacroRunner only touches the mouse/keyboard
+    fakes given to it."""
+
+    BUTTONS = {"left": "L", "right": "R", "middle": "M"}
+
+    def test_a_normal_run_presses_and_releases_in_order(self):
+        kbd, mouse = FakeKeyboard(), FakeMouse()
+        steps = [
+            {"type": "key_down", "key": ["f1", None, None]},
+            {"type": "click", "button": "left"},
+            {"type": "key_up", "key": ["f1", None, None]},
+        ]
+        app.MacroRunner(steps, mouse, kbd, self.BUTTONS).run()
+        self.assertEqual(kbd.pressed, [app.kb.Key.f1])
+        self.assertEqual(kbd.released, [app.kb.Key.f1])
+        self.assertEqual(mouse.clicks[0][0], "L")
+
+    def test_stopping_mid_wait_still_releases_a_held_key(self):
+        kbd, mouse = FakeKeyboard(), FakeMouse()
+        steps = [
+            {"type": "key_down", "key": ["f2", None, None]},
+            {"type": "wait", "ms": 5000},
+            {"type": "key_up", "key": ["f2", None, None]},
+        ]
+        runner = app.MacroRunner(steps, mouse, kbd, self.BUTTONS)
+        t = threading.Thread(target=runner.run)
+        t.start()
+        # No fixed sleep-then-stop race: pump until the key is actually
+        # pressed, so this doesn't depend on how fast the runner thread
+        # gets scheduled.
+        deadline = time.monotonic() + 2.0
+        while not kbd.pressed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(kbd.pressed, "runner never reached the key_down step")
+        runner.stop()
+        t.join(timeout=2.0)
+        self.assertFalse(t.is_alive(), "runner did not stop promptly")
+        self.assertEqual(kbd.released, [app.kb.Key.f2])
+
+    def test_an_exception_mid_sequence_still_releases_a_held_key(self):
+        class BoomMouse:
+            def click(self, button):
+                raise RuntimeError("boom")
+        kbd = FakeKeyboard()
+        steps = [
+            {"type": "key_down", "key": ["f3", None, None]},
+            {"type": "click", "button": "left"},
+        ]
+        runner = app.MacroRunner(steps, BoomMouse(), kbd, self.BUTTONS)
+        with self.assertRaises(RuntimeError):
+            runner.run()
+        self.assertEqual(kbd.released, [app.kb.Key.f3])
+
+    def test_a_deleted_finally_fails_this_test(self):
+        # Sabotage-verifies test_stopping_mid_wait_still_releases_a_held_key
+        # above actually exercises the guarantee, not merely a run that
+        # happens to reach key_up anyway -- same discipline story #15 asks
+        # for ("a test that fails when the finally is deleted"). Runs the
+        # identical scenario against a version of run() with the finally
+        # removed (the exact pre-fix shape) and asserts THAT one fails to
+        # release, proving the real test above is not vacuous.
+        def sabotaged_run(self):
+            for step in self.steps:
+                if self._stop.is_set():
+                    break
+                kind = step["type"]
+                if kind == "key_down":
+                    self._press(step["key"])
+                elif kind == "key_up":
+                    self._release(step["key"])
+                elif kind == "click":
+                    self.mouse.click(self.click_buttons[step["button"]])
+                elif kind == "wait":
+                    self._stop.wait(step["ms"] / 1000)
+            # No finally: _release_all() only runs if every step above did.
+
+        kbd, mouse = FakeKeyboard(), FakeMouse()
+        steps = [
+            {"type": "key_down", "key": ["f2", None, None]},
+            {"type": "wait", "ms": 5000},
+            {"type": "key_up", "key": ["f2", None, None]},
+        ]
+        runner = app.MacroRunner(steps, mouse, kbd, self.BUTTONS)
+        original_run = app.MacroRunner.run
+        app.MacroRunner.run = sabotaged_run
+        try:
+            t = threading.Thread(target=runner.run)
+            t.start()
+            deadline = time.monotonic() + 2.0
+            while not kbd.pressed and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(kbd.pressed, "runner never reached the key_down step")
+            runner.stop()
+            t.join(timeout=2.0)
+            self.assertFalse(t.is_alive(), "sabotaged runner did not stop promptly")
+            self.assertEqual(kbd.released, [],
+                             "sabotaged run() (no finally) unexpectedly "
+                             "released the held key -- this test's sabotage "
+                             "did not reproduce the pre-fix bug, so it "
+                             "cannot prove the real test above is meaningful")
+        finally:
+            app.MacroRunner.run = original_run
+
+
+class MacrosTab(UITestCase):
+    """G#47/GH#15: the Macros tab itself -- per-game storage, the add/edit/
+    delete/run UI wiring, and the hotkey lifecycle tied to _select()."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_macros_is_a_real_tab_alongside_hotkey_and_clicking(self):
+        self.assertIn(self.ui._content_tab, ("hotkey", "clicking", "macros"))
+        self.ui._set_content_tab("macros")
+        self.root.update()
+        self.assertEqual(self.ui.macros_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.hotkey_pane.winfo_manager(), "")
+        self.assertEqual(self.ui.clicking_pane.winfo_manager(), "")
+
+    def test_a_fresh_game_has_no_macros_and_the_pane_says_so(self):
+        self.ui._select("minecraft")
+        self.assertEqual(self.ui.store.game("minecraft").get("macros", []), [])
+        labels = [w.cget("text") for w in self.ui.macros_list.winfo_children()
+                 if isinstance(w, tk.Label)]
+        self.assertIn("No macros yet for this game.", labels)
+
+    def test_save_macro_persists_and_arms_its_hotkey(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        steps = [{"type": "wait", "ms": 10}]
+        ok = self.ui._save_macro("minecraft", None, "Test macro", hotkey, steps)
+        self.assertTrue(ok)
+        macros = self.ui.store.game("minecraft")["macros"]
+        self.assertEqual(len(macros), 1)
+        self.assertEqual(macros[0]["name"], "Test macro")
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 1)
+        # Persisted to disk, not just in memory.
+        reloaded = app.Store(self.config)
+        self.assertEqual(len(reloaded.data["games"]["minecraft"]["macros"]), 1)
+
+    def test_editing_a_macro_keeps_its_id_and_replaces_its_content(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        self.ui._save_macro("minecraft", None, "Original", hotkey, [{"type": "wait", "ms": 1}])
+        original_id = self.ui.store.game("minecraft")["macros"][0]["id"]
+        self.ui._save_macro("minecraft", original_id, "Renamed", None,
+                            [{"type": "wait", "ms": 2}])
+        macros = self.ui.store.game("minecraft")["macros"]
+        self.assertEqual(len(macros), 1)
+        self.assertEqual(macros[0]["id"], original_id)
+        self.assertEqual(macros[0]["name"], "Renamed")
+        self.assertIsNone(macros[0]["hotkey"])
+        # The now-hotkey-less macro must no longer have an armed watcher.
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 0)
+
+    def test_saving_an_invalid_macro_is_refused(self):
+        self.ui._select("minecraft")
+        ok = self.ui._save_macro("minecraft", None, "x", None,
+                                 [{"type": "not_a_real_type"}])
+        self.assertFalse(ok)
+        self.assertEqual(self.ui.store.game("minecraft").get("macros", []), [])
+
+    def test_delete_macro_removes_it_and_disarms_its_hotkey(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        self.ui._save_macro("minecraft", None, "To delete", hotkey, [{"type": "wait", "ms": 1}])
+        macro = self.ui.store.game("minecraft")["macros"][0]
+        self.ui._delete_macro(macro)
+        self.assertEqual(self.ui.store.game("minecraft")["macros"], [])
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 0)
+
+    def test_macros_are_scoped_to_their_own_game(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        self.ui._save_macro("minecraft", None, "MC macro", hotkey, [{"type": "wait", "ms": 1}])
+        self.ui._select("global")
+        self.assertEqual(self.ui.store.game("global").get("macros", []), [])
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 0,
+                         "global's macro hotkeys must not include minecraft's")
+        self.ui._select("minecraft")
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 1)
+
+    def test_run_macro_refuses_a_retrigger_while_still_running(self):
+        self.ui._select("minecraft")
+        slow_done = threading.Event()
+
+        class SlowMouse:
+            def click(self, button):
+                slow_done.wait(timeout=2.0)
+        self.ui.mouse = SlowMouse()
+        macro = {"id": "slow", "name": "Slow", "hotkey": None,
+                "steps": [{"type": "click", "button": "left"}]}
+        try:
+            self.ui._run_macro(macro)
+            _runner1, thread1 = self.ui._macro_runners["slow"]
+            self.ui._run_macro(macro)
+            _runner2, thread2 = self.ui._macro_runners["slow"]
+            self.assertIs(thread1, thread2,
+                         "a retrigger while running must not start a second run")
+        finally:
+            slow_done.set()
+            thread1.join(timeout=2.0)
+
+    def test_on_close_stops_and_joins_an_in_flight_macro_run(self):
+        self.ui._select("minecraft")
+
+        class SlowMouse:
+            def click(self, button):
+                time.sleep(0.3)
+        self.ui.mouse = SlowMouse()
+        macro = {"id": "closing", "name": "Closing", "hotkey": None,
+                "steps": [{"type": "click", "button": "left"}]}
+        self.ui._run_macro(macro)
+        _runner, thread = self.ui._macro_runners["closing"]
+        self.assertTrue(thread.is_alive())
+        self.ui.on_close()   # must not raise or hang
+        self.assertFalse(thread.is_alive())
 
 
 def tearDownModule():

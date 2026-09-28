@@ -110,11 +110,17 @@ Bugs and residue:
       rejected instead of truncated. `MAX_CHAR_LEN` is reasoned from pynput's darwin
       source, not a real Mac. Don't tighten `MAX_VK` to `0x0110FFFF`: XF86 media-key
       keysyms (`0x1008FFxx`) sit above that.
-- [ ] G#40 / GH#75 — github: true — macOS flake: `Sidebar.test_running_dot_and_follow` read `running`
+- [x] **Done 2026-09-28, PR #92.** G#40 / GH#75 — github: true — macOS flake: `Sidebar.test_running_dot_and_follow` read `running`
       as False on PR #74's first macOS leg (run 34989787219); the same commit's re-run
       was green. **Hit again on PR #76 (run 34996063044) — 2 of the last 7 macOS legs.** Suspected to be the same class as G#39: a periodic `_poll_games`
       scan landing inside the test's own `root.update()` after `settle()` only
-      waited for the startup scan. Unconfirmed; details on the ticket.
+      waited for the startup scan. Confirmed the exact mechanism directly
+      (queuing a stale/fresh scan result via `_ui()` and draining it after a
+      direct `_mark_running()` call does clear the dot): the test's
+      `root.update()` was never actually needed -- `_mark_running()` is
+      synchronous, and every assertion after it reads plain state, no
+      redraw required. Removed the unneeded `update()`, closing the race by
+      construction rather than a timing-dependent wait.
 - [x] **Done 2026-09-15, PR #73.** G#9 / GH#11 — github: true — macOS input-permission guard: residue
       from the review of PR #4 (5 small items: `selftest()`'s unconditional listener
       construction, a load-bearing comment, a corrected darwin hint string, a
@@ -139,10 +145,15 @@ Bugs and residue:
       Interval, because the Minecraft Clicking pane has ~0–1 px spare at `WINDOW_MIN_H` on
       Windows/macOS. Three rounds: placement/height (PR review), owner asked it to stand out
       more, and a floor test that could not fail.
-- [ ] G#42 / GH#81 — github: true — The three older `WindowMinimumHeight` floor tests measure allocated, not
+- [x] **Done 2026-09-28, PR #92.** G#42 / GH#81 — github: true — The three older `WindowMinimumHeight` floor tests measure allocated, not
       required, heights, so they cannot detect a clipped pane. They are the only guard on
-      `WINDOW_MIN_H = 620`. Use PR #80's reqheight+pady measure and sabotage-verify.
-- [ ] G#41 / GH#79 — github: true — `Store.save` leaves `settings.json.tmp` behind when `os.replace` fails
+      `WINDOW_MIN_H = 620`. Used PR #80's reqheight+pady measure (factored
+      into a shared `_required_natural()`/`_pady_total()` classmethod, also
+      now used by `test_sweep_hint_height_floor_minecraft_with_eating`
+      itself, replacing its own local copy) and sabotage-verified: an
+      inflated `SWEEP_HINT_BAD` reproduces the ticket's own evidence table
+      exactly (454 allocated vs 455 available vs 514 actually required).
+- [x] **Done 2026-09-28, PR #92.** G#41 / GH#79 — github: true — `Store.save` leaves `settings.json.tmp` behind when `os.replace` fails
       (e.g. Windows file lock). Harmless, small; found by PR #78's review.
 - [x] **Done 2026-09-15, PR #72.** G#36 / GH#64 — github: true — Ask the person to send `update.log`
       (prefilled GitHub issue) when an in-app update didn't finish. Follow-up to G#35,
@@ -327,7 +338,7 @@ Bugs and residue:
       above and the `restart()` repro just above this note — but none of them can
       abort the suite anymore, since nothing is left to finalise them off the main
       thread. Full account: `docs/implementation.md`.
-- [ ] G#43 / GH#82 — github: true — **The trace-registration-order hazard is overclaimed in merged code and in the
+- [x] **Done 2026-09-28, PR #92.** G#43 / GH#82 — github: true — **The trace-registration-order hazard is overclaimed in merged code and in the
       story's spec** — `_apply_appearance`'s own comment (~`afk_clicker.py:1939-1958`)
       and `docs/spec.md` §2 both attribute Theme's safety to registering `trace_add`
       after the `Segmented(...)` call. Verified empirically during the feature 4 cycle
@@ -337,17 +348,23 @@ Bugs and residue:
       synchronously inside the trace; `after_idle` defers it past the point where
       order could matter. Feature 4's own new comment was corrected to say this; the
       Feature-3 comment and the spec text were left alone as out of scope for that
-      feature. Worth a small separate pass so the next person isn't misled.
+      feature. Corrected both now: `_apply_appearance`'s own comment gained a
+      clarifying paragraph, and `docs/history/ac-17-f4-spec.md` §2 got an
+      inline "Correction (fix-pass...)" note (this project's own convention
+      for historical docs, per `ac-5-spec.md`) rather than a silent rewrite.
 
-- [ ] G#44 / GH#83 — github: true — **`TabBar` accepts a `height` it then ignores when repainting** — found by
+- [x] **Done 2026-09-28, PR #92.** G#44 / GH#83 — github: true — **`TabBar` accepts a `height` it then ignores when repainting** — found by
       the critical review of PR #40 (non-blocking). `TabBar.__init__`
       (`afk_clicker.py:1269`) takes a `height` override and sizes the canvas with
       it, but `_paint()` (`afk_clicker.py:1314`) repositions the underline using
       the module constant `TAB_HEIGHT` instead of the instance's own height —
       unlike the sibling `Segmented`, which keeps `self.w`/`self.h`. Unreachable
-      today since both call sites omit `height`, so it is a latent trap rather
-      than a bug: feature 3, or ticket G#13's Macros tab, adding a `TabBar` with a
-      custom height is what makes it bite.
+      today since both call sites omit `height`, so it was a latent trap rather
+      than a bug -- G#13's Macros tab is exactly what made it bite: it builds
+      a `TabBar` with a custom height. Fixed by storing `self.w`/`self.h` in
+      `__init__` and reading them back in `_paint()`, matching `Segmented`;
+      test builds a `TabBar` at a non-default height and asserts the
+      underline lands at the right y.
 
 Features:
 Resolved 2026-09-12 (G#28 / GH#48, PR #49, `8ac6e35`): the window height floor was
@@ -357,12 +374,14 @@ binding constraint, since nothing here scrolls and a lower floor puts Eating's
 lower rows out of reach. Took five rounds; `docs/history/ac-28-*` records why.
 Two follow-ups from its review are below.
 
-- [ ] G#45 / GH#84 — github: true — **`_rebuild_ui()` does not cancel `_pane_fill_after_id`** the way it cancels
+- [x] **Done 2026-09-28, PR #92.** G#45 / GH#84 — github: true — **`_rebuild_ui()` does not cancel `_pane_fill_after_id`** the way it cancels
       `_rebuild_after_id` immediately above. Verified empirically harmless today —
-      a pending pane fill landing across a rebuild does no damage — but it is an
-      undocumented invariant rather than a guaranteed one, and the coalescing
-      machinery it belongs to is new (PR #49 round 5). Worth either cancelling it
-      for symmetry or writing down why it does not need cancelling.
+      a pending pane fill landing across a rebuild does no damage — but it was an
+      undocumented invariant rather than a guaranteed one. Cancelled for
+      symmetry rather than documented as safe: test spies on `after_cancel`
+      and asserts the pre-rebuild pane-fill job id is actually passed to it
+      (a bare "is None afterward" check would pass either way, since
+      rebuilding legitimately re-requests a fresh pane fill of its own).
 - [x] **Done 2026-09-15, PR #68.** **G#37 / GH#66 — github: true — Pane content should sit directly under its tab bar, not in the middle of the
       page** (Leo, 2026-09-13, from screenshots of 0.5.0 on Windows, maximised). The
       Hotkey tab's Record/Apply card, the Clicking tab's cards and Settings →
@@ -396,16 +415,36 @@ Two follow-ups from its review are below.
       filed as G#51/G#52, see Housekeeping) — merged into `main` same day. GitHub side of the
       review comment and G#49–53's GitHub mirrors are pending: the repo's `gh` token currently
       lacks Issues/PR write scope, needs Leo to grant it.
-- [ ] G#13 / GH#15 — github: true — Story: a Macros tab, configurable per game. Blocked on the settings schema version (ROADMAP). Rebase its branch first.
-- [ ] G#12 / GH#14 — github: true — Calibration suite for the review agent. Rebase its branch first: it (and G#13's, which contains its `2bdf55f`) is stacked on `901f0a4`, whose FIFO tests fail on Windows.
+- [x] **Done 2026-09-28, PR #92.** G#13 / GH#15 — github: true — Story: a Macros tab, configurable per game. The
+      settings schema version it was blocked on (ROADMAP) landed first, same
+      session. Its old branch (`feature/ac-13/story-macros-tab`) turned out
+      to share no common ancestor with current `main` (an old history
+      rewrite orphaned it) so it was rebuilt fresh rather than rebased:
+      per-game `"macros"` list, `MacroRunner` with a sabotage-verified
+      guaranteed-release `finally`, one `HotkeyWatcher` per macro hotkey
+      armed/disarmed on every `_select()`, and the third game-page tab
+      itself (list + add/edit dialog + run/delete).
+- [x] **Done 2026-09-28, PR #92.** G#12 / GH#14 — github: true — Calibration suite for the review agent. Its
+      branch (`feature/ac-12/review-calibration-suite`) shared the same
+      orphaned-history problem as G#13's (both stacked on `901f0a4`, sharing
+      no ancestor with current `main`) — cherry-picked its two commits
+      cleanly instead (purely additive files, no conflicts beyond one
+      auto-merged `docs/REVIEW-PROTOCOL.md` hunk): the ten cases plus the
+      later hardening pass (sealed `.b64` answer keys, `GRADING.md`,
+      `results-run1.json`'s 78% first run). `run.py --list` reproduces the
+      README's own totals (54 defects, 20 traps) on this tree.
 
 Housekeeping:
-- [ ] G#49 / GH#90 — github: true — Follow-up from PR #89's cycle review (G#38): the Auto UI-scale
+- [x] **Done 2026-09-28, PR #92.** G#49 / GH#90 — github: true — Follow-up from PR #89's cycle review (G#38): the Auto UI-scale
       clamp's regression test doesn't actually exercise out-of-range factors — every back-solved
       test value already sits inside `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]`. Sabotage-verified: removing
-      the clamp leaves the test green. Add a `subTest` with a genuinely out-of-range back-solved
-      factor asserting `self.ui.s` lands at the clamp boundary.
-- [ ] G#50 / GH#91 — github: true — Follow-up from PR #89's cycle review (G#38): `README.md` still
+      the clamp leaves the test green. Added
+      `test_a_genuinely_out_of_range_factor_clamps_to_the_scale_bound` (1.6
+      and 0.5 back-solved factors) asserting `self.ui.s` lands exactly at
+      the clamp boundary — reproduces the exact sabotage-verified gap
+      (clamp removed: 1.667/0.521 instead of 1.355/0.938) this ticket
+      describes.
+- [x] **Done 2026-09-28, PR #92.** G#50 / GH#91 — github: true — Follow-up from PR #89's cycle review (G#38): `README.md` still
       describes UI scale as only the 4 fixed percentage steps, doesn't mention the new Auto default.
       One-sentence fix.
 - [ ] G#51 — github: true — sync pending: GitHub — Follow-up from PR #89's round-4 independent
@@ -424,8 +463,18 @@ Housekeeping:
       connection-close path. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/53
 - [ ] G#46 / GH#85 — github: true — **Delete merged remote branches** (Leo, 2026-09-13). As of
       2026-09-15, 15 branches on `github` are fully merged, listed on the ticket. Keep
-      `feature/ac-12/…`/`feature/ac-13/…`; they are unmerged and tracked on G#12/G#13.
-      Confirm the list with Leo before deleting.
+      `feature/ac-12/…`/`feature/ac-13/…`; they are unmerged and tracked on G#12/G#13
+      (now built directly on `main` instead -- see those tickets -- so these two
+      branches are stale WIP, not pending work, but still technically unmerged and
+      out of scope for this ticket's own list either way). 2026-09-28: re-verified
+      all 15 against current `main` (each still exactly 0 commits ahead; `ac-12`/
+      `ac-13` still correctly excluded at 19 commits ahead each, confirming they
+      share no common ancestor with `main` -- see G#12/G#13) and confirmed the list
+      with Leo, but `git push --delete` failed with 403: this session's GitHub
+      credentials are scoped to its own working branch only, not arbitrary branch
+      deletion, and there is no delete-branch tool available either. **Still needs a
+      human with real push access** (Settings → Branches, or `git push --delete`
+      with their own credentials) to actually run the deletion.
 - Lesson (not a backlog item): **A flake "fix" tends to work by blinding the test — sabotage-verify every
       one.** Three cases in two days, each caught only by deliberately breaking the
       product and checking the test still failed: a settling loop added to a *test*
@@ -465,7 +514,7 @@ Housekeeping:
       `pending_deployments` endpoint even reports `current_user_can_approve: true`,
       which is about the *user*, not the token's scope. Adding `actions: write`
       would remove all four.
-- [ ] G#48 / GH#87 — github: true — **Stress-testing the suite needs two Xvfb displays, not one.** There is no
+- [x] **Done 2026-09-28, PR #92.** G#48 / GH#87 — github: true — **Stress-testing the suite needs two Xvfb displays, not one.** There is no
       window manager, so X input focus is a single global resource:
       `UITestCase.setUp` (`tests/test_ui.py:74-79`) calls `root.focus_force()` to
       acquire it, and the moment a second Tk process does the same, the first

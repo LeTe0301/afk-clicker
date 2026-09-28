@@ -35,19 +35,31 @@ Until both are settled, the version stays in `0.x`.
       game" — not from plausible-sounding guesses.
 - [ ] **Detection cost.** The X11 path walks the window tree every five
       seconds. Fine on a desktop, wasteful on a laptop battery.
-- [ ] **A Macros tab, configurable per game** (#15). A second tab beside the
-      clicker settings holding an ordered list of steps -- key down, key up,
-      click, wait -- stored per game exactly as the clicker settings are, and
-      fired by its own chord hotkey (the recorder already handles up to three
-      keys with modifiers). Every key a macro presses is tracked and released
-      on any exit path (`finally`-based, mirroring the click loop's own right-
-      mouse-button release). Macros stay deterministic: no jitter presets
-      aimed at looking human, no randomised step ordering -- see "Explicitly
-      not planned" below. Runs once per trigger, does not pause the clicker
-      (no shared-thread answer needed yet since the two never send input at
-      the same instant in the current design). Recording with real timings,
-      not just an authored step list, stays open for later. Blocked on macOS
-      by the same unresolved listener abort as the hotkey system itself.
+- [x] **A Macros tab, configurable per game** (#15). A third tab beside
+      Hotkey/Clicking, holding an ordered list of steps -- key down, key up,
+      click, wait -- stored per game exactly as the clicker settings are
+      (`Store`'s per-game `"macros"` list, schema-versioned per the bullet
+      above), and fired by its own chord hotkey (`Hotkey`/`HotkeyRecorder`/
+      `HotkeyWatcher`, unchanged -- one extra `HotkeyWatcher` per macro
+      hotkey, armed/disarmed by `_arm_macro_hotkeys()` every time `_select()`
+      switches games). `MacroRunner` tracks every key it presses and
+      releases all of them in a `finally` on any exit path -- stopped,
+      an exception, or reaching the end -- mirroring the click loop's own
+      right-mouse-button release; sabotage-verified (`MacroRunnerReleases
+      HeldKeys.test_a_deleted_finally_fails_this_test`). Deterministic
+      only: no jitter presets, no randomised step ordering -- see
+      "Explicitly not planned" below. Runs once per trigger, refusing a
+      retrigger while the same macro is still running; does not pause the
+      clicker -- the two run on independent threads sending input through
+      the same `pynput` controllers, with no coordination between them
+      beyond that. Left genuinely open, not resolved: a macro clicking or
+      holding a button while the clicker (or its own eating pause) does
+      the same thing at the same instant can interleave in ways nothing
+      here accounts for; revisit if that proves to matter in practice
+      rather than guessing at a coordination scheme now. Recording with
+      real timings, not just an authored step list, stays open for later.
+      Blocked on macOS by the same unresolved listener abort as the hotkey
+      system itself.
 
 ## Later
 

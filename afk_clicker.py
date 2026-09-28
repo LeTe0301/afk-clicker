@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+import uuid
 import weakref
 from tkinter import font as tkfont
 
@@ -682,6 +683,215 @@ class HotkeyWatcher:
         # not retrigger but pressing it again does.
         if not self.hotkey.matches(self.mods, self.keys):
             self.armed = True
+
+
+# ── macros (story #15/G#47) ──────────────────────────────────────────────
+# A macro is a per-game, deterministic list of steps -- key down, key up,
+# click, wait -- fired by its own chord hotkey, recorded with the same
+# HotkeyRecorder/HotkeyWatcher above. Stored under each game's own settings
+# entry, schema-versioned (SETTINGS_VERSION) so a future change to this
+# shape has a migration path instead of silently discarding it.
+
+MACRO_MAX_STEPS = 200        # a runaway/corrupt macro must not be unbounded
+MACRO_MAX_WAIT_MS = 60_000   # one wait step, generous but bounded
+MACRO_BUTTONS = ("left", "right", "middle")
+
+
+def _validate_key_record(entry):
+    """Same shape/vocabulary contract as Hotkey.from_json()'s own per-key
+    validation above -- kept separate rather than shared so a change to
+    one's contract can never silently reach the other. None for anything
+    malformed; a macro step feeds MacroRunner real input, so this rejects
+    rather than coerces, exactly like Hotkey.from_json()."""
+    if not isinstance(entry, (list, tuple)) or not 1 <= len(entry) <= 3:
+        return None
+    name, vk, char = (list(entry) + [None, None, None])[:3]
+    if not (name is None or isinstance(name, str)):
+        return None
+    if not (vk is None or isinstance(vk, int)) or isinstance(vk, bool):
+        return None
+    if vk is not None and not (0 <= vk <= MAX_VK):
+        return None
+    if not (char is None or isinstance(char, str)):
+        return None
+    if char is not None and not (1 <= len(char) <= MAX_CHAR_LEN):
+        return None
+    if name is None and vk is None and char is None:
+        return None
+    if name is not None and name not in kb.Key.__members__:
+        return None
+    return [name, vk, char]
+
+
+def _validate_macro_step(step):
+    """None for anything malformed -- same reject-not-coerce contract as
+    Hotkey.from_json(): a bad step must not silently become a different,
+    plausible-looking one, since MacroRunner sends it as real input."""
+    if not isinstance(step, dict):
+        return None
+    kind = step.get("type")
+    if kind in ("key_down", "key_up"):
+        key = _validate_key_record(step.get("key"))
+        if key is None:
+            return None
+        return {"type": kind, "key": key}
+    if kind == "click":
+        button = step.get("button")
+        if button not in MACRO_BUTTONS:
+            return None
+        return {"type": "click", "button": button}
+    if kind == "wait":
+        ms = step.get("ms")
+        if isinstance(ms, bool) or not isinstance(ms, (int, float)):
+            return None
+        if not (0 <= ms <= MACRO_MAX_WAIT_MS):
+            return None
+        return {"type": "wait", "ms": ms}
+    return None
+
+
+def _validate_macro(blob):
+    """None for anything malformed. A per-game macro list is filtered
+    through this the same way Store.__init__ already filters a malformed
+    per-game entry: dropped, not fatal, not silently fixed up -- except
+    "id", which this assigns if missing rather than rejecting the whole
+    macro over a purely internal bookkeeping field the user never sees."""
+    if not isinstance(blob, dict):
+        return None
+    name = blob.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    macro_id = blob.get("id")
+    if not isinstance(macro_id, str) or not macro_id:
+        macro_id = uuid.uuid4().hex
+    hotkey_blob = blob.get("hotkey")
+    hotkey_json = None
+    if hotkey_blob is not None:
+        hotkey = Hotkey.from_json(hotkey_blob)
+        if hotkey is None:
+            return None
+        hotkey_json = hotkey.to_json()
+    steps_raw = blob.get("steps")
+    if not isinstance(steps_raw, (list, tuple)) or len(steps_raw) > MACRO_MAX_STEPS:
+        return None
+    steps = []
+    for raw_step in steps_raw:
+        step = _validate_macro_step(raw_step)
+        if step is None:
+            return None
+        steps.append(step)
+    return {"id": macro_id, "name": name, "hotkey": hotkey_json, "steps": steps}
+
+
+def _describe_step(step):
+    """One-line summary for the macro editor's step list -- never fed back
+    into a step itself, purely display."""
+    kind = step["type"]
+    if kind == "key_down":
+        return f"Key down: {_key_label(tuple(step['key']))}"
+    if kind == "key_up":
+        return f"Key up: {_key_label(tuple(step['key']))}"
+    if kind == "click":
+        return f"Click: {step['button']}"
+    if kind == "wait":
+        return f"Wait {step['ms']:g} ms"
+    return kind
+
+
+def _key_from_record(rec):
+    """The inverse of _record(): a pynput key/char argument Controller.
+    press()/release() accepts, from a stored (name, vk, char) record. None
+    if nothing usable survives -- should not happen for a step that already
+    passed _validate_key_record(), but a runner sending real input never
+    trusts that without checking again."""
+    name, vk, char = rec
+    if name:
+        return kb.Key[name] if name in kb.Key.__members__ else None
+    if char:
+        return char
+    if vk is not None:
+        return kb.KeyCode(vk=vk)
+    return None
+
+
+class MacroRunner:
+    """Runs one macro's steps once, on its own thread.
+
+    The failure mode this exists to close (story #15's own "failure mode to
+    design against"): a macro stopped mid-sequence -- toggled off, the
+    process killed, an exception raised -- must not leave any key it
+    pressed still held; in game that is a stuck sprint or a dropped stack.
+    Every key_down this runner sends is tracked in self._held and released
+    in a finally block that runs on every exit path, the same discipline
+    loop()'s own right-mouse-button release already proved necessary
+    (afk_clicker.py, AfkAutoclicker.loop/_release_right; a review round
+    found the test covering that one passed with the finally deleted --
+    see MacroRunnerReleasesHeldKeys.test_a_deleted_finally_fails_this_test
+    for the same check here), generalised to an arbitrary key set instead
+    of one fixed mouse button.
+
+    Deterministic only, by construction: steps run in the order given, at
+    the wait durations given, with no randomisation anywhere in this class
+    -- docs/ROADMAP.md's "Explicitly not planned" rule against jitter/
+    randomisation aimed at looking human applies to macros exactly as it
+    does to the click loop's own interval jitter."""
+
+    def __init__(self, steps, mouse, keyboard, click_buttons):
+        self.steps = steps
+        self.mouse = mouse
+        self.keyboard = keyboard
+        self.click_buttons = click_buttons   # {"left": MouseButton.left, ...}
+        self._stop = threading.Event()
+        self._held = []
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        try:
+            for step in self.steps:
+                if self._stop.is_set():
+                    break
+                kind = step["type"]
+                if kind == "key_down":
+                    self._press(step["key"])
+                elif kind == "key_up":
+                    self._release(step["key"])
+                elif kind == "click":
+                    self.mouse.click(self.click_buttons[step["button"]])
+                elif kind == "wait":
+                    self._stop.wait(step["ms"] / 1000)
+        finally:
+            self._release_all()
+
+    def _press(self, rec_list):
+        rec = tuple(rec_list)
+        key = _key_from_record(rec)
+        if key is None:
+            return
+        self.keyboard.press(key)
+        if not any(_same_key(rec, h) for h in self._held):
+            self._held.append(rec)
+
+    def _release(self, rec_list):
+        rec = tuple(rec_list)
+        key = _key_from_record(rec)
+        if key is not None:
+            try:
+                self.keyboard.release(key)
+            except Exception:
+                pass
+        self._held = [h for h in self._held if not _same_key(h, rec)]
+
+    def _release_all(self):
+        for rec in list(self._held):
+            key = _key_from_record(rec)
+            if key is not None:
+                try:
+                    self.keyboard.release(key)
+                except Exception:
+                    pass
+        self._held = []
 
 
 # Deliberately below 1.0: the interface and the per-game settings format are
@@ -1434,6 +1644,21 @@ class Store:
             games = {}
         self.data["games"] = {gid: g for gid, g in games.items()
                                if isinstance(g, dict)}
+
+        # Same contract, one more level down (G#47/GH#15): each per-game
+        # entry may now carry a "macros" list. A missing key defaults to []
+        # lazily at read time, the same convention every other per-game
+        # default already uses -- this only filters a *present* one down to
+        # the macros that are actually well-formed, via _validate_macro()'s
+        # own reject-not-coerce contract (a malformed macro feeds
+        # MacroRunner real input, same reasoning as Hotkey.from_json()).
+        for game in self.data["games"].values():
+            macros = game.get("macros")
+            if isinstance(macros, list):
+                game["macros"] = [m for m in (_validate_macro(raw) for raw in macros)
+                                  if m is not None]
+            elif "macros" in game:
+                del game["macros"]   # garbage type -- drop it, not coerce to []
 
         # Same contract, one key: a garbage on-disk "appearance" (wrong type,
         # a typo, an old story.md-draft "theme"-style value, null) is as
@@ -2475,12 +2700,28 @@ class AfkAutoclicker:
             # was fixing is real and is back on backlog.md.
 
         self.mouse = Controller()
+        self.keyboard = kb.Controller()    # G#47/GH#15: macros send key
+                                            # events; the click loop/hotkey
+                                            # system never needed one before.
         self.hotkey = None
         self.registered_hotkey = None
         self.hk_listener = None
         self.running = False
         self.worker = None
         self.capture_thread = None
+        self._macro_hotkey_watchers = []   # HotkeyWatcher per armed macro
+                                            # hotkey, for the CURRENTLY
+                                            # selected game only -- rebuilt
+                                            # by _arm_macro_hotkeys(), called
+                                            # from _select() (macros are
+                                            # per-game) and on_close().
+        self._macro_runners = {}           # macro id -> (MacroRunner, Thread)
+                                            # currently running or last run --
+                                            # see _run_macro().
+        self._macro_capture_thread = None  # the one background thread
+                                            # capturing a single key for the
+                                            # macro editor dialog's step
+                                            # list, if one is running.
         self._poll_thread = None
         self._poll_seq = 0             # bumped once per _poll_games() call,
         self._poll_applied_seq = 0     # compared in _apply_scan() -- see there
@@ -3231,9 +3472,11 @@ class AfkAutoclicker:
                                   font=("Segoe UI", fs(8.5, s)))
         self.game_note.pack(fill="x", pady=(int(2 * s), int(12 * s)))
 
-        # ── tab bar (story #24 feature 2): Hotkey | Clicking ──
+        # ── tab bar (story #24 feature 2, +macros G#47/GH#15): Hotkey |
+        # Clicking | Macros ──
         self.content_tab_var = tk.StringVar(value=self._content_tab)
-        TabBar(body, [("hotkey", "Hotkey"), ("clicking", "Clicking")],
+        TabBar(body, [("hotkey", "Hotkey"), ("clicking", "Clicking"),
+                     ("macros", "Macros")],
               self.content_tab_var, s).pack(anchor="w", pady=(0, int(12 * s)))
         self.content_tab_var.trace_add("write",
             lambda *_a: self._set_content_tab(self.content_tab_var.get()))
@@ -3337,6 +3580,30 @@ class AfkAutoclicker:
         self._pane_fills["clicking"] = (self.clicking_pane, clicking_top, clicking_bottom)
         self.clicking_pane.bind("<Configure>",
             lambda e: self._request_pane_fill("clicking"))
+
+        # G#47/GH#15: Macros, third game-page tab -- a per-game list, same
+        # pane-fill/tear-down-and-rebuild shape as Hotkey/Clicking above.
+        # _refresh_macros_pane() (called from _select(), since macros are
+        # per-game) rebuilds self.macros_list's children each time; nothing
+        # here depends on which macros exist yet.
+        self.macros_pane = tk.Frame(body, bg=BG)
+        self.macros_pane.pack(fill="both", expand=True)
+        self.macros_pane.pack_propagate(False)   # see hotkey_pane's own
+            # comment above for why.
+        macros_top = tk.Frame(self.macros_pane, bg=BG, height=0)
+        macros_top.pack(fill="x")
+        # No "Macros" section header -- same redundant-header decision as
+        # Clicking above.
+        self.macros_card = card(self.macros_pane, s)
+        self.macros_list = tk.Frame(self.macros_card, bg=CARD)
+        self.macros_list.pack(fill="x")
+        Button(self.macros_card, "+ New macro", self._open_macro_editor, s,
+              width=140).pack(anchor="w", pady=(int(10 * s), 0))
+        macros_bottom = tk.Frame(self.macros_pane, bg=BG, height=0)
+        macros_bottom.pack(fill="x")
+        self._pane_fills["macros"] = (self.macros_pane, macros_top, macros_bottom)
+        self.macros_pane.bind("<Configure>",
+            lambda e: self._request_pane_fill("macros"))
 
         # Any edit belongs to the selected game, so persist as it happens.
         for var in (self.click_ms.var, self.jitter_ms.var, self.autostop_min.var,
@@ -3731,15 +3998,17 @@ class AfkAutoclicker:
         that trace -- and again, since the value is already `value`, forever.
         Guarding on an actual change makes that second call a no-op (its own
         `!=` check now says "already equal") and terminates one call deep."""
-        if value not in ("hotkey", "clicking"):
+        if value not in ("hotkey", "clicking", "macros"):
             value = "hotkey"
         self._content_tab = value
         if self.content_tab_var.get() != value:
             self.content_tab_var.set(value)
         self.hotkey_pane.pack_forget()
         self.clicking_pane.pack_forget()
-        (self.hotkey_pane if value == "hotkey" else self.clicking_pane).pack(
-            fill="both", expand=True)
+        self.macros_pane.pack_forget()
+        panes = {"hotkey": self.hotkey_pane, "clicking": self.clicking_pane,
+                "macros": self.macros_pane}
+        panes[value].pack(fill="both", expand=True)
         # Story #24 feature 4: belt-and-suspenders recompute for the newly-
         # active pane -- the pack() call above already fires a correctly-
         # sized <Configure> on it (Empirical grounding #3), so this does
@@ -3849,6 +4118,14 @@ class AfkAutoclicker:
         # own tail for why.
         if self._content_tab == "clicking":
             self._request_pane_fill("clicking")
+
+        # G#47/GH#15: macros are per-game, so both the visible list and the
+        # set of armed macro hotkeys must follow every game switch, exactly
+        # like the clicker fields refilled above.
+        self._refresh_macros_pane()
+        self._arm_macro_hotkeys()
+        if self._content_tab == "macros":
+            self._request_pane_fill("macros")
 
         if persist:
             self.store.data["selected"] = game_id
@@ -4709,6 +4986,349 @@ class AfkAutoclicker:
         self.apply_button.set_enabled(False)
         self.status.set("OFF", BAD, f"{self.hotkey.label()} toggles")
 
+    # ---------- macros (story #15/G#47) ----------
+
+    def _arm_macro_hotkeys(self):
+        """(Re)builds the set of live HotkeyWatcher instances for the
+        CURRENTLY SELECTED game's macros -- macros are per-game (story #15),
+        so this is called every time that changes: from _select() (a real
+        game switch, and _build_ui()'s own bootstrap/rebuild replay of the
+        current selection) and from on_close(). Always stops every
+        previously-armed watcher first, exactly like apply_hotkey() stops
+        its old watcher before starting a new one -- otherwise a macro
+        hotkey from the PREVIOUS game stays live after switching away from
+        it, firing a macro that no longer matches what's on screen."""
+        self._disarm_macro_hotkeys()
+        if not macos_input_permitted():
+            return   # same policy as apply_hotkey(): starting a listener
+                     # here would trap, not raise
+        for macro in self.store.game(self.current).get("macros", []):
+            hotkey = Hotkey.from_json(macro["hotkey"]) if macro["hotkey"] else None
+            if hotkey is None:
+                continue
+            watcher = HotkeyWatcher(hotkey, lambda m=macro: self._run_macro(m))
+            try:
+                watcher.start()
+            except Exception:
+                continue   # a listener failing to start must not block the
+                           # rest of this game's macros, or the UI itself
+            self._macro_hotkey_watchers.append(watcher)
+
+    def _disarm_macro_hotkeys(self):
+        for watcher in self._macro_hotkey_watchers:
+            watcher.stop()
+        self._macro_hotkey_watchers = []
+
+    def _run_macro(self, macro):
+        """Fired from a macro's own HotkeyWatcher, on ITS listener thread,
+        not the main thread -- MacroRunner only ever touches self.mouse/
+        self.keyboard (pynput Controllers, already called off-thread by the
+        click loop's own worker today), never a Tk widget directly, so
+        nothing here needs _ui()/_drain_ui(). Runs once per trigger
+        (docs/ROADMAP.md): a trigger while the same macro is still running
+        is refused, not queued or restarted -- the same "refuse rather than
+        double-click" policy start() already applies to the click loop,
+        for the same reason (two overlapping runs of the same key sequence
+        is never what firing the hotkey again meant)."""
+        existing = self._macro_runners.get(macro["id"])
+        if existing is not None and existing[1].is_alive():
+            return
+        runner = MacroRunner(macro["steps"], self.mouse, self.keyboard, self.CLICK_BUTTON)
+        thread = threading.Thread(target=runner.run, daemon=True)
+        self._macro_runners[macro["id"]] = (runner, thread)
+        thread.start()
+
+    def _refresh_macros_pane(self):
+        """Rebuilds self.macros_list's rows from the CURRENTLY SELECTED
+        game's macros -- same tear-down-and-rebuild shape as _rebuild_ui()
+        itself, scoped to just this one small list. Called from _select()
+        every time the game changes, and after any add/edit/delete."""
+        for child in self.macros_list.winfo_children():
+            child.destroy()
+        s = self.s
+        macros = self.store.game(self.current).get("macros", [])
+        if not macros:
+            tk.Label(self.macros_list, text="No macros yet for this game.",
+                    bg=CARD, fg=MUTED, anchor="w",
+                    font=("Segoe UI", fs(9.5, s))).pack(fill="x")
+            return
+        for i, macro in enumerate(macros):
+            row = tk.Frame(self.macros_list, bg=CARD)
+            row.pack(fill="x", pady=(0 if i == 0 else int(8 * s), 0))
+            hotkey = Hotkey.from_json(macro["hotkey"]) if macro["hotkey"] else None
+            Button(row, "Delete", lambda m=macro: self._delete_macro(m), s,
+                  width=70).pack(side="right")
+            Button(row, "Edit", lambda m=macro: self._open_macro_editor(m), s,
+                  width=60).pack(side="right", padx=(0, int(6 * s)))
+            Button(row, "Run", lambda m=macro: self._run_macro(m), s,
+                  width=60).pack(side="right", padx=(0, int(6 * s)))
+            tk.Label(row, text=hotkey.label() if hotkey else "No hotkey",
+                    bg=CARD, fg=(INK if hotkey else MUTED),
+                    font=("Consolas", fs(9, s))).pack(side="right", padx=(0, int(12 * s)))
+            tk.Label(row, text=macro["name"], bg=CARD, fg=INK, anchor="w",
+                    font=("Segoe UI", fs(9.5, s))).pack(side="left", fill="x", expand=True)
+
+    def _delete_macro(self, macro):
+        game = self.store.game(self.current)
+        game["macros"] = [m for m in game.get("macros", []) if m["id"] != macro["id"]]
+        self._note_save(self.store.save())
+        self._refresh_macros_pane()
+        self._arm_macro_hotkeys()
+        if self._content_tab == "macros":
+            self._request_pane_fill("macros")
+
+    def _save_macro(self, game_id, macro_id, name, hotkey, steps):
+        """Validates and persists one macro (new if macro_id is None, else
+        replacing the macro with that id) into the given game's macro list.
+        Returns True on success, False if `name`/`steps` didn't survive
+        _validate_macro() -- same reject-not-coerce contract as everywhere
+        else a Hotkey/macro is validated, so the dialog can tell the user
+        rather than silently saving something different from what they
+        built."""
+        blob = {"id": macro_id, "name": name,
+               "hotkey": hotkey.to_json() if hotkey else None, "steps": steps}
+        validated = _validate_macro(blob)
+        if validated is None:
+            return False
+        game = self.store.game(game_id)
+        macros = list(game.get("macros", []))
+        if macro_id is not None:
+            macros = [validated if m["id"] == macro_id else m for m in macros]
+        else:
+            macros.append(validated)
+        game["macros"] = macros
+        self._note_save(self.store.save())
+        if game_id == self.current:
+            self._refresh_macros_pane()
+            self._arm_macro_hotkeys()
+            if self._content_tab == "macros":
+                self._request_pane_fill("macros")
+        return True
+
+    def _open_macro_editor(self, macro=None):
+        """Opens the add/edit dialog for one macro, modelled on the
+        update-log dialog's own Toplevel pattern (_maybe_offer_log_report/
+        _close_log_dialog). Every edit -- name, hotkey, the step list --
+        lives only in this dialog's own local `ctx` until Save; Cancel (or
+        closing the window) discards it all, including a half-recorded
+        hotkey or a half-built step list, and never touches the store."""
+        s = self.s
+        game_id = self.current
+        ctx = {
+            "hotkey": Hotkey.from_json(macro["hotkey"]) if macro and macro["hotkey"] else None,
+            "steps": [dict(step) for step in (macro["steps"] if macro else [])],
+        }
+        dialog = tk.Toplevel(self.root)
+        dialog.title("New macro" if macro is None else "Edit macro")
+        dialog.configure(bg=BG)
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+
+        body = tk.Frame(dialog, bg=BG)
+        body.pack(padx=int(16 * s), pady=int(16 * s))
+
+        name_row = tk.Frame(body, bg=BG)
+        name_row.pack(fill="x")
+        tk.Label(name_row, text="Name", bg=BG, fg=INK,
+                font=("Segoe UI", fs(9.5, s))).pack(side="left")
+        name_var = tk.StringVar(value=(macro["name"] if macro else ""))
+        tk.Entry(name_row, textvariable=name_var, bg=CARD, fg=INK, relief="flat",
+                insertbackground=ACCENT, font=("Segoe UI", fs(9.5, s))
+                ).pack(side="left", fill="x", expand=True, padx=(int(8 * s), 0))
+
+        hotkey_row = tk.Frame(body, bg=BG)
+        hotkey_row.pack(fill="x", pady=(int(10 * s), 0))
+        hotkey_label = tk.Label(
+            hotkey_row, text=(ctx["hotkey"].label() if ctx["hotkey"] else "No hotkey"),
+            bg=BG, fg=(INK if ctx["hotkey"] else MUTED), font=("Consolas", fs(9.5, s)))
+        hotkey_label.pack(side="left")
+
+        def _record_macro_hotkey():
+            if self._macro_capture_thread and self._macro_capture_thread.is_alive():
+                return
+            hotkey_label.config(text="Press up to 3 keys, then let go…", fg=ACCENT)
+
+            def worker():
+                if not macos_input_permitted():
+                    self._ui(lambda: hotkey_label.config(
+                        text="Accessibility permission not granted", fg=BAD))
+                    return
+                rec = HotkeyRecorder()
+                try:
+                    with kb.Listener(on_press=rec.press, on_release=rec.release) as listener:
+                        listener.join()
+                except Exception as exc:
+                    self._ui(lambda: hotkey_label.config(text=str(exc), fg=BAD))
+                    return
+                result = rec.result()
+
+                def apply():
+                    if result is not None:
+                        ctx["hotkey"] = result
+                        hotkey_label.config(text=result.label(), fg=INK)
+                    else:
+                        hotkey_label.config(
+                            text=(ctx["hotkey"].label() if ctx["hotkey"] else "No hotkey"),
+                            fg=(INK if ctx["hotkey"] else MUTED))
+                self._ui(apply)
+            self._macro_capture_thread = threading.Thread(target=worker, daemon=True)
+            self._macro_capture_thread.start()
+
+        def _clear_hotkey():
+            ctx["hotkey"] = None
+            hotkey_label.config(text="No hotkey", fg=MUTED)
+
+        Button(hotkey_row, "Record", _record_macro_hotkey, s, width=90
+              ).pack(side="left", padx=(int(10 * s), 0))
+        Button(hotkey_row, "Clear", _clear_hotkey, s, width=70
+              ).pack(side="left", padx=(int(6 * s), 0))
+
+        tk.Label(body, text="Steps", bg=BG, fg=INK, anchor="w",
+                font=("Segoe UI", fs(9.5, s))).pack(fill="x", pady=(int(14 * s), 0))
+        steps_card = card(body, s)
+        steps_list = tk.Frame(steps_card, bg=CARD)
+        steps_list.pack(fill="x")
+
+        def _render_steps():
+            for child in steps_list.winfo_children():
+                child.destroy()
+            if not ctx["steps"]:
+                tk.Label(steps_list, text="No steps yet.", bg=CARD, fg=MUTED,
+                        font=("Segoe UI", fs(9, s))).pack(anchor="w")
+            for i, step in enumerate(ctx["steps"]):
+                row = tk.Frame(steps_list, bg=CARD)
+                row.pack(fill="x", pady=(0 if i == 0 else int(4 * s), 0))
+                Button(row, "✕", lambda idx=i: _remove_step(idx), s, width=28
+                      ).pack(side="right")
+                Button(row, "↓", lambda idx=i: _move_step(idx, 1), s, width=28
+                      ).pack(side="right", padx=(0, int(4 * s)))
+                Button(row, "↑", lambda idx=i: _move_step(idx, -1), s, width=28
+                      ).pack(side="right", padx=(0, int(4 * s)))
+                tk.Label(row, text=_describe_step(step), bg=CARD, fg=INK, anchor="w",
+                        font=("Segoe UI", fs(9, s))).pack(side="left", fill="x", expand=True)
+
+        def _remove_step(idx):
+            del ctx["steps"][idx]
+            _render_steps()
+
+        def _move_step(idx, delta):
+            j = idx + delta
+            if 0 <= j < len(ctx["steps"]):
+                ctx["steps"][idx], ctx["steps"][j] = ctx["steps"][j], ctx["steps"][idx]
+                _render_steps()
+
+        _render_steps()
+
+        add_row = tk.Frame(steps_card, bg=CARD)
+        add_row.pack(fill="x", pady=(int(10 * s), 0))
+        step_type_var = tk.StringVar(value="key_down")
+        Segmented(add_row, [("key_down", "Key ↓"), ("key_up", "Key ↑"),
+                            ("click", "Click"), ("wait", "Wait")],
+                  step_type_var, s, width=260).pack(side="left")
+
+        captured_key = {"rec": None}
+        key_status = tk.Label(add_row, text="(no key)", bg=CARD, fg=MUTED,
+                              font=("Consolas", fs(9, s)))
+        capture_key_btn = Button(add_row, "Capture", lambda: _capture_step_key(), s, width=80)
+        click_button_var = tk.StringVar(value="left")
+        click_segmented = Segmented(add_row, [("left", "Left"), ("right", "Right"),
+                                              ("middle", "Mid")],
+                                    click_button_var, s, width=150)
+        wait_ms = NumBox(add_row, 200, "ms", s, width=5)
+
+        def _capture_step_key():
+            if self._macro_capture_thread and self._macro_capture_thread.is_alive():
+                return
+            key_status.config(text="Press a key…", fg=ACCENT)
+
+            def worker():
+                if not macos_input_permitted():
+                    self._ui(lambda: key_status.config(
+                        text="Accessibility permission not granted", fg=BAD))
+                    return
+                result = []
+
+                def on_press(key):
+                    result.append(_record(key))
+                    return False    # one key is enough -- stop the listener
+                try:
+                    with kb.Listener(on_press=on_press) as listener:
+                        listener.join()
+                except Exception as exc:
+                    self._ui(lambda: key_status.config(text=str(exc), fg=BAD))
+                    return
+
+                def apply():
+                    if result:
+                        captured_key["rec"] = result[0]
+                        key_status.config(text=_key_label(result[0]), fg=INK)
+                    else:
+                        key_status.config(text="(no key)", fg=MUTED)
+                self._ui(apply)
+            self._macro_capture_thread = threading.Thread(target=worker, daemon=True)
+            self._macro_capture_thread.start()
+
+        def _sync_add_controls(*_a):
+            for w in (key_status, capture_key_btn, click_segmented, wait_ms):
+                w.pack_forget()
+            kind = step_type_var.get()
+            if kind in ("key_down", "key_up"):
+                capture_key_btn.pack(side="left", padx=(int(8 * s), 0))
+                key_status.pack(side="left", padx=(int(8 * s), 0))
+            elif kind == "click":
+                click_segmented.pack(side="left", padx=(int(8 * s), 0))
+            elif kind == "wait":
+                wait_ms.pack(side="left", padx=(int(8 * s), 0))
+        step_type_var.trace_add("write", _sync_add_controls)
+        _sync_add_controls()
+
+        def _add_step():
+            kind = step_type_var.get()
+            if kind in ("key_down", "key_up"):
+                if captured_key["rec"] is None:
+                    return
+                step = {"type": kind, "key": list(captured_key["rec"])}
+            elif kind == "click":
+                step = {"type": "click", "button": click_button_var.get()}
+            else:
+                step = {"type": "wait", "ms": self._num(wait_ms, 200, 0)}
+            validated = _validate_macro_step(step)
+            if validated is None:
+                return
+            ctx["steps"].append(validated)
+            captured_key["rec"] = None
+            key_status.config(text="(no key)", fg=MUTED)
+            _render_steps()
+        Button(add_row, "+ Add step", _add_step, s, width=100
+              ).pack(side="right")
+
+        error_label = tk.Label(body, text="", bg=BG, fg=BAD,
+                               font=("Segoe UI", fs(9, s)))
+        error_label.pack(fill="x", pady=(int(8 * s), 0))
+
+        btns = tk.Frame(body, bg=BG)
+        btns.pack(fill="x", pady=(int(12 * s), 0))
+
+        def _cancel():
+            dialog.destroy()
+
+        def _save():
+            name = name_var.get().strip()
+            if not name:
+                error_label.config(text="Name is required.")
+                return
+            if not ctx["steps"]:
+                error_label.config(text="Add at least one step.")
+                return
+            ok = self._save_macro(game_id, macro["id"] if macro else None,
+                                  name, ctx["hotkey"], ctx["steps"])
+            if not ok:
+                error_label.config(text="Could not save this macro.")
+                return
+            dialog.destroy()
+        Button(btns, "Cancel", _cancel, s, width=100).pack(side="left")
+        Button(btns, "Save", _save, s, width=100, primary=True).pack(side="right")
+
     # ---------- run control ----------
 
     def toggle(self):
@@ -4930,6 +5550,21 @@ class AfkAutoclicker:
         self.stop()
         if self.hk_listener is not None:
             self.hk_listener.stop()
+        # G#47/GH#15: disarm every macro hotkey FIRST, before signalling any
+        # in-flight run to stop -- a watcher still listening could otherwise
+        # fire a fresh macro run in the narrow window between the joins
+        # below and root.destroy(). list(...) snapshots the dict so a run
+        # started concurrently with this teardown (on a listener thread
+        # this loop does not control the timing of) can't raise "dictionary
+        # changed size during iteration" here.
+        self._disarm_macro_hotkeys()
+        for runner, _thread in list(self._macro_runners.values()):
+            runner.stop()
+        for _runner, thread in list(self._macro_runners.values()):
+            if thread.is_alive():
+                thread.join(timeout=2.0)   # let it run its own release first,
+                                            # same bound as the click loop's
+                                            # own worker join below
         if self.worker and self.worker.is_alive():
             self.worker.join(timeout=2.0)   # let it run its own release first
         if self._poll_thread and self._poll_thread.is_alive():

@@ -106,6 +106,19 @@ Viertelsekunden-Debounce fängt Doppelanschläge ab.
 Als Hotkey taugt jede Taste, aber eine **Funktionstaste ist die vernünftige
 Wahl**: einen Buchstaben löst du beim Laufen versehentlich mit aus.
 
+### Macros
+
+Dritter Tab neben Hotkey/Clicking, pro Spiel gespeichert wie dessen
+Klick-Einstellungen. Ein Macro ist eine geordnete Liste von Schritten — Taste
+runter, Taste rauf, Klick, Warten — und feuert über einen eigenen, mit
+**Record** aufgenommenen Akkord. **+ New macro** öffnet den Editor: Name,
+Hotkey und Schrittliste; **✕/↑/↓** entfernt bzw. verschiebt einen Schritt,
+gespeichert wird erst mit **Save**. Läuft genau einmal pro Auslösung — ein
+zweiter Tastendruck während das Macro noch läuft wird ignoriert, nicht
+gestapelt. Absichtlich deterministisch: kein Jitter, keine zufällige
+Reihenfolge — dieselbe Regel, die auch das Klick-Intervall nur streut, nicht
+verschleiert.
+
 ## Warum ein eigener Hotkey-Abgleich
 
 Nicht `pynput.keyboard.GlobalHotKeys`. Das gleicht über `Listener.canonical()`
