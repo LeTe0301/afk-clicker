@@ -87,8 +87,11 @@ unter Windows, macOS und GNOME —, einmal beim Start gelesen. Unter
 festlegen, oder wieder auf **System** zurückstellen — die Änderung wirkt
 sofort, ohne Neustart. Auf anderen Linux-Desktops, oder wenn sich der
 Systemwert gar nicht auslesen lässt, öffnet es sich bei **System** dunkel.
-Direkt darunter regelt **UI scale** (90 % / 100 % / 115 % / 130 %) die Größe
-des ganzen Fensters — ebenfalls sofort wirksam, ohne Neustart.
+Direkt darunter regelt **UI scale** die Größe des ganzen Fensters — ebenfalls
+sofort wirksam, ohne Neustart. Voreingestellt ist **Auto**: die Größe folgt
+stufenlos der Fenstergröße, zwischen 90 % und 130 % gedeckelt. Alternativ
+lässt sich auf einen der festen Schritte **90 % / 100 % / 115 % / 130 %**
+umstellen.
 
 ### Hotkey
 

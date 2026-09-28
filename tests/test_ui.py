@@ -114,6 +114,14 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
         # This one-time focus_force() makes the toplevel genuinely own input
         # focus so every focus_set()-based assertion below observes something
         # -- the app itself keeps using focus_set(), never focus_force().
+        #
+        # X input focus is a single resource shared by every process on the
+        # same display, not just within one: a second Tk process calling
+        # focus_force() on the same display steals it back, and every focus
+        # assertion in the first process then reads focus_get() as None. When
+        # deliberately inducing load to chase a flaky focus test, run the
+        # load on a different Xvfb display (e.g. :98) than the suite under
+        # scrutiny (e.g. :99).
         self.root.focus_force()
 
     def tearDown(self):
@@ -426,6 +434,23 @@ class StoreSaveResult(unittest.TestCase):
             self.assertFalse(store.save())
         finally:
             app.os.replace = original_replace
+
+    def test_a_failed_replace_does_not_leave_a_tmp_file_behind(self):
+        # G#43/GH#79: save() used to write settings.json.tmp and then leave
+        # it on disk if os.replace() raised afterwards (e.g. Windows
+        # PermissionError while another process holds settings.json open).
+        store = app.Store(self.path)
+        original_replace = app.os.replace
+
+        def raising_replace(*a, **kw):
+            raise OSError("another process holds this file open")
+
+        app.os.replace = raising_replace
+        try:
+            self.assertFalse(store.save())
+        finally:
+            app.os.replace = original_replace
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
 
     def test_put_game_returns_saves_own_result(self):
         store = app.Store(self.path)
@@ -1166,6 +1191,29 @@ class WindowMinimumHeight(UITestCase):
     reach below the bootstrap value instead of always clamping upward."""
     INITIAL_UI_SCALE = "100"
 
+    @staticmethod
+    def _pady_total(widget):
+        pady = widget.pack_info().get("pady", 0)
+        if isinstance(pady, (tuple, list)):
+            return int(pady[0]) + int(pady[1])
+        return 2 * int(pady)
+
+    @classmethod
+    def _required_natural(cls, pane, top, bottom):
+        # G#42/GH#81: each mapped non-spacer child's own winfo_reqheight()
+        # plus its pack pady (read via pack_info(), the accounting
+        # _fill_pane()'s own docstring insists on) against the pane's
+        # available height -- NOT each child's *allocated* winfo_y()/
+        # winfo_height(), which is what test_sweep_hint_height_floor_
+        # minecraft_with_eating's own comment (below) found blind to real
+        # clipping: pack() silently shrinks the last-packed child to fit
+        # rather than ever letting an allocated span exceed the pane, so a
+        # natural built from allocated heights can never exceed
+        # pane.winfo_height() no matter how much content actually overflows.
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        return sum(c.winfo_reqheight() + cls._pady_total(c) for c in kids)
+
     def test_minimum_height_shrunk_from_the_pre_tab_split_floor(self):
         self.assertLess(app.WINDOW_MIN_H, 690)
 
@@ -1194,10 +1242,7 @@ class WindowMinimumHeight(UITestCase):
         # this pane directly, Tk silently ignores config(height=0) on a
         # plain Frame here anyway, so a reset step would be a no-op.
         pane.update_idletasks()
-        kids = [c for c in pane.winfo_children()
-                if c.winfo_ismapped() and c not in (top, bottom)]
-        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
-                   - min(c.winfo_y() for c in kids))
+        natural = self._required_natural(pane, top, bottom)
         self.assertLessEqual(natural, pane.winfo_height())
 
     def test_tallest_pane_still_fits_at_the_floor_reverse_order(self):
@@ -1224,10 +1269,7 @@ class WindowMinimumHeight(UITestCase):
         self.root.update()
         pane, top, bottom = self.ui._pane_fills["clicking"]
         pane.update_idletasks()
-        kids = [c for c in pane.winfo_children()
-                if c.winfo_ismapped() and c not in (top, bottom)]
-        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
-                   - min(c.winfo_y() for c in kids))
+        natural = self._required_natural(pane, top, bottom)
         self.assertLessEqual(natural, pane.winfo_height())
         self.assertTrue(top.winfo_ismapped())
         self.assertTrue(bottom.winfo_ismapped())
@@ -1248,10 +1290,7 @@ class WindowMinimumHeight(UITestCase):
         # No zero-spacers step here either -- see the sibling test above.
         pane, top, bottom = self.ui._pane_fills["clicking"]
         pane.update_idletasks()
-        kids = [c for c in pane.winfo_children()
-                if c.winfo_ismapped() and c not in (top, bottom)]
-        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
-                   - min(c.winfo_y() for c in kids))
+        natural = self._required_natural(pane, top, bottom)
         self.assertLessEqual(natural, pane.winfo_height())
 
     def test_sweep_hint_height_floor_minecraft_with_eating(self):
@@ -1295,17 +1334,6 @@ class WindowMinimumHeight(UITestCase):
         # likely fail", 120px used) despite being three characters shorter,
         # purely because of where its words break -- BAD is not established
         # to be the worse case, so this test no longer assumes it is.
-        def _pady_total(widget):
-            pady = widget.pack_info().get("pady", 0)
-            if isinstance(pady, (tuple, list)):
-                return int(pady[0]) + int(pady[1])
-            return 2 * int(pady)
-
-        def _required_natural(pane, top, bottom):
-            kids = [c for c in pane.winfo_children()
-                    if c.winfo_ismapped() and c not in (top, bottom)]
-            return sum(c.winfo_reqheight() + _pady_total(c) for c in kids)
-
         for scale in ("90", "130"):
             with self.subTest(scale=scale):
                 self.ui.store.data["ui_scale"] = scale
@@ -1329,7 +1357,7 @@ class WindowMinimumHeight(UITestCase):
 
                         pane, top, bottom = ui._pane_fills["clicking"]
                         pane.update_idletasks()
-                        natural = _required_natural(pane, top, bottom)
+                        natural = self._required_natural(pane, top, bottom)
                         self.assertLessEqual(natural, pane.winfo_height())
 
                         warning_h = ui.jitter_row.winfo_reqheight()
@@ -3110,6 +3138,24 @@ class FlatChrome(unittest.TestCase):
         self.assertIn("rectangle", types)
         self.assertNotIn("polygon", types)
 
+    def test_tab_bar_underline_uses_its_own_height_not_the_module_default(self):
+        # G#44/GH#83: _paint() used to rebuild h from the module-level
+        # TAB_HEIGHT constant instead of self.h, so a TabBar built with a
+        # non-default height (the only call sites today omit height=, so
+        # this couldn't happen yet) would draw its underline at the wrong
+        # y -- against TAB_HEIGHT's floor/height, not its own.
+        var = tk.StringVar(value="a")
+        custom_height = app.TAB_HEIGHT + 20
+        bar = app.TabBar(self.root, [("a", "A"), ("b", "B")], var, 1.0,
+                         height=custom_height)
+        underline_h = int(app.TAB_UNDERLINE_H * bar.s)
+        expected_top = bar.h - underline_h
+        self.assertNotEqual(bar.h, int(app.TAB_HEIGHT * bar.s),
+                            "test is meaningless unless the custom height differs")
+        coords = bar.coords(bar.underline)
+        self.assertEqual(coords[1], expected_top)
+        self.assertEqual(coords[3], bar.h)
+
 
 @needs_display
 class SectionHeader(unittest.TestCase):
@@ -4186,6 +4232,27 @@ class UIScaleAuto(UITestCase):
                 if prev_s is not None:
                     self.assertGreater(self.ui.s, prev_s)
                 prev_s = self.ui.s
+
+    def test_a_genuinely_out_of_range_factor_clamps_to_the_scale_bound(self):
+        # G#43/GH#90: every back-solved factor above (0.92-1.28) already
+        # sits inside [AUTO_SCALE_MIN, AUTO_SCALE_MAX], so the
+        # assertGreaterEqual/assertLessEqual pair above passes whether or
+        # not the clamp in _auto_scale_factor() actually exists --
+        # sabotage-verified: removing the clamp there left that test green
+        # while a direct call showed unclamped factors of 2.25/0.078 for
+        # extreme window sizes. These two factors are genuinely out of
+        # [AUTO_SCALE_MIN, AUTO_SCALE_MAX] by construction (_wh_for_factor
+        # back-solves for the exact raw, pre-clamp factor), so self.ui.s
+        # must land exactly at the clamp boundary, not merely somewhere
+        # inside it.
+        self.ui._screen_w, self.ui._screen_h = 3840, 2160
+        self._suppress_self_triggered_real_growth()
+        for factor, bound in ((1.6, app.AUTO_SCALE_MAX), (0.5, app.AUTO_SCALE_MIN)):
+            with self.subTest(factor=factor):
+                w, h = self._wh_for_factor(self.ui._dpi_s * factor)
+                self.root.event_generate("<Configure>", width=w, height=h)
+                self.root.update()
+                self.assertEqual(self.ui.s, self.ui._dpi_s * bound)
 
     def test_minsize_tracks_the_live_scale_during_a_continuous_shrink(self):
         # Same forced-screen/synthetic-event reasoning as
@@ -5312,6 +5379,45 @@ class AfterJobsAreNotDuplicated(UITestCase):
         self.assertEqual(len(self.ui._timers), 3)
         self.pump(1.0)
         self.assertEqual(len(self.ui._timers), 3)
+
+
+class RebuildCancelsAPendingPaneFill(UITestCase):
+    """G#45/GH#84: _rebuild_ui() cancelled a pending self._rebuild_after_id
+    but left self._pane_fill_after_id (from _request_pane_fill()) alone --
+    on_close() already cancels both. A pending pane fill landing after a
+    rebuild was harmless in practice (the same test would still pass
+    without this fix, since _run_pane_fill() resolves its key against the
+    live tree at drain time), but nothing enforced it: this asserts the
+    job itself is gone, not just that it's harmless."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_a_queued_pane_fill_is_cancelled_before_a_rebuild(self):
+        # Asserts the mechanism directly (the pre-rebuild job id is actually
+        # passed to after_cancel), rather than that self._pane_fill_after_id
+        # reads None afterward -- rebuilding the pane tree legitimately
+        # requests a fresh pane fill of its own (every pane's <Configure>
+        # binding calls _request_pane_fill()), so a new, different job is
+        # expected to be pending again right after _rebuild_ui() returns;
+        # that would make a bare "is None" check pass either way and prove
+        # nothing about whether the OLD job was ever cancelled.
+        self.ui._request_pane_fill("hotkey")
+        pending_id = self.ui._pane_fill_after_id
+        self.assertIsNotNone(pending_id)
+        cancelled = []
+        original_cancel = self.root.after_cancel
+
+        def spy(job_id):
+            cancelled.append(job_id)
+            return original_cancel(job_id)
+        self.root.after_cancel = spy
+        try:
+            self.ui._rebuild_ui()
+        finally:
+            self.root.after_cancel = original_cancel
+        self.assertIn(pending_id, cancelled)
 
 
 class BindAllBoundOnce(UITestCase):

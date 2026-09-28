@@ -1401,14 +1401,25 @@ class Store:
             self.data["games"]["minecraft"]["click_ms"] = 650
 
     def save(self):
+        tmp = self.path + ".tmp"
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(self.data, fh, indent=2)
             os.replace(tmp, self.path)     # atomic: never leave a half-written file
             return True
         except OSError:
+            # A write that got as far as creating tmp but failed before (or
+            # during) os.replace -- e.g. Windows PermissionError when another
+            # process holds settings.json open -- must not leave tmp behind;
+            # the next successful save would silently overwrite it anyway,
+            # but there's no reason to leave stray state on disk in the
+            # meantime. Its own removal failing is no worse than the save
+            # failure already being reported below.
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
             return False                   # read-only home is not worth crashing over
 
     def game(self, game_id):
@@ -1833,6 +1844,7 @@ class TabBar(tk.Canvas):
             x += w + gap
         total_w = max(x - gap, 0)
         h = int(height * s)
+        self.w, self.h = total_w, h
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0,
                          width=total_w, height=h, cursor="hand2")
         # Full-width separator first (bottom of the pane's z-order), so the
@@ -1859,7 +1871,9 @@ class TabBar(tk.Canvas):
 
     def _paint(self):
         current = self.var.get()
-        h = int(TAB_HEIGHT * self.s)
+        h = self.h                            # G#44/GH#83: not int(TAB_HEIGHT *
+            # self.s) -- that ignores a __init__(height=...) override, like
+            # Segmented's own self.h/self.w already do.
         for value, _label, x1, x2, text_id in self._tabs:
             self.itemconfig(text_id, fill=INK if value == current else MUTED)
         active = next((t for t in self._tabs if t[0] == current), self._tabs[0])
@@ -3074,6 +3088,22 @@ class AfkAutoclicker:
             except tk.TclError:
                 pass
             self._rebuild_after_id = None
+        # G#45/GH#84: a pending _request_pane_fill() job targets a pane
+        # about to be torn down by this same rebuild -- _run_pane_fill()
+        # landing afterward would measure/write against widgets from the
+        # new tree that were never the ones the fill was requested for.
+        # Harmless in practice today (verified: the pane it would resolve
+        # to by key still exists post-rebuild, freshly built), but that is
+        # an incidental property of the current _pane_fills shape, not a
+        # guaranteed one -- cancelled here for the same reason on_close()
+        # already cancels it, symmetry with _rebuild_after_id above.
+        if self._pane_fill_after_id is not None:
+            try:
+                self.root.after_cancel(self._pane_fill_after_id)
+            except tk.TclError:
+                pass
+            self._pane_fill_after_id = None
+            self._pane_fill_key = None
         self._rebuilding = True
         try:
             self._persist()                    # flush any in-progress field edit
@@ -3472,6 +3502,13 @@ class AfkAutoclicker:
         # longer exists. after_idle() lets every trace on this click finish
         # against the still-live old tree first; the rebuild itself runs a
         # moment later, once the event has fully unwound.
+        #
+        # The registration order above (this trace, then Segmented's own) is
+        # kept, matching ui_scale_var's, but it is not what makes this safe
+        # today -- after_idle() defers past the point where trace order could
+        # matter regardless of which trace fires first. Verified empirically:
+        # reversing this order and running the full suite still passes; see
+        # docs/history/ac-17-f4-implementation.md's Finding 1.
         #
         # Coalesced: a second (or fifth) Appearance change landing before
         # the first's idle rebuild has run must NOT queue a second
