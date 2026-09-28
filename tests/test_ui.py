@@ -236,9 +236,21 @@ class Sidebar(UITestCase):
         self.assertEqual(set(self.ui.items), {"minecraft", "global"})
 
     def test_running_dot_and_follow(self):
+        # G#39/GH#75 (macOS-only flake): no root.update() here, deliberately
+        # -- _mark_running() is a plain synchronous call (set_state()/_paint()
+        # are direct canvas itemconfig() calls, self.current/game_state.cget()
+        # read back plain state with no redraw needed), so nothing below
+        # actually depends on an event-loop pump to observe the update. The
+        # removed update() used to service whichever timer next came due --
+        # on a slow macOS runner, that could be the periodic _poll_games()
+        # reschedule armed back in setUp(), whose own real (never-mocked)
+        # scan result then lands through _apply_scan() -> _mark_running(set())
+        # and clears the dot this test just set, exactly matching the CI
+        # failure this class was named for. No event-loop cycle, no due
+        # timer serviced, no race -- same fix shape as removing an
+        # unnecessary root.update() anywhere else in this suite.
         self.ui._seen_running = set()
         self.ui._mark_running({"minecraft"})
-        self.root.update()
         self.assertTrue(self.ui.items["minecraft"].running)
         self.assertFalse(self.ui.items["global"].running)
         self.assertEqual(self.ui.current, "minecraft")
