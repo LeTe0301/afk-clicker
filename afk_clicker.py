@@ -1343,17 +1343,78 @@ def config_path():
     return os.path.join(base, "afk-farm-clicker", "settings.json")
 
 
+SETTINGS_VERSION = 1   # G#46/GH#15's prerequisite (docs/ROADMAP.md "Settings
+                        # schema version"): every settings.json written from
+                        # here on carries this number, so a future format
+                        # change has something to compare against instead of
+                        # guessing an old file's shape from which keys happen
+                        # to be present. A file with no "version" key at all
+                        # (every one written before this change) is version 0;
+                        # _SETTINGS_MIGRATIONS below carries it forward.
+
+def _migrate_settings_v0_to_v1(data):
+    """The one rewrite Store.__init__ already did unconditionally, promoted
+    to a real, versioned migration (docs/ROADMAP.md's own requirement: "must
+    run before that shape filter, or it will discard old-format data as if
+    it were corrupt"). _persist() writes a Minecraft click_ms of 510 (the old
+    default) automatically the first time Minecraft is ever selected --
+    including the automatic _select() a window-detection triggers, before a
+    user touches the field -- so a stored 510 is that auto-save having
+    happened, not a deliberate choice; any other value is left alone because
+    it is. Runs on the raw loaded dict, before the games-shape filter below:
+    a version's own migration must see the shape it actually expects to
+    migrate, not whatever the defensive corruption filter already dropped."""
+    games = data.get("games")
+    if isinstance(games, dict):
+        minecraft = games.get("minecraft")
+        if isinstance(minecraft, dict) and minecraft.get("click_ms") == 510:
+            minecraft["click_ms"] = 650
+    return data
+
+
+# Keyed by the version a file is coming FROM; _run_settings_migrations()
+# below applies them in order until the data reaches SETTINGS_VERSION. Only
+# one step exists today because only one versioned format change has ever
+# happened -- a future one adds its own function and one more entry here,
+# never rewrites an existing step (each step must keep migrating an old file
+# exactly the way it always did, even after a later version exists).
+_SETTINGS_MIGRATIONS = {0: _migrate_settings_v0_to_v1}
+
+
+def _run_settings_migrations(data):
+    version = data.get("version")
+    if not isinstance(version, int) or version < 0:
+        version = 0                   # missing/garbage version -> oldest
+                                       # known shape, same "untrustworthy
+                                       # value is as untrustworthy as a
+                                       # damaged file" contract as every
+                                       # other field Store.__init__ defends.
+    while version < SETTINGS_VERSION:
+        migrate = _SETTINGS_MIGRATIONS.get(version)
+        if migrate is None:
+            break                      # no known path from this version --
+                                       # leave the rest to the defensive
+                                       # shape filters below, same as any
+                                       # other untrustworthy on-disk value.
+        data = migrate(data)
+        version += 1
+    data["version"] = version
+    return data
+
+
 class Store:
     """Load once, save on change. A corrupt file is replaced, never fatal."""
 
     def __init__(self, path=None):
         self.path = path or config_path()
         self.data = {"games": {}, "hotkey": None, "selected": None,
-                     "appearance": "system", "ui_scale": UI_SCALE_DEFAULT}
+                     "appearance": "system", "ui_scale": UI_SCALE_DEFAULT,
+                     "version": SETTINGS_VERSION}
         try:
             with open(self.path, encoding="utf-8") as fh:
                 loaded = json.load(fh)
             if isinstance(loaded, dict):
+                loaded = _run_settings_migrations(loaded)
                 self.data.update({k: v for k, v in loaded.items() if k in self.data})
         except (OSError, ValueError):
             pass                      # missing or damaged -> start from defaults
@@ -1387,18 +1448,13 @@ class Store:
         if self.data["ui_scale"] not in UI_SCALE_FACTORS and self.data["ui_scale"] != "auto":
             self.data["ui_scale"] = UI_SCALE_DEFAULT
 
-        # _persist() writes this value to disk automatically the first time
-        # Minecraft is ever selected -- including the automatic _select() a
-        # window-detection triggers, before a user touches the field -- so a
-        # stored 510 (the old default) is that auto-save having happened, not
-        # a deliberate choice; any other value is left alone because it is.
-        # In-memory only: this does not call save() itself, so the corrected
-        # value reaches disk the same way the old default did -- via the next
-        # natural _persist() (selecting Minecraft, which happens automatically
-        # on detection) -- rather than Store.__init__ taking on a write it
-        # has never performed before.
-        if self.data["games"].get("minecraft", {}).get("click_ms") == 510:
-            self.data["games"]["minecraft"]["click_ms"] = 650
+        # The stored-510-becomes-650 rewrite that used to live here is now
+        # _migrate_settings_v0_to_v1() above, run on the raw loaded dict
+        # before the games-shape filter -- see SETTINGS_VERSION's own
+        # comment. In-memory only, same as before: this does not call save()
+        # itself, so the corrected value reaches disk via the next natural
+        # _persist() (selecting Minecraft, which happens automatically on
+        # detection), not a write Store.__init__ takes on itself.
 
     def save(self):
         tmp = self.path + ".tmp"

@@ -8,18 +8,19 @@ here promises a date.
 `1.0.0` means the UI and the on-disk settings format have stopped moving.
 Until both are settled, the version stays in `0.x`.
 
-- [ ] **Settings schema version.** `settings.json` has no version field, so a
-      future format change has no migration path and would silently reset
-      everyone's per-game values. Two unversioned rewrites already run in
-      `Store.__init__` (#15): entries under `games` that are not objects are
-      dropped, and a saved Minecraft `click_ms` of exactly 510 becomes 650.
-      Whatever versioned migration comes first must run **before** that
-      shape filter, or it will discard old-format data as if it were corrupt.
-      The `hotkey` field (PR #4) is the first value `settings.json` carries
-      with its own shape and vocabulary, validated on load by
-      `Hotkey.from_json`. Both directions are safe unversioned today:
-      an older file simply lacks the key, and an unreadable blob degrades
-      to no hotkey through `from_json`.
+- [x] **Settings schema version.** `settings.json` now carries a `"version"`
+      key (`SETTINGS_VERSION` in `afk_clicker.py`). A file with no version key
+      at all -- every one written before this change -- is treated as version
+      0; `_run_settings_migrations()` carries it forward through
+      `_SETTINGS_MIGRATIONS`, one function per version, before the games-shape
+      filter runs (per this bullet's own original requirement: a migration
+      must see the shape it actually expects, not whatever the defensive
+      corruption filter already dropped). The one migration that exists today
+      (v0 -> v1) is the promoted click_ms-510-becomes-650 rewrite that used to
+      run unconditionally. The `hotkey` field (PR #4) stays unversioned by
+      design: an older file simply lacks the key, and an unreadable blob
+      degrades to no hotkey through `Hotkey.from_json` either way, with
+      nothing a version number would add. Unblocks the macros tab below.
 - [x] **Update integrity.** The updater downloads over HTTPS and executes the
       result. It now verifies the archive against the release's `SHA256SUMS`
       before extracting anything, refuses a release that publishes none, and
@@ -34,6 +35,19 @@ Until both are settled, the version stays in `0.x`.
       game" — not from plausible-sounding guesses.
 - [ ] **Detection cost.** The X11 path walks the window tree every five
       seconds. Fine on a desktop, wasteful on a laptop battery.
+- [ ] **A Macros tab, configurable per game** (#15). A second tab beside the
+      clicker settings holding an ordered list of steps -- key down, key up,
+      click, wait -- stored per game exactly as the clicker settings are, and
+      fired by its own chord hotkey (the recorder already handles up to three
+      keys with modifiers). Every key a macro presses is tracked and released
+      on any exit path (`finally`-based, mirroring the click loop's own right-
+      mouse-button release). Macros stay deterministic: no jitter presets
+      aimed at looking human, no randomised step ordering -- see "Explicitly
+      not planned" below. Runs once per trigger, does not pause the clicker
+      (no shared-thread answer needed yet since the two never send input at
+      the same instant in the current design). Recording with real timings,
+      not just an authored step list, stays open for later. Blocked on macOS
+      by the same unresolved listener abort as the hotkey system itself.
 
 ## Later
 

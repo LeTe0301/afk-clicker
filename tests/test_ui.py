@@ -562,6 +562,69 @@ class StoreMigration(UITestCase):
         self.assertEqual(store2.data["games"]["minecraft"]["click_ms"], 650)
 
 
+class SettingsSchemaVersion(UITestCase):
+    """G#46/GH#15's prerequisite (docs/ROADMAP.md "Settings schema
+    version"): settings.json now carries a version field, so a future
+    format change has something to compare against instead of guessing an
+    old file's shape from which keys happen to be present."""
+
+    def _write(self, data):
+        with open(self.config, "w") as fh:
+            json.dump(data, fh)
+
+    def test_a_fresh_store_is_at_the_current_version(self):
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+
+    def test_a_saved_store_writes_the_current_version_to_disk(self):
+        store = app.Store(self.config)
+        store.save()
+        with open(self.config, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        self.assertEqual(on_disk["version"], app.SETTINGS_VERSION)
+
+    def test_a_file_with_no_version_key_is_treated_as_version_0(self):
+        # Every settings.json ever written before this change -- the exact
+        # real-world case this migration exists for.
+        self._write({"games": {"minecraft": {"click_ms": 510}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+        # The v0->v1 migration (the promoted click_ms rewrite) still ran.
+        self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 650)
+
+    def test_a_file_already_at_the_current_version_is_not_migrated_again(self):
+        self._write({"version": app.SETTINGS_VERSION,
+                     "games": {"minecraft": {"click_ms": 510}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+        # Already at v1 -- a real, deliberately-chosen 510 must survive,
+        # unlike the v0 case above where it's the old, auto-saved default.
+        self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 510)
+
+    def test_a_garbage_version_value_is_treated_as_version_0(self):
+        # Same "untrustworthy value is as untrustworthy as a damaged file"
+        # contract as every other field Store.__init__ defends (appearance,
+        # ui_scale, games' own shape).
+        for bad in ("not a number", None, -1, 4.5):
+            with self.subTest(bad=bad):
+                self._write({"version": bad,
+                             "games": {"minecraft": {"click_ms": 510}}})
+                store = app.Store(self.config)
+                self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+                self.assertEqual(
+                    store.data["games"]["minecraft"]["click_ms"], 650)
+
+    def test_a_future_version_this_build_does_not_know_is_left_alone(self):
+        # A file written by a newer build than this one -- no migration
+        # path exists (or is needed) going backward, so the known top-level
+        # keys are taken as-is rather than guessed at.
+        self._write({"version": app.SETTINGS_VERSION + 1,
+                     "games": {"minecraft": {"click_ms": 510}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION + 1)
+        self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 510)
+
+
 class ClickLoop(UITestCase):
     def setUp(self):
         super().setUp()
