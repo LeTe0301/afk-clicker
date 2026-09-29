@@ -4429,28 +4429,52 @@ class UIScaleAuto(UITestCase):
     def test_the_settle_timer_resets_on_each_new_event_not_just_the_first(self):
         # Distinguishes real debounce from mere after_idle-style coalescing
         # (docs/spec.md "The debounce decision"): a second event arriving
-        # inside the first event's own settle window must push the
-        # deadline out again, not just get folded into the first one.
+        # inside the first event's own settle window must push the deadline
+        # out again, not just get folded into the first one.
+        #
+        # G#51/GH#92 (macOS-only flake): rewritten from two fixed-wall-clock
+        # pump()+assertEqual(0) checkpoints -- each needing real time to
+        # land inside a narrow margin before the next boundary -- to a
+        # single timestamp comparison after a generous pump_until() wait.
+        # The original failed on macOS CI ("AssertionError: 1 != 0",
+        # reproduced identically on main before this branch existed) when a
+        # slow root.update() call inside pump() overshot a checkpoint's own
+        # margin, firing the timer before the test's next fixed-duration
+        # check ran -- a timing artifact of the test's own two-narrow-
+        # windows shape, not the debounce behaviour it exists to verify.
         calls = []
         original = self.ui._rebuild_ui
         def spy():
-            calls.append(1)
+            calls.append(time.monotonic())
             original()
         self.ui._rebuild_ui = spy
+        settle_s = app.AUTO_SETTLE_MS / 1000
         w1, h1 = self._wh_for_factor(1.05)
         self.root.event_generate("<Configure>", width=w1, height=h1)
         self.root.update()
-        self.pump(app.AUTO_SETTLE_MS / 1000 * 0.6)   # well within the window
+        t1 = time.monotonic()
+        # Comfortably inside the first event's own window -- if this ever
+        # fires, the settle timer isn't debouncing at all. Nowhere near a
+        # boundary, so no amount of realistic scheduling jitter reaches it.
+        self.pump(settle_s * 0.3)
         self.assertEqual(len(calls), 0)
         w2, h2 = self._wh_for_factor(1.15)
         self.root.event_generate("<Configure>", width=w2, height=h2)
         self.root.update()
-        self.pump(app.AUTO_SETTLE_MS / 1000 * 0.6)   # would have fired for
-            # the FIRST event's own window by now if the timer hadn't reset
-        self.assertEqual(len(calls), 0)
-        self.pump(app.AUTO_SETTLE_MS / 1000 * 0.6)   # now past the second
-                                                       # event's own window
-        self.assertEqual(len(calls), 1)
+        self.pump_until(lambda: calls, timeout=settle_s * 10)
+        self.assertEqual(len(calls), 1, "settle timer never fired")
+        # The property that actually distinguishes reset from coalesced: if
+        # the second event had merely been folded into the first event's
+        # already-pending deadline, the rebuild lands close to
+        # t1 + settle_s (~1.0x). A real reset lands close to the second
+        # event's own time -- itself already > t1 + settle_s*0.3 -- plus a
+        # full settle_s, i.e. comfortably past t1 + settle_s*1.3. 1.15x
+        # sits clearly between the two, with margin on both sides for
+        # scheduling jitter.
+        self.assertGreater(calls[0] - t1, settle_s * 1.15,
+                           "rebuild landed too soon after the first event -- "
+                           "looks coalesced into its deadline, not reset by "
+                           "the second event")
 
     def test_shrinking_past_the_threshold_collapses_the_rail_under_auto(self):
         # Mirrors WindowResize.test_shrinking_past_the_threshold_collapses_
