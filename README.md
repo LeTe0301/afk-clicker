@@ -122,6 +122,10 @@ gestapelt. Absichtlich deterministisch: kein Jitter, keine zufällige
 Reihenfolge — dieselbe Regel, die auch das Klick-Intervall nur streut, nicht
 verschleiert.
 
+**Auto-repeat every** im Editor macht ein Macro zusätzlich zeitgesteuert: mit
+einem Intervall über 0 läuft es von selbst alle N ms, unabhängig vom Hotkey —
+beides zusammen geht auch. 0 (Vorgabe) heißt aus.
+
 ## Warum ein eigener Hotkey-Abgleich
 
 Nicht `pynput.keyboard.GlobalHotKeys`. Das gleicht über `Listener.canonical()`

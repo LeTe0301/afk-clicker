@@ -695,6 +695,13 @@ class HotkeyWatcher:
 MACRO_MAX_STEPS = 200        # a runaway/corrupt macro must not be unbounded
 MACRO_MAX_WAIT_MS = 60_000   # one wait step, generous but bounded
 MACRO_BUTTONS = ("left", "right", "middle")
+# GH#98: a macro's own optional auto-repeat interval, in addition to its
+# hotkey trigger. Floored, not left unbounded like autostop_min's "0 means
+# never" -- unlike autostop_min this arms a real repeating timer the moment
+# it's set, so a 1ms/0ms value would hammer _run_macro() (itself guarded
+# against overlapping runs, but not against being asked to start a run
+# every single event-loop tick).
+MACRO_MIN_INTERVAL_MS = 200
 
 
 def _validate_key_record(entry):
@@ -780,7 +787,15 @@ def _validate_macro(blob):
         if step is None:
             return None
         steps.append(step)
-    return {"id": macro_id, "name": name, "hotkey": hotkey_json, "steps": steps}
+    interval_ms = blob.get("interval_ms")
+    if interval_ms is not None:
+        if isinstance(interval_ms, bool) or not isinstance(interval_ms, (int, float)):
+            return None
+        if interval_ms < MACRO_MIN_INTERVAL_MS:
+            return None
+        interval_ms = int(interval_ms)
+    return {"id": macro_id, "name": name, "hotkey": hotkey_json, "steps": steps,
+            "interval_ms": interval_ms}
 
 
 def _describe_step(step):
@@ -2738,6 +2753,13 @@ class AfkAutoclicker:
         self._macro_runners = {}           # macro id -> (MacroRunner, Thread)
                                             # currently running or last run --
                                             # see _run_macro().
+        self._macro_interval_after_ids = {}   # GH#98: macro id -> the
+                                            # armed self.root.after() job for
+                                            # its own auto-repeat interval,
+                                            # for the CURRENTLY selected game
+                                            # only -- same rebuild-on-switch
+                                            # lifecycle as
+                                            # _macro_hotkey_watchers above.
         self._macro_capture_thread = None  # the one background thread
                                             # capturing a single key for the
                                             # macro editor dialog's step
@@ -4144,6 +4166,7 @@ class AfkAutoclicker:
         # like the clicker fields refilled above.
         self._refresh_macros_pane()
         self._arm_macro_hotkeys()
+        self._arm_macro_intervals()
         if self._content_tab == "macros":
             self._request_pane_fill("macros")
 
@@ -5066,6 +5089,41 @@ class AfkAutoclicker:
             watcher.stop()
         self._macro_hotkey_watchers = []
 
+    def _arm_macro_intervals(self):
+        """GH#98: (re)arms one self.root.after() timer per macro of the
+        CURRENTLY SELECTED game that has an interval_ms set -- same
+        rebuild-on-switch lifecycle and call sites as _arm_macro_hotkeys()
+        (macros are per-game), and deliberately independent of it: a macro
+        can have a hotkey, an interval, both, or neither."""
+        self._disarm_macro_intervals()
+        for macro in self.store.game(self.current).get("macros", []):
+            if macro.get("interval_ms"):
+                self._schedule_macro_interval(self.current, macro["id"], macro["interval_ms"])
+
+    def _schedule_macro_interval(self, game_id, macro_id, interval_ms):
+        def tick():
+            self._macro_interval_after_ids.pop(macro_id, None)
+            # Re-read fresh: the game may have been switched away from, or
+            # this macro edited/deleted, since this tick was scheduled --
+            # never trust the closure's own captured snapshot for either.
+            if game_id != self.current:
+                return
+            macro = next((m for m in self.store.game(game_id).get("macros", [])
+                         if m["id"] == macro_id), None)
+            if macro is None or not macro.get("interval_ms"):
+                return
+            self._run_macro(macro)   # already refuses an overlapping run
+            self._schedule_macro_interval(game_id, macro_id, macro["interval_ms"])
+        self._macro_interval_after_ids[macro_id] = self.root.after(interval_ms, tick)
+
+    def _disarm_macro_intervals(self):
+        for after_id in self._macro_interval_after_ids.values():
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self._macro_interval_after_ids = {}
+
     def _run_macro(self, macro):
         """Fired from a macro's own HotkeyWatcher, on ITS listener thread,
         not the main thread -- MacroRunner only ever touches self.mouse/
@@ -5112,6 +5170,9 @@ class AfkAutoclicker:
             tk.Label(row, text=hotkey.label() if hotkey else "No hotkey",
                     bg=CARD, fg=(INK if hotkey else MUTED),
                     font=("Consolas", fs(9, s))).pack(side="right", padx=(0, int(12 * s)))
+            if macro.get("interval_ms"):
+                tk.Label(row, text=f"every {macro['interval_ms']} ms", bg=CARD, fg=MUTED,
+                        font=("Segoe UI", fs(9, s))).pack(side="right", padx=(0, int(12 * s)))
             tk.Label(row, text=macro["name"], bg=CARD, fg=INK, anchor="w",
                     font=("Segoe UI", fs(9.5, s))).pack(side="left", fill="x", expand=True)
 
@@ -5121,19 +5182,21 @@ class AfkAutoclicker:
         self._note_save(self.store.save())
         self._refresh_macros_pane()
         self._arm_macro_hotkeys()
+        self._arm_macro_intervals()
         if self._content_tab == "macros":
             self._request_pane_fill("macros")
 
-    def _save_macro(self, game_id, macro_id, name, hotkey, steps):
+    def _save_macro(self, game_id, macro_id, name, hotkey, steps, interval_ms=None):
         """Validates and persists one macro (new if macro_id is None, else
         replacing the macro with that id) into the given game's macro list.
-        Returns True on success, False if `name`/`steps` didn't survive
-        _validate_macro() -- same reject-not-coerce contract as everywhere
-        else a Hotkey/macro is validated, so the dialog can tell the user
-        rather than silently saving something different from what they
-        built."""
+        Returns True on success, False if `name`/`steps`/`interval_ms`
+        didn't survive _validate_macro() -- same reject-not-coerce contract
+        as everywhere else a Hotkey/macro is validated, so the dialog can
+        tell the user rather than silently saving something different from
+        what they built."""
         blob = {"id": macro_id, "name": name,
-               "hotkey": hotkey.to_json() if hotkey else None, "steps": steps}
+               "hotkey": hotkey.to_json() if hotkey else None, "steps": steps,
+               "interval_ms": interval_ms}
         validated = _validate_macro(blob)
         if validated is None:
             return False
@@ -5148,6 +5211,7 @@ class AfkAutoclicker:
         if game_id == self.current:
             self._refresh_macros_pane()
             self._arm_macro_hotkeys()
+            self._arm_macro_intervals()
             if self._content_tab == "macros":
                 self._request_pane_fill("macros")
         return True
@@ -5229,6 +5293,17 @@ class AfkAutoclicker:
               ).pack(side="left", padx=(int(10 * s), 0))
         Button(hotkey_row, "Clear", _clear_hotkey, s, width=70
               ).pack(side="left", padx=(int(6 * s), 0))
+
+        # GH#98: an optional auto-repeat interval, independent of the hotkey
+        # trigger above -- 0 means off, the same "0 means never" convention
+        # autostop_min already uses, rather than a separate checkbox.
+        interval_row = tk.Frame(body, bg=BG)
+        interval_row.pack(fill="x", pady=(int(10 * s), 0))
+        tk.Label(interval_row, text="Auto-repeat every", bg=BG, fg=INK,
+                font=("Segoe UI", fs(9.5, s))).pack(side="left")
+        initial_interval = (macro.get("interval_ms") if macro else None) or 0
+        interval_ms_box = NumBox(interval_row, initial_interval, "ms (0 = off)", s, width=6)
+        interval_ms_box.pack(side="left", padx=(int(8 * s), 0))
 
         tk.Label(body, text="Steps", bg=BG, fg=INK, anchor="w",
                 font=("Segoe UI", fs(9.5, s))).pack(fill="x", pady=(int(14 * s), 0))
@@ -5367,8 +5442,10 @@ class AfkAutoclicker:
             if not ctx["steps"]:
                 error_label.config(text="Add at least one step.")
                 return
+            interval_ms = self._num(interval_ms_box, 0, 0)
             ok = self._save_macro(game_id, macro["id"] if macro else None,
-                                  name, ctx["hotkey"], ctx["steps"])
+                                  name, ctx["hotkey"], ctx["steps"],
+                                  interval_ms if interval_ms > 0 else None)
             if not ok:
                 error_label.config(text="Could not save this macro.")
                 return
@@ -5605,6 +5682,12 @@ class AfkAutoclicker:
         # this loop does not control the timing of) can't raise "dictionary
         # changed size during iteration" here.
         self._disarm_macro_hotkeys()
+        self._disarm_macro_intervals()   # GH#98: same "before any in-flight
+                                          # run is signalled to stop" reason
+                                          # as the hotkey disarm just above --
+                                          # a still-armed interval timer could
+                                          # otherwise fire a fresh run in the
+                                          # same narrow window.
         for runner, _thread in list(self._macro_runners.values()):
             runner.stop()
         for _runner, thread in list(self._macro_runners.values()):

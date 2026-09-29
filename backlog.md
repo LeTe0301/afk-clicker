@@ -546,13 +546,22 @@ Housekeeping:
       this interacts with Eating (which already dedicates RMB on Minecraft profiles). Needs
       product-manager/ux-designer scoping before building.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/55
-- [ ] G#56 — github: true — sync pending: GitHub — **Configurable interval for recognized/tracked
-      macros** (Leo, 2026-09-29): "recognizable macros should be trackable and set to an
-      intervall." Related to G#13/GH#15's Macros tab (now built, PR #92) but a distinct ask: macros
-      the app recognizes/detects should be listed/tracked somewhere in the UI with their own
-      configurable run interval (Clicking's own Interval row shape), rather than fire-and-forget on
-      a hotkey. Open scoping question the ticket itself defers: whether this rides inside the
-      existing Macros tab as a feature or ships as its own follow-on. Needs product-manager scoping.
+- [x] **Done 2026-09-29, PR #TBD.** G#56 / GH#98 — github: true — **Configurable interval for
+      recognized/tracked macros** (Leo, 2026-09-29): "recognizable macros should be trackable and
+      set to an intervall." Related to G#13/GH#15's Macros tab (built, PR #92) but a distinct ask.
+      Scoping decision (Leo, 2026-09-29): rides inside the existing Macros tab as an optional field
+      on each macro, not a separate follow-on. Added `interval_ms` to the macro schema (validated by
+      `_validate_macro()`, floored at the new `MACRO_MIN_INTERVAL_MS = 200` when set, `None`/0 means
+      off -- the same convention `autostop_min` already uses), an "Auto-repeat every" `NumBox` in the
+      macro editor, and a self-rescheduling `self.root.after()` timer per macro with a nonzero
+      interval (`_arm_macro_intervals()`/`_schedule_macro_interval()`/`_disarm_macro_intervals()`),
+      arming/disarming through the exact same per-game lifecycle as `_macro_hotkey_watchers`
+      (`_select()`, `_save_macro()`, `_delete_macro()`, `on_close()`) -- a macro can have a hotkey,
+      an interval, both, or neither, and the interval timer reuses `_run_macro()` unchanged, so an
+      overlapping run is refused exactly like a hotkey retrigger. Added `MacroIntervals`
+      (`tests/test_ui.py`): arm/fire/disarm across every lifecycle point, plus 4 new
+      `_validate_macro()` cases for the new field. 499 tests green locally (488 + 4 validation + 7
+      lifecycle), full suite, run twice for timer-flake stability.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/56
 - Lesson (not a backlog item): **A flake "fix" tends to work by blinding the test — sabotage-verify every
       one.** Three cases in two days, each caught only by deliberately breaking the

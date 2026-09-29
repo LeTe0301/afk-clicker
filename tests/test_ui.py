@@ -7048,6 +7048,27 @@ class MacroValidation(unittest.TestCase):
     def test_an_unknown_step_type_is_rejected(self):
         self.assertIsNone(app._validate_macro_step({"type": "teleport"}))
 
+    def test_no_interval_is_accepted_and_stays_none(self):
+        m = app._validate_macro(self._valid_blob())
+        self.assertIsNone(m["interval_ms"])
+
+    def test_a_valid_interval_is_accepted_and_coerced_to_int(self):
+        m = app._validate_macro(self._valid_blob(
+            interval_ms=app.MACRO_MIN_INTERVAL_MS + 0.0))
+        self.assertEqual(m["interval_ms"], app.MACRO_MIN_INTERVAL_MS)
+        self.assertIsInstance(m["interval_ms"], int)
+
+    def test_an_interval_below_the_floor_is_rejected(self):
+        self.assertIsNone(app._validate_macro(
+            self._valid_blob(interval_ms=app.MACRO_MIN_INTERVAL_MS - 1)))
+        self.assertIsNone(app._validate_macro(self._valid_blob(interval_ms=0)))
+        self.assertIsNone(app._validate_macro(self._valid_blob(interval_ms=-1)))
+
+    def test_a_non_numeric_interval_is_rejected(self):
+        self.assertIsNone(app._validate_macro(self._valid_blob(interval_ms="fast")))
+        # bool is an int subclass -- same guard as wait_ms's own bool check.
+        self.assertIsNone(app._validate_macro(self._valid_blob(interval_ms=True)))
+
 
 class FakeKeyboard:
     """Records what MacroRunner asked for instead of sending real key
@@ -7382,6 +7403,76 @@ class MacrosTab(UITestCase):
         self.ui.on_close()   # must not raise or hang
         self.assertFalse(thread.is_alive())
 
+
+class MacroIntervals(UITestCase):
+    """GH#98: a macro's optional auto-repeat interval_ms -- arming/disarming
+    the self.root.after() timer through the same per-game lifecycle as
+    _macro_hotkey_watchers (_select(), _save_macro(), _delete_macro(),
+    on_close()), independent of whether the macro also has a hotkey. No
+    needs_input_permission anywhere here -- these macros have no hotkey, so
+    nothing here starts a real pynput Listener()."""
+
+    def _interval_macro(self, name="Interval macro", interval_ms=app.MACRO_MIN_INTERVAL_MS):
+        return {"name": name, "hotkey": None,
+                "steps": [{"type": "wait", "ms": 1}], "interval_ms": interval_ms}
+
+    def test_saving_a_macro_with_an_interval_arms_a_timer(self):
+        self.ui._select("minecraft")
+        m = self._interval_macro()
+        ok = self.ui._save_macro("minecraft", None, m["name"], None, m["steps"],
+                                 m["interval_ms"])
+        self.assertTrue(ok)
+        macro_id = self.ui.store.game("minecraft")["macros"][0]["id"]
+        self.assertIn(macro_id, self.ui._macro_interval_after_ids)
+
+    def test_a_macro_with_no_interval_arms_nothing(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "No interval", None,
+                            [{"type": "wait", "ms": 1}])
+        self.assertEqual(self.ui._macro_interval_after_ids, {})
+
+    def test_the_timer_actually_fires_the_macro(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "Fires", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        calls = []
+        original = self.ui._run_macro
+        self.ui._run_macro = lambda m: (calls.append(m), original(m))[1]
+        self.pump_until(lambda: calls, timeout=app.MACRO_MIN_INTERVAL_MS / 1000 + 2.0)
+        self.assertTrue(calls, "the armed interval timer never fired the macro")
+
+    def test_switching_games_disarms_the_previous_games_interval(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "MC interval", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        self.assertEqual(len(self.ui._macro_interval_after_ids), 1)
+        self.ui._select("global")
+        self.assertEqual(self.ui._macro_interval_after_ids, {},
+                         "global must not inherit minecraft's armed interval timer")
+
+    def test_deleting_the_macro_disarms_its_interval(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "To delete", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        macro = self.ui.store.game("minecraft")["macros"][0]
+        self.ui._delete_macro(macro)
+        self.assertEqual(self.ui._macro_interval_after_ids, {})
+
+    def test_editing_out_the_interval_disarms_it(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "Original", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        macro_id = self.ui.store.game("minecraft")["macros"][0]["id"]
+        self.ui._save_macro("minecraft", macro_id, "Edited", None,
+                            [{"type": "wait", "ms": 1}], None)
+        self.assertEqual(self.ui._macro_interval_after_ids, {})
+
+    def test_on_close_disarms_pending_interval_timers(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "Closing", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        self.ui.on_close()   # must not raise or hang
+        self.assertEqual(self.ui._macro_interval_after_ids, {})
 
 def tearDownModule():
     # See GcAutomaticCollectionStaysDisabled above (G#31/GH#54). Checked
