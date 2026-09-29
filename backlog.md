@@ -588,6 +588,24 @@ Housekeeping:
       `_validate_macro()` cases for the new field. 499 tests green locally (488 + 4 validation + 7
       lifecycle), full suite, run twice for timer-flake stability.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/56
+- [x] **Done 2026-09-29, PR #TBD.** No G#/GH# ticket -- picked from `docs/ROADMAP.md`'s own "Later"
+      list at Leo's direction (2026-09-29, no ticket filed to leave nothing to build against) once
+      the open-issue queue emptied out: **a visible click counter and session timer.** Shown in the
+      header (`self.session_stats_label`), not the Clicking pane, specifically to avoid another
+      `WINDOW_MIN_H` re-derivation so soon after G#55's. Counts only the click loop's own clicks
+      (left/right/middle via the new plain `self.click_count`), never a macro's -- a macro is a
+      separate, deterministic, user-authored sequence, not part of "this session's clicking." Resets
+      on each `start()`; frozen (not reset) in `loop()`'s own `finally` -- covering every exit path
+      (a normal `stop()`, auto-stop, or an exception alike) rather than duplicating the freeze logic
+      in each -- so the last session's totals stay visible until the next `start()`. Repaints via
+      `_refresh_session_stats()`, piggybacked on `_drain_ui()`'s own already-recurring 40ms tick
+      rather than a second timer with its own start/stop/rebuild lifecycle to get right. Added
+      `SessionStats` (`tests/test_ui.py`): count/timer across start/stop/rebuild, plus the
+      count-resets-per-session behavior via two equal-length runs rather than asserting `== 0`
+      immediately after `start()` (that specific assertion is racy -- the worker thread's own first
+      tick can click before the next line on the main thread runs, since a freshly started button's
+      due time is `0.0`). 513 tests green locally (507 + 6 new), full suite, `SessionStats` run 3x
+      for stability.
 - Lesson (not a backlog item): **A flake "fix" tends to work by blinding the test — sabotage-verify every
       one.** Three cases in two days, each caught only by deliberately breaking the
       product and checking the test still failed: a settling loop added to a *test*

@@ -1061,6 +1061,94 @@ class ClickLoop(UITestCase):
                          pressed.count(("release", app.MouseButton.right)))
 
 
+class SessionStats(UITestCase):
+    """Roadmap "Later": a visible click counter and session timer, in the
+    header (self.session_stats_label) rather than the Clicking pane, driven
+    by plain self.click_count/_session_started_at/_session_elapsed_frozen
+    counters start()/stop()/loop() maintain and _drain_ui()'s own recurring
+    tick repaints."""
+
+    def setUp(self):
+        super().setUp()
+        self.ui.mouse = FakeMouse()
+        self.ui._select("global")
+
+    def run_for(self, seconds):
+        self.pump(0.3)                      # let the snapshot catch up
+        self.ui.start()
+        self.pump(seconds)
+        self.ui.stop()
+        self.pump(0.3)
+
+    def test_no_stats_shown_before_the_first_start(self):
+        self.assertIsNone(self.ui._session_started_at)
+        self.assertEqual(self.ui.session_stats_label.cget("text"), "")
+
+    def test_click_count_increments_while_running(self):
+        self.ui.click_ms.var.set("50")
+        self.run_for(0.6)
+        self.assertGreater(self.ui.click_count, 0)
+        self.assertGreater(len(self.ui.mouse.clicks), 0)
+        # loop() counts its own clicks 1:1 -- not an approximation.
+        self.assertEqual(self.ui.click_count, len(self.ui.mouse.clicks))
+
+    def test_stats_label_shows_count_and_elapsed_while_running(self):
+        self.ui.click_ms.var.set("50")
+        self.pump(0.3)
+        self.ui.start()
+        self.pump(0.6)
+        text = self.ui.session_stats_label.cget("text")
+        self.assertRegex(text, r"^\d+ clicks · \d+:\d{2}$")
+        self.ui.stop()
+        self.pump(0.2)
+
+    def test_click_count_resets_on_each_start(self):
+        self.ui.click_ms.var.set("50")
+        self.run_for(0.6)
+        first_count = self.ui.click_count
+        self.assertGreater(first_count, 0)
+        # A second, equal-length run must not carry the first session's
+        # count forward -- if it did, the final count here would be roughly
+        # double the first session's, not comparable to it. (Asserting
+        # click_count == 0 immediately after start() would be racy: the
+        # worker thread's own first tick can click before this thread's
+        # next line runs, since a freshly started button's due time is 0.)
+        self.run_for(0.6)
+        second_count = self.ui.click_count
+        self.assertLess(second_count, first_count * 1.5,
+                        f"second session's count ({second_count}) looks like "
+                        f"it carried over the first session's ({first_count}) "
+                        "instead of resetting at start()")
+
+    def test_elapsed_time_freezes_after_stop_instead_of_still_advancing(self):
+        self.ui.click_ms.var.set("500")   # slow -- this test cares about the
+                                          # timer, not needing many clicks
+        self.pump(0.3)
+        self.ui.start()
+        self.pump(0.3)
+        self.ui.stop()
+        self.pump(0.3)                    # let loop()'s own finally land
+        frozen = self.ui._session_elapsed_frozen
+        self.assertIsNotNone(frozen)
+        self.pump(0.5)                    # idle -- nothing should advance
+        self.assertEqual(self.ui._session_elapsed_frozen, frozen,
+                         "the session timer kept advancing after stop()")
+
+    def test_stats_survive_a_rebuild(self):
+        # self.session_stats_label is rebuilt along with the rest of the
+        # header -- _refresh_session_stats() must be re-driven for the new
+        # widget, not just the one that existed when start() was called.
+        self.ui.click_ms.var.set("50")
+        self.pump(0.3)
+        self.ui.start()
+        self.pump(0.3)
+        self.ui._rebuild_ui()
+        self.pump(0.1)
+        self.assertRegex(self.ui.session_stats_label.cget("text"), r"^\d+ clicks · \d+:\d{2}$")
+        self.ui.stop()
+        self.pump(0.2)
+
+
 class NumericClamping(UITestCase):
     """`_num` is the only thing standing between a typo and the click loop."""
 
