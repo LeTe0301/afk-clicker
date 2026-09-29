@@ -452,15 +452,29 @@ Housekeeping:
       raw DPI-absolute `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]` range; the shipped round-4 fix is
       DPI-relative (`self._dpi_s * [AUTO_SCALE_MIN, AUTO_SCALE_MAX]`). Code/tests correct, spec
       text stale. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/51
-- [ ] G#52 — github: true — sync pending: GitHub — Follow-up from PR #89's round-4 independent
+- [x] **Done 2026-09-29, PR #92.** G#52 — github: true — Follow-up from PR #89's round-4 independent
       review (G#38): `UIScaleAuto.test_the_settle_timer_resets_on_each_new_event_not_just_the_first`
       (tests/test_ui.py:4243-4267) uses a brittle fixed-duration `pump()` chain instead of
-      `pump_until`; recurred as a macOS flake across rounds 3-4. Rewrite using `pump_until`.
+      `pump_until`; recurred as a macOS flake across rounds 3-4 -- and again on PR #92's own
+      first three CI runs, reproducing identically on main's last run before that branch existed.
+      Rewritten to record timestamps and wait via a single generous `pump_until()` (10x the
+      settle window) instead of two narrow fixed-duration `pump()` checkpoints, then check the
+      one property that actually distinguishes "reset" from "coalesced into the first event's
+      deadline": how long after the SECOND event the rebuild landed. Sabotage-verified (reverted
+      the reset to a coalesce-only no-op, confirmed the rewritten test fails with a clear
+      message); `UIScaleAuto` run 5x locally with no flakes.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/52
 - [ ] G#53 — github: true — sync pending: GitHub — Found during PR #89 round 3 (G#38):
       `pynput.mouse.Controller()` never closes its Xlib connection, so a large local test run can
       hit Xvfb's max-clients ceiling. Pre-existing, out of scope for G#38. Find/use pynput's own
-      connection-close path. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/53
+      connection-close path. **Mitigated, not closed, 2026-09-28 (PR #92):** the ceiling was
+      actually hit for real on CI (`Xlib.error.DisplayConnectionError: ... Maximum number of
+      clients reached`, run 36489585846, ubuntu-latest) once the Macros tab added a SECOND
+      Xlib connection per test (`kb.Controller()`, alongside the existing `mouse.Controller()`).
+      `.github/workflows/ci.yml`'s `xvfb-run` now passes `-maxclients 2048`, which unblocks CI,
+      but that raises the ceiling rather than fixing the leak this ticket is actually about --
+      the connection-close path is still worth finding.
+      https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/53
 - [ ] G#46 / GH#85 — github: true — **Delete merged remote branches** (Leo, 2026-09-13). As of
       2026-09-15, 15 branches on `github` are fully merged, listed on the ticket. Keep
       `feature/ac-12/…`/`feature/ac-13/…`; they are unmerged and tracked on G#12/G#13
