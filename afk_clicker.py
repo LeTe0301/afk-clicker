@@ -220,7 +220,7 @@ else:
 
 SIDEBAR_W = 208
 CONTENT_W = 452
-WINDOW_MIN_H = 620   # the window's hard height floor, and (see
+WINDOW_MIN_H = 740   # the window's hard height floor, and (see
     # _apply_minsize()) today's default launch height too -- they are
     # deliberately the same number, unlike minw/default_w after story
     # #24 feature 3 (docs/spec.md's "Why height doesn't get the width
@@ -695,6 +695,13 @@ class HotkeyWatcher:
 MACRO_MAX_STEPS = 200        # a runaway/corrupt macro must not be unbounded
 MACRO_MAX_WAIT_MS = 60_000   # one wait step, generous but bounded
 MACRO_BUTTONS = ("left", "right", "middle")
+# GH#98: a macro's own optional auto-repeat interval, in addition to its
+# hotkey trigger. Floored, not left unbounded like autostop_min's "0 means
+# never" -- unlike autostop_min this arms a real repeating timer the moment
+# it's set, so a 1ms/0ms value would hammer _run_macro() (itself guarded
+# against overlapping runs, but not against being asked to start a run
+# every single event-loop tick).
+MACRO_MIN_INTERVAL_MS = 200
 
 
 def _validate_key_record(entry):
@@ -780,7 +787,15 @@ def _validate_macro(blob):
         if step is None:
             return None
         steps.append(step)
-    return {"id": macro_id, "name": name, "hotkey": hotkey_json, "steps": steps}
+    interval_ms = blob.get("interval_ms")
+    if interval_ms is not None:
+        if isinstance(interval_ms, bool) or not isinstance(interval_ms, (int, float)):
+            return None
+        if interval_ms < MACRO_MIN_INTERVAL_MS:
+            return None
+        interval_ms = int(interval_ms)
+    return {"id": macro_id, "name": name, "hotkey": hotkey_json, "steps": steps,
+            "interval_ms": interval_ms}
 
 
 def _describe_step(step):
@@ -1553,14 +1568,9 @@ def config_path():
     return os.path.join(base, "afk-farm-clicker", "settings.json")
 
 
-SETTINGS_VERSION = 1   # G#46/GH#15's prerequisite (docs/ROADMAP.md "Settings
-                        # schema version"): every settings.json written from
-                        # here on carries this number, so a future format
-                        # change has something to compare against instead of
-                        # guessing an old file's shape from which keys happen
-                        # to be present. A file with no "version" key at all
-                        # (every one written before this change) is version 0;
-                        # _SETTINGS_MIGRATIONS below carries it forward.
+SETTINGS_VERSION = 2   # G#55/GH#97 bumped this from 1: a single "button"
+                        # choice became independent left/right configs. See
+                        # _migrate_settings_v1_to_v2.
 
 def _migrate_settings_v0_to_v1(data):
     """The one rewrite Store.__init__ already did unconditionally, promoted
@@ -1582,13 +1592,53 @@ def _migrate_settings_v0_to_v1(data):
     return data
 
 
+def _migrate_settings_v1_to_v2(data):
+    """G#55/GH#97: "button" was a single exclusive choice among
+    left/right/middle, sharing one click_ms/jitter_ms pair. Left and right
+    are now independently enabled, each with their own interval/jitter,
+    concurrently -- middle stays a separate, mutually exclusive mode (Leo's
+    own 2026-09-29 scoping call), reusing click_ms/jitter_ms exactly as it
+    already did, so a middle-button profile needs no data migrated at all,
+    only its mode flag set. A right-button profile's old click_ms/jitter_ms
+    WERE right's own values, so those move to the new right_click_ms/
+    right_jitter_ms keys -- click_ms/jitter_ms (now meaning left's) reset to
+    the ordinary defaults, since there is no prior left-specific value to
+    carry forward. Runs on the raw loaded dict, same reasoning as
+    _migrate_settings_v0_to_v1 above."""
+    games = data.get("games")
+    if isinstance(games, dict):
+        for game in games.values():
+            if not isinstance(game, dict) or "button" not in game:
+                continue
+            button = game.pop("button")
+            if button == "right":
+                game["click_mode"] = "buttons"
+                game["left_enabled"] = False
+                game["right_enabled"] = True
+                game["right_click_ms"] = game.get("click_ms", DEFAULT_CLICK_MS)
+                game["right_jitter_ms"] = game.get("jitter_ms", 0)
+                game["click_ms"] = DEFAULT_CLICK_MS
+                game["jitter_ms"] = 0
+            elif button == "middle":
+                game["click_mode"] = "middle"
+                game["left_enabled"] = True
+                game["right_enabled"] = False
+                # click_ms/jitter_ms already ARE middle's values -- untouched.
+            else:   # "left", or anything unrecognized -- the old default
+                game["click_mode"] = "buttons"
+                game["left_enabled"] = True
+                game["right_enabled"] = False
+                # click_ms/jitter_ms already ARE left's values -- untouched.
+    return data
+
+
 # Keyed by the version a file is coming FROM; _run_settings_migrations()
 # below applies them in order until the data reaches SETTINGS_VERSION. Only
 # one step exists today because only one versioned format change has ever
 # happened -- a future one adds its own function and one more entry here,
 # never rewrites an existing step (each step must keep migrating an old file
 # exactly the way it always did, even after a later version exists).
-_SETTINGS_MIGRATIONS = {0: _migrate_settings_v0_to_v1}
+_SETTINGS_MIGRATIONS = {0: _migrate_settings_v0_to_v1, 1: _migrate_settings_v1_to_v2}
 
 
 def _run_settings_migrations(data):
@@ -1710,6 +1760,10 @@ class Store:
         self.data["games"][game_id] = values
         return self.save()
 
+    def delete_game(self, game_id):
+        self.data["games"].pop(game_id, None)
+        return self.save()
+
 
 # ── game profiles ─────────────────────────────────────────────────────────
 # A profile is what the program should look like for one game. Only Minecraft
@@ -1727,8 +1781,9 @@ PROFILES = [
         "eating": True,
         "note": "650 ms: Java sword full charge is 600 ms (12 ticks), +1 tick margin.",
         "defaults": {"click_ms": 650, "jitter_ms": 0, "autostop_min": 0,
-                     "button": "left", "eat_mode": "pause",
-                     "eat_every": 75, "eat_hold": 2.0},
+                     "click_mode": "buttons", "left_enabled": True, "right_enabled": False,
+                     "right_click_ms": DEFAULT_CLICK_MS, "right_jitter_ms": 0,
+                     "eat_mode": "pause", "eat_every": 75, "eat_hold": 2.0},
         "min_sweep_ms": DEFAULT_CLICK_MS,   # G#22: the only profile whose
                                              # numbers this hint applies to
     },
@@ -1739,8 +1794,9 @@ PROFILES = [
         "eating": False,
         "note": "Applies when nothing more specific is selected.",
         "defaults": {"click_ms": 250, "jitter_ms": 0, "autostop_min": 0,
-                     "button": "left", "eat_mode": "off",
-                     "eat_every": 75, "eat_hold": 2.0},
+                     "click_mode": "buttons", "left_enabled": True, "right_enabled": False,
+                     "right_click_ms": DEFAULT_CLICK_MS, "right_jitter_ms": 0,
+                     "eat_mode": "off", "eat_every": 75, "eat_hold": 2.0},
         "min_sweep_ms": None,
     },
 ]
@@ -2400,7 +2456,7 @@ class GameItem(tk.Canvas):
     same fill rules are correct whichever pair those ids point at."""
 
     def __init__(self, parent, profile, on_click, s, collapsed=False,
-                 width=None, height=38):
+                 width=None, height=38, on_delete=None):
         if width is None:
             width = SIDEBAR_RAIL_W - 16 if collapsed else SIDEBAR_W - 16
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, cursor="hand2",
@@ -2429,6 +2485,22 @@ class GameItem(tk.Canvas):
                                         fill=LINE, outline="")
             self.text = self.create_text(30 * s, h / 2, anchor="w", text=profile["name"],
                                          fill=MUTED, font=("Segoe UI", fs(9.5, s)))
+        # GH#96: only a custom profile (added via "Add current game") can be
+        # deleted -- the built-in profiles have no delete affordance at all,
+        # not even a disabled one, matching how this row never draws one in
+        # collapsed mode either (no room next to the icon-only badge; expand
+        # the rail to delete a game).
+        self.delete_glyph = None
+        if on_delete is not None and profile.get("custom") and not collapsed:
+            self.delete_glyph = self.create_text(
+                w - 12 * s, h / 2, anchor="e", text="✕",
+                fill=MUTED, font=("Segoe UI", fs(9.5, s)))
+            self.tag_bind(self.delete_glyph, "<Enter>",
+                          lambda e: self.itemconfig(self.delete_glyph, fill=BAD))
+            self.tag_bind(self.delete_glyph, "<Leave>",
+                          lambda e: self.itemconfig(self.delete_glyph, fill=MUTED))
+            self.tag_bind(self.delete_glyph, "<Button-1>",
+                          lambda e: (on_delete(self.profile["id"]), "break")[1])
         self.bind("<Enter>", lambda e: self._paint(hover=True))
         self.bind("<Leave>", lambda e: self._paint())
         self.bind("<Button-1>", lambda e: self.on_click(self.profile["id"]))
@@ -2718,6 +2790,13 @@ class AfkAutoclicker:
         self._macro_runners = {}           # macro id -> (MacroRunner, Thread)
                                             # currently running or last run --
                                             # see _run_macro().
+        self._macro_interval_after_ids = {}   # GH#98: macro id -> the
+                                            # armed self.root.after() job for
+                                            # its own auto-repeat interval,
+                                            # for the CURRENTLY selected game
+                                            # only -- same rebuild-on-switch
+                                            # lifecycle as
+                                            # _macro_hotkey_watchers above.
         self._macro_capture_thread = None  # the one background thread
                                             # capturing a single key for the
                                             # macro editor dialog's step
@@ -3022,7 +3101,7 @@ class AfkAutoclicker:
         percentage steps already do -- doubling both axes, 4x the area,
         yields 2x the factor, not 4x), calibrated against
         AUTO_REFERENCE_FILL so a typical desktop lands at parity with
-        today's "100%" step (docs/spec.md §2). `width`/`height` are real
+        today's "100%" step (docs/history/ac-38-spec.md §2). `width`/`height` are real
         window pixel dimensions, which already carry self._dpi_s baked in
         (the window's own geometry is always sized off self.s, which is
         itself self._dpi_s * something) -- so the raw fill/AUTO_REFERENCE_FILL
@@ -3052,8 +3131,8 @@ class AfkAutoclicker:
         return min(hi, max(lo, factor))
 
     def _request_auto_settle(self):
-        """Auto mode's drag-settle debounce (docs/spec.md "The debounce
-        decision") -- deliberately NOT _request_rebuild()'s after_idle
+        """Auto mode's drag-settle debounce (docs/history/ac-38-spec.md "The
+        debounce decision") -- deliberately NOT _request_rebuild()'s after_idle
         coalescing: after_idle fires the next time Tk's event loop is idle,
         which during a live OS-level drag is typically between every single
         native resize callback, not after the drag as a whole settles. This
@@ -3555,10 +3634,35 @@ class AfkAutoclicker:
         self.jitter_ms = NumBox(self.jitter_row.control, 0, "±ms", s); self.jitter_ms.pack()
         r = Row(cl, "Auto-stop", s, hint="0 means never"); r.pack(fill="x", pady=(int(6 * s), 0))
         self.autostop_min = NumBox(r.control, 0, "min", s); self.autostop_min.pack()
-        r = Row(cl, "Mouse button", s); r.pack(fill="x", pady=(int(8 * s), 0))
-        self.button_name = tk.StringVar(value="left")
-        Segmented(r.control, [("left", "Left"), ("right", "Right"), ("middle", "Mid")],
-                  self.button_name, s, width=180).pack()
+
+        # G#55/GH#97: left and right used to be one exclusive "Mouse button"
+        # choice sharing the Interval/jitter above; they're now independently
+        # enabled and can click concurrently, each on its own interval/jitter.
+        # Middle stays the old, single, mutually-exclusive mode (Leo's own
+        # 2026-09-29 scoping call) -- reusing Interval/jitter above exactly as
+        # it always did, so this row only ever needs two options, not three.
+        r = Row(cl, "Click mode", s, hint="Middle uses Interval/jitter above")
+        r.pack(fill="x", pady=(int(8 * s), 0))
+        self.click_mode = tk.StringVar(value="buttons")
+        Segmented(r.control, [("buttons", "Independent"), ("middle", "Middle")],
+                  self.click_mode, s, width=180).pack()
+
+        r = Row(cl, "Left click", s,
+               hint="uses Interval/jitter above"); r.pack(fill="x", pady=(int(8 * s), 0))
+        self.left_enabled = tk.BooleanVar(value=True)
+        left_toggle = ToggleCheckbox(r.control, self.left_enabled, s)
+        left_toggle.pack(side="left")
+
+        r = Row(cl, "Right click", s); r.pack(fill="x", pady=(int(8 * s), 0))
+        self.right_enabled = tk.BooleanVar(value=False)
+        right_toggle = ToggleCheckbox(r.control, self.right_enabled, s)
+        right_toggle.pack(side="left")
+
+        r = Row(cl, "Right interval", s); r.pack(fill="x", pady=(int(6 * s), 0))
+        self.right_click_ms = NumBox(r.control, DEFAULT_CLICK_MS, "ms", s)
+        self.right_click_ms.pack()
+        r = Row(cl, "Right jitter", s); r.pack(fill="x", pady=(int(6 * s), 0))
+        self.right_jitter_ms = NumBox(r.control, 0, "±ms", s); self.right_jitter_ms.pack()
 
         # "Eating" is kept -- it is a sub-section within Clicking, not a
         # tab (docs/design.md), still Minecraft-only and conditionally
@@ -3607,8 +3711,9 @@ class AfkAutoclicker:
 
         # Any edit belongs to the selected game, so persist as it happens.
         for var in (self.click_ms.var, self.jitter_ms.var, self.autostop_min.var,
-                    self.button_name, self.eat_mode, self.eat_every.var,
-                    self.eat_hold.var):
+                    self.click_mode, self.left_enabled, self.right_enabled,
+                    self.right_click_ms.var, self.right_jitter_ms.var,
+                    self.eat_mode, self.eat_every.var, self.eat_hold.var):
             var.trace_add("write", lambda *_a: self._persist())
 
         self._set_content_tab(self._content_tab)   # hide the inactive pane last
@@ -3662,11 +3767,10 @@ class AfkAutoclicker:
         row = Row(ap, "Theme", s)
         row.pack(fill="x")
         self.appearance_var = tk.StringVar(value=self.store.data["appearance"])
-        # 3-option Segmented inside a Row's control area -- same width as the
-        # other 3-option control in this file (button_name, "Mouse button"
-        # above): ROW_LABEL_W + ROW_LABEL_GAP + 180 = 152 + 180 = 332, well
-        # inside CARD_INNER_W (396) since Row's fixed label column now sits
-        # ahead of it, not a variable-width label sharing the row.
+        # 3-option Segmented inside a Row's control area, explicit width=180:
+        # ROW_LABEL_W + ROW_LABEL_GAP + 180 = 152 + 180 = 332, well inside
+        # CARD_INNER_W (396) since Row's fixed label column sits ahead of it,
+        # not a variable-width label sharing the row.
         Segmented(row.control, [("system", "System"), ("light", "Light"), ("dark", "Dark")],
                   self.appearance_var, s, width=180).pack()
 
@@ -4058,7 +4162,7 @@ class AfkAutoclicker:
         self.items = {}
         for profile in self.profiles:
             item = GameItem(self.list_frame, profile, self._select, self.s,
-                            collapsed=self._rail_collapsed)
+                            collapsed=self._rail_collapsed, on_delete=self._delete_game)
             item.pack(fill="x", pady=int(1 * self.s))
             self.items[profile["id"]] = item
         self.count_label.config(text=f"GAMES   {len(self.profiles)}")
@@ -4082,7 +4186,11 @@ class AfkAutoclicker:
         self.click_ms.var.set(fmt_num(values["click_ms"]))
         self.jitter_ms.var.set(fmt_num(values["jitter_ms"]))
         self.autostop_min.var.set(fmt_num(values["autostop_min"]))
-        self.button_name.set(values["button"])
+        self.click_mode.set(values["click_mode"])
+        self.left_enabled.set(values["left_enabled"])
+        self.right_enabled.set(values["right_enabled"])
+        self.right_click_ms.var.set(fmt_num(values["right_click_ms"]))
+        self.right_jitter_ms.var.set(fmt_num(values["right_jitter_ms"]))
         self.eat_every.var.set(fmt_num(values["eat_every"]))
         self.eat_hold.var.set(fmt_num(values["eat_hold"]))
         self.eat_mode.set(values["eat_mode"] if profile["eating"] else "off")
@@ -4124,6 +4232,7 @@ class AfkAutoclicker:
         # like the clicker fields refilled above.
         self._refresh_macros_pane()
         self._arm_macro_hotkeys()
+        self._arm_macro_intervals()
         if self._content_tab == "macros":
             self._request_pane_fill("macros")
 
@@ -4226,7 +4335,11 @@ class AfkAutoclicker:
             "click_ms": self._num(self.click_ms, profile["defaults"]["click_ms"], 50),
             "jitter_ms": self._num(self.jitter_ms, 0, 0),
             "autostop_min": self._num(self.autostop_min, 0, 0),
-            "button": self.button_name.get(),
+            "click_mode": self.click_mode.get(),
+            "left_enabled": bool(self.left_enabled.get()),
+            "right_enabled": bool(self.right_enabled.get()),
+            "right_click_ms": self._num(self.right_click_ms, DEFAULT_CLICK_MS, 50),
+            "right_jitter_ms": self._num(self.right_jitter_ms, 0, 0),
             "eat_mode": self.eat_mode.get(),
             "eat_every": self._num(self.eat_every, DEFAULT_EAT_EVERY_S, 5),
             "eat_hold": self._num(self.eat_hold, DEFAULT_EAT_HOLD_S, 0.5),
@@ -4257,6 +4370,33 @@ class AfkAutoclicker:
         self.by_id[game_id] = profile
         self._rebuild_list()
         self._select(game_id)
+
+    def _delete_game(self, game_id):
+        """GH#96: remove a custom game profile -- its GameItem's own delete
+        glyph is the only caller, and that glyph never draws for a
+        built-in profile (see GameItem.__init__), so this only ever
+        double-checks a precondition its one caller already guarantees
+        rather than trusting it blindly."""
+        profile = self.by_id.get(game_id)
+        if profile is None or not profile.get("custom"):
+            return
+        self.profiles = [p for p in self.profiles if p["id"] != game_id]
+        del self.by_id[game_id]
+        self.store.delete_game(game_id)
+        self._rebuild_list()
+        # _rebuild_list() just replaced every GameItem with a fresh, all-
+        # unselected one (same shape as _add_game()'s own rebuild-then-
+        # select pair above) -- a _select() call is required either way to
+        # repaint whichever row is still current, not just when the
+        # deletion actually changes it.
+        if self.current == game_id:
+            # The deleted profile can't stay selected -- fall back to the
+            # same built-in default a missing/unknown "selected" value
+            # already falls back to at startup (__init__, just above
+            # self.profiles/self.by_id).
+            self._select("global")
+        else:
+            self._select(self.current, persist=False)
 
     # ---------- updates ----------
 
@@ -4900,7 +5040,11 @@ class AfkAutoclicker:
                 "click_ms": self._num(self.click_ms, DEFAULT_CLICK_MS, 50),
                 "jitter_ms": self._num(self.jitter_ms, 0, 0),
                 "autostop_min": self._num(self.autostop_min, 0, 0),
-                "button": self.button_name.get(),
+                "click_mode": self.click_mode.get(),
+                "left_enabled": bool(self.left_enabled.get()),
+                "right_enabled": bool(self.right_enabled.get()),
+                "right_click_ms": self._num(self.right_click_ms, DEFAULT_CLICK_MS, 50),
+                "right_jitter_ms": self._num(self.right_jitter_ms, 0, 0),
                 "eat_mode": self.eat_mode.get(),
                 "eat_every": self._num(self.eat_every, DEFAULT_EAT_EVERY_S, 5),
                 "eat_hold": self._num(self.eat_hold, DEFAULT_EAT_HOLD_S, 0.5),
@@ -5019,6 +5163,41 @@ class AfkAutoclicker:
             watcher.stop()
         self._macro_hotkey_watchers = []
 
+    def _arm_macro_intervals(self):
+        """GH#98: (re)arms one self.root.after() timer per macro of the
+        CURRENTLY SELECTED game that has an interval_ms set -- same
+        rebuild-on-switch lifecycle and call sites as _arm_macro_hotkeys()
+        (macros are per-game), and deliberately independent of it: a macro
+        can have a hotkey, an interval, both, or neither."""
+        self._disarm_macro_intervals()
+        for macro in self.store.game(self.current).get("macros", []):
+            if macro.get("interval_ms"):
+                self._schedule_macro_interval(self.current, macro["id"], macro["interval_ms"])
+
+    def _schedule_macro_interval(self, game_id, macro_id, interval_ms):
+        def tick():
+            self._macro_interval_after_ids.pop(macro_id, None)
+            # Re-read fresh: the game may have been switched away from, or
+            # this macro edited/deleted, since this tick was scheduled --
+            # never trust the closure's own captured snapshot for either.
+            if game_id != self.current:
+                return
+            macro = next((m for m in self.store.game(game_id).get("macros", [])
+                         if m["id"] == macro_id), None)
+            if macro is None or not macro.get("interval_ms"):
+                return
+            self._run_macro(macro)   # already refuses an overlapping run
+            self._schedule_macro_interval(game_id, macro_id, macro["interval_ms"])
+        self._macro_interval_after_ids[macro_id] = self.root.after(interval_ms, tick)
+
+    def _disarm_macro_intervals(self):
+        for after_id in self._macro_interval_after_ids.values():
+            try:
+                self.root.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self._macro_interval_after_ids = {}
+
     def _run_macro(self, macro):
         """Fired from a macro's own HotkeyWatcher, on ITS listener thread,
         not the main thread -- MacroRunner only ever touches self.mouse/
@@ -5065,6 +5244,9 @@ class AfkAutoclicker:
             tk.Label(row, text=hotkey.label() if hotkey else "No hotkey",
                     bg=CARD, fg=(INK if hotkey else MUTED),
                     font=("Consolas", fs(9, s))).pack(side="right", padx=(0, int(12 * s)))
+            if macro.get("interval_ms"):
+                tk.Label(row, text=f"every {macro['interval_ms']} ms", bg=CARD, fg=MUTED,
+                        font=("Segoe UI", fs(9, s))).pack(side="right", padx=(0, int(12 * s)))
             tk.Label(row, text=macro["name"], bg=CARD, fg=INK, anchor="w",
                     font=("Segoe UI", fs(9.5, s))).pack(side="left", fill="x", expand=True)
 
@@ -5074,19 +5256,21 @@ class AfkAutoclicker:
         self._note_save(self.store.save())
         self._refresh_macros_pane()
         self._arm_macro_hotkeys()
+        self._arm_macro_intervals()
         if self._content_tab == "macros":
             self._request_pane_fill("macros")
 
-    def _save_macro(self, game_id, macro_id, name, hotkey, steps):
+    def _save_macro(self, game_id, macro_id, name, hotkey, steps, interval_ms=None):
         """Validates and persists one macro (new if macro_id is None, else
         replacing the macro with that id) into the given game's macro list.
-        Returns True on success, False if `name`/`steps` didn't survive
-        _validate_macro() -- same reject-not-coerce contract as everywhere
-        else a Hotkey/macro is validated, so the dialog can tell the user
-        rather than silently saving something different from what they
-        built."""
+        Returns True on success, False if `name`/`steps`/`interval_ms`
+        didn't survive _validate_macro() -- same reject-not-coerce contract
+        as everywhere else a Hotkey/macro is validated, so the dialog can
+        tell the user rather than silently saving something different from
+        what they built."""
         blob = {"id": macro_id, "name": name,
-               "hotkey": hotkey.to_json() if hotkey else None, "steps": steps}
+               "hotkey": hotkey.to_json() if hotkey else None, "steps": steps,
+               "interval_ms": interval_ms}
         validated = _validate_macro(blob)
         if validated is None:
             return False
@@ -5101,6 +5285,7 @@ class AfkAutoclicker:
         if game_id == self.current:
             self._refresh_macros_pane()
             self._arm_macro_hotkeys()
+            self._arm_macro_intervals()
             if self._content_tab == "macros":
                 self._request_pane_fill("macros")
         return True
@@ -5182,6 +5367,17 @@ class AfkAutoclicker:
               ).pack(side="left", padx=(int(10 * s), 0))
         Button(hotkey_row, "Clear", _clear_hotkey, s, width=70
               ).pack(side="left", padx=(int(6 * s), 0))
+
+        # GH#98: an optional auto-repeat interval, independent of the hotkey
+        # trigger above -- 0 means off, the same "0 means never" convention
+        # autostop_min already uses, rather than a separate checkbox.
+        interval_row = tk.Frame(body, bg=BG)
+        interval_row.pack(fill="x", pady=(int(10 * s), 0))
+        tk.Label(interval_row, text="Auto-repeat every", bg=BG, fg=INK,
+                font=("Segoe UI", fs(9.5, s))).pack(side="left")
+        initial_interval = (macro.get("interval_ms") if macro else None) or 0
+        interval_ms_box = NumBox(interval_row, initial_interval, "ms (0 = off)", s, width=6)
+        interval_ms_box.pack(side="left", padx=(int(8 * s), 0))
 
         tk.Label(body, text="Steps", bg=BG, fg=INK, anchor="w",
                 font=("Segoe UI", fs(9.5, s))).pack(fill="x", pady=(int(14 * s), 0))
@@ -5320,8 +5516,10 @@ class AfkAutoclicker:
             if not ctx["steps"]:
                 error_label.config(text="Add at least one step.")
                 return
+            interval_ms = self._num(interval_ms_box, 0, 0)
             ok = self._save_macro(game_id, macro["id"] if macro else None,
-                                  name, ctx["hotkey"], ctx["steps"])
+                                  name, ctx["hotkey"], ctx["steps"],
+                                  interval_ms if interval_ms > 0 else None)
             if not ok:
                 error_label.config(text="Could not save this macro.")
                 return
@@ -5374,9 +5572,31 @@ class AfkAutoclicker:
     CLICK_BUTTON = {"left": MouseButton.left, "right": MouseButton.right,
                     "middle": MouseButton.middle}
 
+    # G#55/GH#97: left and right now click on their own independent
+    # schedules within this one worker thread (never two real OS threads --
+    # both would touch self.mouse/self.right_held, and this codebase's own
+    # history (docs/history/ac-27-*, the "never leave a button stuck" rule
+    # throughout this method) is exactly why that surface is kept small).
+    # Each button's own next-due timestamp is checked once per tick instead
+    # of blocking for its full interval, so a short, cheap tick is what
+    # keeps two independent schedules from starving each other -- 20 ms
+    # matches _sleep()'s own existing interruptible-sleep granularity, so
+    # this changes nothing about how quickly stopping reacts.
+    CLICK_LOOP_TICK_S = 0.02
+
+    def _next_click_due(self, cfg, now, click_ms_key, jitter_ms_key):
+        interval = cfg.get(click_ms_key, DEFAULT_CLICK_MS) / 1000.0
+        jitter = cfg.get(jitter_ms_key, 0) / 1000.0
+        if jitter:
+            # Spread around the set interval, never below the 50 ms floor
+            # the field itself enforces.
+            interval = max(0.05, interval + random.uniform(-jitter, jitter))
+        return now + interval
+
     def loop(self):
         try:
             started = last_meal = time.monotonic()
+            due_left = due_right = due_middle = 0.0
             while self.running:
                 # Auto-stop is a safety net, not a feature: an autoclicker left
                 # running against an empty farm is the thing that gets an
@@ -5389,16 +5609,11 @@ class AfkAutoclicker:
                     self.running = False
                     break
                 # Re-read every pass, like the numeric fields already are:
-                # picking the mode up once meant switching the control did
-                # nothing until you toggled the clicker off and on again.
+                # picking a change up only on the next full rebuild meant
+                # switching a control did nothing until you toggled the
+                # clicker off and on again.
                 mode = cfg.get("eat_mode", "off")
-                interval = cfg.get("click_ms", DEFAULT_CLICK_MS) / 1000.0
-                jitter = cfg.get("jitter_ms", 0) / 1000.0
-                if jitter:
-                    # Spread around the set interval, never below the 50 ms
-                    # floor the field itself enforces.
-                    interval = max(0.05, interval + random.uniform(-jitter, jitter))
-                button = self.CLICK_BUTTON.get(cfg.get("button", "left"), MouseButton.left)
+                click_mode = cfg.get("click_mode", "buttons")
 
                 if mode == "hold":
                     if not self.right_held:
@@ -5409,7 +5624,29 @@ class AfkAutoclicker:
                     # button down, that keeps blocking/eating forever.
                     self._release_right()
 
-                if mode == "pause" and button is MouseButton.left:
+                now = time.monotonic()
+
+                if click_mode == "middle":
+                    # The one mutually-exclusive legacy mode (Leo's own
+                    # 2026-09-29 scoping call): left/right's own enabled
+                    # flags are ignored entirely while this is active, and
+                    # middle reuses click_ms/jitter_ms exactly as the single
+                    # old "button" choice already did.
+                    if now >= due_middle:
+                        self.mouse.click(MouseButton.middle)
+                        due_middle = self._next_click_due(cfg, now, "click_ms", "jitter_ms")
+                    if not self._sleep(self.CLICK_LOOP_TICK_S):
+                        break
+                    continue
+
+                left_enabled = cfg.get("left_enabled", True)
+                right_enabled = cfg.get("right_enabled", False)
+
+                # Eating-pause only ever applied to the left button (the one
+                # farming click), unchanged: pausing a right loop the user
+                # independently enabled would be a second, unrelated button
+                # eating has no claim over.
+                if mode == "pause" and left_enabled:
                     every = cfg.get("eat_every", DEFAULT_EAT_EVERY_S)
                     if time.monotonic() - last_meal >= every:
                         self._ui(self._set_status, "EATING", ACCENT, "clicks paused")
@@ -5423,9 +5660,19 @@ class AfkAutoclicker:
                             break
                         self._ui(self._set_status, "RUNNING", OK,
                  self.registered_hotkey.label() if self.registered_hotkey else "")
+                        now = time.monotonic()
 
-                self.mouse.click(button)
-                if not self._sleep(interval):
+                if left_enabled and now >= due_left:
+                    self.mouse.click(MouseButton.left)
+                    due_left = self._next_click_due(cfg, now, "click_ms", "jitter_ms")
+                # self.right_held means Eating currently owns the right
+                # button (hold, or mid-pause-eat above) -- the right loop
+                # must not fight it for the same button.
+                if right_enabled and not self.right_held and now >= due_right:
+                    self.mouse.click(MouseButton.right)
+                    due_right = self._next_click_due(cfg, now, "right_click_ms", "right_jitter_ms")
+
+                if not self._sleep(self.CLICK_LOOP_TICK_S):
                     break
         except Exception as exc:
             # Without this the flag stays set: the window keeps saying RUNNING,
@@ -5558,6 +5805,12 @@ class AfkAutoclicker:
         # this loop does not control the timing of) can't raise "dictionary
         # changed size during iteration" here.
         self._disarm_macro_hotkeys()
+        self._disarm_macro_intervals()   # GH#98: same "before any in-flight
+                                          # run is signalled to stop" reason
+                                          # as the hotkey disarm just above --
+                                          # a still-armed interval timer could
+                                          # otherwise fire a fresh run in the
+                                          # same narrow window.
         for runner, _thread in list(self._macro_runners.values()):
             runner.stop()
         for _runner, thread in list(self._macro_runners.values()):
@@ -5572,6 +5825,22 @@ class AfkAutoclicker:
             # a stuck Xlib.display.Display() connection must not hang close.
             self._poll_thread.join(timeout=2.0)
         self._release_right()          # never leave a mouse button stuck down
+        # GH#95/G#53: pynput's Controller.__del__ closes its own Xlib
+        # connection once nothing references the Controller any more, but
+        # self.mouse/self.keyboard -- and each MacroRunner's own copy of
+        # both, stored in self._macro_runners since G#47/GH#15 -- otherwise
+        # stay referenced for as long as this whole app object does. Across
+        # a test suite sharing one process (~150+ UI-building test classes,
+        # several opening a second Xlib connection each via the Macros
+        # tab), that is long enough for unclosed connections to pile up
+        # past Xvfb's max-clients ceiling before anything ever collects the
+        # app objects holding them (mitigated, not fixed, by raising that
+        # ceiling in .github/workflows/ci.yml -- see G#53). Nothing past
+        # this point uses either Controller; dropping the references here
+        # lets each one's __del__ close its connection immediately.
+        self._macro_runners = {}
+        self.mouse = None
+        self.keyboard = None
         # G#27/ac-27 round 2 (PR #47): this used to also release bind_all()'s
         # funcid (unbind_all()+deletecommand()) and sweep every Variable's
         # traces (self._forget_traces()) here, right after cancelling the

@@ -63,7 +63,10 @@ die Ess-Einstellungen werden pro Spiel gespeichert, in
 **Add current game** legt aus dem gerade aktiven Fenster einen neuen Eintrag an.
 Damit funktioniert die Erkennung für jedes Spiel, nicht nur für die
 mitgelieferten — eingebaute Feinabstimmung gibt es nur für Minecraft, weil das
-das einzige Spiel ist, für dessen Zahlen ich geradestehen kann.
+das einzige Spiel ist, für dessen Zahlen ich geradestehen kann. Ein **✕** am
+rechten Rand des Eintrags entfernt ein so hinzugefügtes Spiel wieder,
+samt seiner Einstellungen und Macros — die mitgelieferten Profile
+(Minecraft, Global) haben dieses ✕ nicht und lassen sich nicht löschen.
 
 Der **Hotkey gilt global**, für alle Spiele derselbe.
 
@@ -74,8 +77,8 @@ Der **Hotkey gilt global**, für alle Spiele derselbe.
 | **Interval** | Abstand zwischen zwei Klicks. 650 ms deckt Javas volle Sword-Sweep-Aufladung ab (12 Ticks / 600 ms) plus einen Tick Puffer. |
 | **Random jitter** | Streut das Intervall, damit der Rhythmus nicht exakt gleichmäßig ist. Bei Minecraft weicht dieser Text einer fett hervorgehobenen Warnung, sobald Intervall minus Jitter unter 650 ms sinkt, und wechselt ab 550 ms zusätzlich auf eine auffälligere Farbe, weil dann der Java-Sword-Sweep wahrscheinlich ausbleibt. |
 | **Auto-stop** | Hält nach N Minuten von selbst an. 0 heißt nie. |
-| **Mouse button** | Links, rechts oder mittig. |
-| **Pause & eat** | Klicken aussetzen, rechte Maustaste halten bis das Essen durch ist, weitermachen. Nur bei Linksklick sinnvoll, deshalb greift es auch nur dort. |
+| **Click mode** | **Independent**: Linksklick und Rechtsklick lassen sich unabhängig voneinander an- und ausschalten, jeder mit eigenem Interval/Jitter (**Right interval**/**Right jitter**) — beide gleichzeitig aktiv ist möglich. **Middle**: der alte Einzelmodus, mittlere Maustaste, nutzt das Interval/Jitter von oben. |
+| **Pause & eat** | Klicken aussetzen, rechte Maustaste halten bis das Essen durch ist, weitermachen. Bezieht sich nur auf den Linksklick, ein zusätzlich aktivierter Rechtsklick pausiert für die Dauer mit. |
 | **Hold RMB** | Rechte Maustaste dauerhaft halten. |
 | **Eat every / Hold for** | Angreifen kostet ~1 Nahrungspunkt pro 20 s, verrottetes Fleisch gibt 4. Fleisch braucht 1,6 s — 2,0 s lässt Luft für einen verzögerten Tick. |
 
@@ -118,6 +121,10 @@ zweiter Tastendruck während das Macro noch läuft wird ignoriert, nicht
 gestapelt. Absichtlich deterministisch: kein Jitter, keine zufällige
 Reihenfolge — dieselbe Regel, die auch das Klick-Intervall nur streut, nicht
 verschleiert.
+
+**Auto-repeat every** im Editor macht ein Macro zusätzlich zeitgesteuert: mit
+einem Intervall über 0 läuft es von selbst alle N ms, unabhängig vom Hotkey —
+beides zusammen geht auch. 0 (Vorgabe) heißt aus.
 
 ## Warum ein eigener Hotkey-Abgleich
 

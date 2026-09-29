@@ -447,11 +447,20 @@ Housekeeping:
 - [x] **Done 2026-09-28, PR #92.** G#50 / GH#91 — github: true — Follow-up from PR #89's cycle review (G#38): `README.md` still
       describes UI scale as only the 4 fixed percentage steps, doesn't mention the new Auto default.
       One-sentence fix.
-- [ ] G#51 — github: true — sync pending: GitHub — Follow-up from PR #89's round-4 independent
-      review (G#38): `docs/spec.md` §2 and its AC at line 130 still describe Auto's clamp as the
-      raw DPI-absolute `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]` range; the shipped round-4 fix is
-      DPI-relative (`self._dpi_s * [AUTO_SCALE_MIN, AUTO_SCALE_MAX]`). Code/tests correct, spec
-      text stale. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/51
+- [x] **Done 2026-09-29, PR #TBD.** G#51 / GH#93 — github: true — Follow-up from PR #89's round-4
+      independent review (G#38): `docs/spec.md` §2 and its AC at line 130 still described Auto's
+      clamp as the raw DPI-absolute `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]` range; the shipped round-4
+      fix is DPI-relative (`self._dpi_s * [AUTO_SCALE_MIN, AUTO_SCALE_MAX]`). **Found while fixing
+      this: `docs/spec.md` no longer exists anywhere in git history** — the 2026-09-18 session
+      handoff above left it (plus `design.md`/`implementation.md`/`test-review.md`) sitting
+      uncommitted in that session's own working tree, to be archived "as the last step once the PR
+      merges" — a step nobody performed before that container was reclaimed. The original stale
+      text is unrecoverable. Reconstructed `docs/history/ac-38-spec.md` from the shipped code and
+      tests instead (correct DPI-relative clamp, matching what `_auto_scale_factor()`'s own
+      docstring already implemented), and repointed that docstring's and `_request_auto_settle()`'s
+      `docs/spec.md §2` / "The debounce decision" citations at the new archive path.
+      `design.md`/`implementation.md`/`test-review.md` for G#38 remain lost; only the file GH#93
+      was about got reconstructed. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/51
 - [x] **Done 2026-09-29, PR #92.** G#52 — github: true — Follow-up from PR #89's round-4 independent
       review (G#38): `UIScaleAuto.test_the_settle_timer_resets_on_each_new_event_not_just_the_first`
       (tests/test_ui.py:4243-4267) uses a brittle fixed-duration `pump()` chain instead of
@@ -464,16 +473,31 @@ Housekeeping:
       the reset to a coalesce-only no-op, confirmed the rewritten test fails with a clear
       message); `UIScaleAuto` run 5x locally with no flakes.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/52
-- [ ] G#53 — github: true — sync pending: GitHub — Found during PR #89 round 3 (G#38):
-      `pynput.mouse.Controller()` never closes its Xlib connection, so a large local test run can
-      hit Xvfb's max-clients ceiling. Pre-existing, out of scope for G#38. Find/use pynput's own
-      connection-close path. **Mitigated, not closed, 2026-09-28 (PR #92):** the ceiling was
-      actually hit for real on CI (`Xlib.error.DisplayConnectionError: ... Maximum number of
-      clients reached`, run 36489585846, ubuntu-latest) once the Macros tab added a SECOND
-      Xlib connection per test (`kb.Controller()`, alongside the existing `mouse.Controller()`).
-      `.github/workflows/ci.yml`'s `xvfb-run` now passes `-maxclients 2048`, which unblocks CI,
-      but that raises the ceiling rather than fixing the leak this ticket is actually about --
-      the connection-close path is still worth finding.
+- [x] **Done 2026-09-29, PR #TBD.** G#53 / GH#95 — github: true — Found during PR #89 round 3
+      (G#38): `pynput.mouse.Controller()` never closes its Xlib connection, so a large local test
+      run can hit Xvfb's max-clients ceiling. Pre-existing, out of scope for G#38.
+      **Mitigated, not closed, 2026-09-28 (PR #92):** the ceiling was actually hit for real on CI
+      (`Xlib.error.DisplayConnectionError: ... Maximum number of clients reached`, run 36489585846,
+      ubuntu-latest) once the Macros tab added a SECOND Xlib connection per test (`kb.Controller()`,
+      alongside the existing `mouse.Controller()`). `.github/workflows/ci.yml`'s `xvfb-run` now
+      passes `-maxclients 2048`, which unblocks CI, but that raises the ceiling rather than fixing
+      the leak.
+      **Actually closed, 2026-09-29:** pynput's own `Controller.__del__` (`pynput/mouse/_xorg.py`)
+      already closes `self._display` -- the leak was never pynput's fault, it was that
+      `self.mouse`/`self.keyboard` (and each `MacroRunner`'s own copy of both, since G#47/GH#15's
+      `self._macro_runners`) stayed referenced by `AfkAutoclicker` for as long as the app object
+      itself does, and `on_close()` never dropped them -- so with ~150+ UI-building `UITestCase`
+      instances sharing one process, none of those Controllers (and their Xlib connections) were
+      ever eligible for collection until whatever much later point something finally dropped the
+      whole app object. Fixed at the root: `on_close()` now clears `self._macro_runners` and sets
+      `self.mouse`/`self.keyboard` to `None` as its last step, once nothing after that point still
+      needs them -- letting each Controller's own `__del__` close its connection immediately
+      instead of waiting on indefinite, unrelated timing. Added `OnCloseDropsControllerReferences`
+      (`tests/test_ui.py`): `weakref`-based regression tests proving both `self.ui.mouse`/
+      `self.ui.keyboard` and a stale `_macro_runners` entry are actually collected right after
+      `on_close()`, plus a sabotage test (restores `self.mouse` after a real `on_close()` call)
+      confirming the real tests fail without the fix. 481 tests green locally
+      (478 + 3 new), full suite, matching CI's own invocation.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/53
 - [ ] G#46 / GH#85 — github: true — **Delete merged remote branches** (Leo, 2026-09-13). As of
       2026-09-15, 15 branches on `github` are fully merged, listed on the ticket. Keep
@@ -489,6 +513,81 @@ Housekeeping:
       deletion, and there is no delete-branch tool available either. **Still needs a
       human with real push access** (Settings → Branches, or `git push --delete`
       with their own credentials) to actually run the deletion.
+- [x] **Done 2026-09-29, PR #TBD.** G#54 / GH#96 — github: true — **No way to delete a custom game
+      profile** (Leo, 2026-09-29). Only `add_current_game()`/`_add_game()` existed; a custom
+      profile (`game_id = "custom:" + name.lower()`) stuck around in `self.profiles`/`self.by_id`/
+      the store permanently once added. Added a small "✕" glyph on `GameItem`'s own canvas, drawn
+      only for `profile.get("custom")` rows and only when the rail is expanded (no room next to
+      the collapsed badge) — the built-in profiles never draw one, not even disabled. Clicking it
+      (`tag_bind`, returns from the handler via `"break"` so the row's own whole-canvas
+      `<Button-1>` select binding never also fires) calls the new `_delete_game(game_id)`, which
+      removes the profile from `self.profiles`/`self.by_id`, calls the new `Store.delete_game()` to
+      drop its persisted settings/macros, rebuilds the sidebar, and falls back the selection to
+      `"global"` (the same built-in default `__init__` already falls back to for a missing/unknown
+      `"selected"` value) if the deleted profile was the one showing — or, if it wasn't, re-syncs
+      the still-current row's selected/highlighted state, since `_rebuild_list()` replaces every
+      `GameItem` with a fresh, all-unselected one either way (a real bug caught only by testing the
+      non-current-deletion path specifically). Added `DeletedGames` (`tests/test_ui.py`): removal
+      from every place listed above plus across a restart, the current-vs-non-current fallback
+      behavior (with a sabotage test for the resync case), built-ins staying undeletable, the glyph
+      only existing on custom rows, and an end-to-end synthetic-click test proving the click deletes
+      without selecting the row first. README's "Aufbau" section documents the ✕. 488 tests green
+      locally (481 + 7 new), full suite.
+      https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/54
+- [x] **Done 2026-09-29, PR #TBD.** G#55 / GH#97 — github: true — **Per-button clicking
+      configuration** (Leo, 2026-09-29): "the clicking should be individual so not just eating
+      labeled for example it should be the same configurable for LMB RMB or other mouse buttons if
+      there is anything." Scoping decisions (Leo, 2026-09-29): LMB + RMB only (not every pynput
+      button pynput exposes); both can click concurrently, not mutually exclusive; Middle click
+      stays exactly as it was -- a separate, mutually-exclusive mode using the original shared
+      Interval/jitter, picking it pauses the independent left/right loops.
+      **Schema (`SETTINGS_VERSION` bumped 1 -> 2, `_migrate_settings_v1_to_v2`):** the old single
+      `"button"` field is replaced by `click_mode` ("buttons"/"middle"), `left_enabled`/
+      `right_enabled`, and new `right_click_ms`/`right_jitter_ms` -- `click_ms`/`jitter_ms` keep
+      their exact old keys, now meaning left's own interval/jitter (or middle's, in middle mode),
+      since left/middle already carried the only real prior data an old "button" choice could mean.
+      A migrated "right" profile moves its old click_ms/jitter_ms to the new right_* keys instead of
+      losing them. **Loop (`AfkAutoclicker.loop()`):** kept to the one existing worker thread rather
+      than adding real OS threads (this codebase's own history is exactly why that surface stays
+      small) -- each enabled button now tracks its own next-due timestamp, checked on a shared 20ms
+      tick (`CLICK_LOOP_TICK_S`, matching `_sleep()`'s own existing granularity) instead of blocking
+      for one shared interval, so left and right proceed on fully independent schedules within the
+      same thread. The right loop skips a tick whenever `self.right_held` is true (Eating currently
+      owns RMB), so it never fights Eating for the button instead of needing new locking. **UI:**
+      the old 3-way "Mouse button" Segmented is now `click_mode`'s 2-way Independent/Middle choice,
+      plus new `Left click`/`Right click` `ToggleCheckbox` rows (Enable) and `Right interval`/
+      `Right jitter` `NumBox` rows -- five new rows pushed the tallest pane (Clicking+Eating,
+      Minecraft) past the existing floor, so `WINDOW_MIN_H` moved 620 -> 740 (re-derived from real
+      content the same way every prior round of this constant was, per `WindowMinimumHeight`'s own
+      tests; Windows' own taller font metrics still cannot be measured from this sandbox, same
+      caveat every prior round of this constant already carries).
+      `test_minimum_height_shrunk_from_the_pre_tab_split_floor`'s own threshold moved 690 -> 900 --
+      updated, not deleted, since 690 was never the real invariant, just G#28's own measured value
+      at the time, and this ticket's growth is deliberate, not a regression back toward the old
+      combined-page bloat that guard actually exists to catch. Added/updated tests: 4 new
+      `_migrate_settings_v1_to_v2` cases (`SettingsSchemaVersion`), rewrote `ClickLoop`'s
+      button-selection tests for the new model and added concurrent-independent-interval,
+      middle-mode-exclusivity, and eating-does-not-fight-right-click coverage. 507 tests green
+      locally (500 + 4 migration + 3 new ClickLoop), full suite, `ClickLoop`/floor tests run
+      multiple times for timing stability.
+      https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/55
+- [x] **Done 2026-09-29, PR #TBD.** G#56 / GH#98 — github: true — **Configurable interval for
+      recognized/tracked macros** (Leo, 2026-09-29): "recognizable macros should be trackable and
+      set to an intervall." Related to G#13/GH#15's Macros tab (built, PR #92) but a distinct ask.
+      Scoping decision (Leo, 2026-09-29): rides inside the existing Macros tab as an optional field
+      on each macro, not a separate follow-on. Added `interval_ms` to the macro schema (validated by
+      `_validate_macro()`, floored at the new `MACRO_MIN_INTERVAL_MS = 200` when set, `None`/0 means
+      off -- the same convention `autostop_min` already uses), an "Auto-repeat every" `NumBox` in the
+      macro editor, and a self-rescheduling `self.root.after()` timer per macro with a nonzero
+      interval (`_arm_macro_intervals()`/`_schedule_macro_interval()`/`_disarm_macro_intervals()`),
+      arming/disarming through the exact same per-game lifecycle as `_macro_hotkey_watchers`
+      (`_select()`, `_save_macro()`, `_delete_macro()`, `on_close()`) -- a macro can have a hotkey,
+      an interval, both, or neither, and the interval timer reuses `_run_macro()` unchanged, so an
+      overlapping run is refused exactly like a hotkey retrigger. Added `MacroIntervals`
+      (`tests/test_ui.py`): arm/fire/disarm across every lifecycle point, plus 4 new
+      `_validate_macro()` cases for the new field. 499 tests green locally (488 + 4 validation + 7
+      lifecycle), full suite, run twice for timer-flake stability.
+      https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/56
 - Lesson (not a backlog item): **A flake "fix" tends to work by blinding the test — sabotage-verify every
       one.** Three cases in two days, each caught only by deliberately breaking the
       product and checking the test still failed: a settling loop added to a *test*

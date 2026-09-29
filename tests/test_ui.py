@@ -327,6 +327,115 @@ class AddedGames(UITestCase):
         self.assertEqual(self.ui.game_state.cget("text"), "no window found")
 
 
+class DeletedGames(UITestCase):
+    """GH#96: deleting a custom game profile -- from self.profiles/by_id,
+    from the sidebar, and from the persisted store, with the built-in
+    profiles left undeletable."""
+
+    def test_deleting_a_custom_game_removes_it_from_everywhere(self):
+        self.ui._add_game("Some Other Game")
+        self.pump(0.2)
+        self.ui._delete_game("custom:some other game")
+        self.assertNotIn("custom:some other game", self.ui.items)
+        self.assertNotIn("custom:some other game", self.ui.by_id)
+        self.assertNotIn("custom:some other game",
+                         [p["id"] for p in self.ui.profiles])
+        self.assertNotIn("custom:some other game", self.ui.store.data["games"])
+        ui = self.restart()
+        self.assertNotIn("custom:some other game", ui.items)
+
+    def test_deleting_the_current_game_falls_back_to_global(self):
+        self.ui._add_game("Some Other Game")   # _add_game() selects it
+        self.assertEqual(self.ui.current, "custom:some other game")
+        self.ui._delete_game("custom:some other game")
+        self.assertEqual(self.ui.current, "global")
+        self.assertTrue(self.ui.items["global"].selected)
+
+    def test_deleting_a_non_current_game_keeps_the_current_selection(self):
+        self.ui._add_game("First Extra")
+        self.ui._add_game("Second Extra")   # now current
+        self.ui._select("minecraft")
+        self.ui._delete_game("custom:second extra")
+        self.assertEqual(self.ui.current, "minecraft")
+        self.assertTrue(self.ui.items["minecraft"].selected,
+                        "deleting an unrelated game left the still-current "
+                        "row unselected after the sidebar rebuild")
+
+    def test_removing_the_non_current_resync_fails_this_test(self):
+        # Sabotage-verifies the test above: _rebuild_list() replaces every
+        # GameItem with a fresh, all-unselected one, so _delete_game() must
+        # resync the still-current row's selected state even when the
+        # deletion itself didn't touch self.current -- reproduce the
+        # version that skips that resync (only handles self.current ==
+        # game_id) and confirm THAT one leaves the row unselected.
+        def sabotaged_delete_game(self, game_id):
+            profile = self.by_id.get(game_id)
+            if profile is None or not profile.get("custom"):
+                return
+            self.profiles = [p for p in self.profiles if p["id"] != game_id]
+            del self.by_id[game_id]
+            self.store.delete_game(game_id)
+            self._rebuild_list()
+            if self.current == game_id:
+                self._select("global")
+            # else: no resync -- the pre-fix shape.
+
+        self.ui._add_game("First Extra")
+        self.ui._add_game("Second Extra")
+        self.ui._select("minecraft")
+        original = app.AfkAutoclicker._delete_game
+        app.AfkAutoclicker._delete_game = sabotaged_delete_game
+        try:
+            self.ui._delete_game("custom:second extra")
+        finally:
+            app.AfkAutoclicker._delete_game = original
+        self.assertFalse(
+            self.ui.items["minecraft"].selected,
+            "sabotaged _delete_game() (no resync on the non-current path) "
+            "unexpectedly left the row selected anyway -- this test's "
+            "sabotage did not reproduce the pre-fix bug, so it cannot "
+            "prove the real test above is meaningful")
+
+    def test_built_in_profiles_cannot_be_deleted(self):
+        self.ui._delete_game("global")
+        self.ui._delete_game("minecraft")
+        self.assertIn("global", self.ui.items)
+        self.assertIn("minecraft", self.ui.items)
+        self.assertEqual({p["id"] for p in self.ui.profiles}, {"global", "minecraft"})
+
+    def test_only_custom_profiles_get_a_delete_glyph(self):
+        # GameItem never draws the glyph while the rail is collapsed (no
+        # room next to the icon-only badge) -- force expanded, the same way
+        # WindowResize's own Windows-CI-captured comment does, since a real
+        # window manager's own early <Configure> echo (never sent under
+        # Xvfb) can flip self._rail_collapsed before this test ever gets to
+        # run, independent of anything this test itself does.
+        self.ui._rail_collapsed = False
+        self.assertIsNone(self.ui.items["global"].delete_glyph)
+        self.assertIsNone(self.ui.items["minecraft"].delete_glyph)
+        self.ui._add_game("Some Other Game")
+        self.assertIsNotNone(self.ui.items["custom:some other game"].delete_glyph)
+
+    def test_clicking_the_delete_glyph_deletes_without_selecting_first(self):
+        self.ui._rail_collapsed = False   # see the sibling test's own comment
+        self.ui._add_game("Some Other Game")
+        self.ui._select("global")
+        item = self.ui.items["custom:some other game"]
+        # Needed before reading bbox(): _add_game()'s _rebuild_list() just
+        # packed a fresh GameItem, and without an intervening update() its
+        # canvas items' on-screen coordinates aren't guaranteed settled yet
+        # -- observed directly as an intermittent wrong-coordinate click
+        # below without this.
+        self.root.update()
+        x1, y1, x2, y2 = item.bbox(item.delete_glyph)
+        item.event_generate("<Button-1>", x=(x1 + x2) // 2, y=(y1 + y2) // 2)
+        self.root.update()
+        self.assertNotIn("custom:some other game", self.ui.items)
+        self.assertEqual(self.ui.current, "global",
+                         "the delete glyph's click also selected the row it "
+                         "deleted, instead of only deleting it")
+
+
 class PollGamesScanDoesNotHoldSelfWhileBlocked(unittest.TestCase):
     def test_scan_only_holds_profiles_not_self_during_detect_running(self):
         # _poll_games()'s scan() thread used to close over self directly.
@@ -624,6 +733,65 @@ class SettingsSchemaVersion(UITestCase):
         self.assertEqual(store.data["version"], app.SETTINGS_VERSION + 1)
         self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 510)
 
+    def test_v1_left_button_migrates_to_independent_buttons_mode(self):
+        # G#55/GH#97: "left" was already the implicit default everywhere --
+        # click_ms/jitter_ms already ARE left's values, so they carry over
+        # untouched.
+        self._write({"version": 1, "games": {"minecraft": {
+            "click_ms": 444, "jitter_ms": 10, "button": "left"}}})
+        store = app.Store(self.config)
+        game = store.data["games"]["minecraft"]
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+        self.assertEqual(game["click_mode"], "buttons")
+        self.assertTrue(game["left_enabled"])
+        self.assertFalse(game["right_enabled"])
+        self.assertEqual(game["click_ms"], 444)
+        self.assertEqual(game["jitter_ms"], 10)
+        self.assertNotIn("button", game)
+
+    def test_v1_right_button_migrates_its_old_values_to_the_new_right_keys(self):
+        # The old click_ms/jitter_ms WERE right's values under the single-
+        # button model -- they move to right_click_ms/right_jitter_ms, and
+        # click_ms/jitter_ms (now meaning left's) reset to plain defaults
+        # since there is no prior left-specific value to carry forward.
+        self._write({"version": 1, "games": {"minecraft": {
+            "click_ms": 444, "jitter_ms": 10, "button": "right"}}})
+        store = app.Store(self.config)
+        game = store.data["games"]["minecraft"]
+        self.assertEqual(game["click_mode"], "buttons")
+        self.assertFalse(game["left_enabled"])
+        self.assertTrue(game["right_enabled"])
+        self.assertEqual(game["right_click_ms"], 444)
+        self.assertEqual(game["right_jitter_ms"], 10)
+        self.assertEqual(game["click_ms"], app.DEFAULT_CLICK_MS)
+        self.assertEqual(game["jitter_ms"], 0)
+        self.assertNotIn("button", game)
+
+    def test_v1_middle_button_migrates_to_middle_mode_with_no_data_change(self):
+        # Middle stays a separate, mutually exclusive mode that already
+        # reused click_ms/jitter_ms exactly as before -- only the mode flag
+        # is new, nothing about the stored numbers needs to move.
+        self._write({"version": 1, "games": {"minecraft": {
+            "click_ms": 444, "jitter_ms": 10, "button": "middle"}}})
+        store = app.Store(self.config)
+        game = store.data["games"]["minecraft"]
+        self.assertEqual(game["click_mode"], "middle")
+        self.assertEqual(game["click_ms"], 444)
+        self.assertEqual(game["jitter_ms"], 10)
+        self.assertNotIn("button", game)
+
+    def test_v1_game_with_no_button_key_is_left_to_the_defensive_defaults(self):
+        # Older than "button" ever existed -- _migrate_settings_v1_to_v2()
+        # skips it outright rather than guessing, the same "only touch the
+        # shape a migration actually recognises" contract v0->v1 documents;
+        # _select()'s own defaults-then-override merge fills click_mode/
+        # left_enabled/etc. in from PROFILES, same as any other absent key.
+        self._write({"version": 1, "games": {"minecraft": {"click_ms": 444}}})
+        store = app.Store(self.config)
+        game = store.data["games"]["minecraft"]
+        self.assertNotIn("click_mode", game)
+        self.assertEqual(game["click_ms"], 444)
+
 
 class StoreMacroFiltering(UITestCase):
     """G#47/GH#15: a per-game "macros" list is filtered through
@@ -687,14 +855,100 @@ class ClickLoop(UITestCase):
 
     def test_each_mouse_button(self):
         self.ui.click_ms.var.set("100")
-        for name in ("left", "right", "middle"):
+        self.ui.right_click_ms.var.set("100")
+        # left (the default: click_mode="buttons", left_enabled=True,
+        # right_enabled=False), right (left disabled, right enabled), and
+        # middle (click_mode="middle", reusing click_ms) -- the three
+        # mutually-distinguishable single-button configurations GH#97's new
+        # model still supports, even though left/right can also both run
+        # at once now (covered separately below).
+        configs = {
+            "left": lambda: (self.ui.click_mode.set("buttons"),
+                             self.ui.left_enabled.set(True),
+                             self.ui.right_enabled.set(False)),
+            "right": lambda: (self.ui.click_mode.set("buttons"),
+                              self.ui.left_enabled.set(False),
+                              self.ui.right_enabled.set(True)),
+            "middle": lambda: self.ui.click_mode.set("middle"),
+        }
+        for name, configure in configs.items():
             with self.subTest(button=name):
-                self.ui.button_name.set(name)
+                configure()
                 clicks = self.run_for(0.6)
                 self.assertTrue(clicks)
                 # The enum is imported as MouseButton but is still named
                 # Button, so compare the member rather than its repr.
                 self.assertIs(clicks[0][0], getattr(app.MouseButton, name))
+
+    def test_left_and_right_click_concurrently_when_both_enabled(self):
+        self.ui.click_ms.var.set("100")
+        self.ui.right_click_ms.var.set("150")
+        self.ui.right_enabled.set(True)   # left stays enabled (the default)
+        clicks = self.run_for(0.9)
+        self.assertIn(app.MouseButton.left, [b for b, _t in clicks])
+        self.assertIn(app.MouseButton.right, [b for b, _t in clicks])
+
+    def test_left_and_right_run_on_their_own_independent_intervals(self):
+        # Not just "both eventually click" -- each button's own interval is
+        # honoured independently, so a 2x-slower right produces roughly half
+        # as many right clicks as left in the same window.
+        self.ui.click_ms.var.set("100")
+        self.ui.right_click_ms.var.set("200")
+        self.ui.right_enabled.set(True)
+        clicks = self.run_for(1.2)
+        left_count = sum(1 for b, _t in clicks if b is app.MouseButton.left)
+        right_count = sum(1 for b, _t in clicks if b is app.MouseButton.right)
+        self.assertGreater(left_count, 0)
+        self.assertGreater(right_count, 0)
+        ratio = left_count / right_count
+        self.assertGreater(ratio, 1.3,
+                           f"left/right click ratio {ratio:.2f} -- right's "
+                           "own slower interval was not honoured independently")
+
+    def test_middle_mode_ignores_left_and_right_enabled_flags(self):
+        # Middle is mutually exclusive by construction: left_enabled/
+        # right_enabled stay whatever they were, but the loop must not act
+        # on them while click_mode is "middle".
+        self.ui.click_ms.var.set("100")
+        self.ui.right_click_ms.var.set("100")
+        self.ui.left_enabled.set(True)
+        self.ui.right_enabled.set(True)
+        self.ui.click_mode.set("middle")
+        clicks = self.run_for(0.6)
+        buttons = {b for b, _t in clicks}
+        self.assertEqual(buttons, {app.MouseButton.middle})
+
+    def test_right_click_does_not_fight_eating_for_the_right_button(self):
+        # GH#97's own real conflict case: Eating already dedicates RMB on
+        # Minecraft. With the right loop also enabled, it must never click
+        # RMB while an eat-pause currently holds it down -- only in the
+        # windows between pauses. Short eat_every/eat_hold and a fast
+        # right_click_ms so several pause cycles, and several right-click
+        # attempts, both happen inside this one short run.
+        self.ui._select("minecraft")
+        self.ui.eat_mode.set("pause")
+        self.ui.eat_every.var.set("0.3")
+        self.ui.eat_hold.var.set("0.2")
+        self.ui.click_ms.var.set("500")   # slow left, so pause-eating is
+                                           # what actually drives right_held
+                                           # here, not left's own clicking
+        self.ui.right_enabled.set(True)
+        self.ui.right_click_ms.var.set("30")
+
+        held_during_click = []
+        original_click = self.ui.mouse.click
+        def spy_click(button):
+            if button is app.MouseButton.right:
+                held_during_click.append(self.ui.right_held)
+            original_click(button)
+        self.ui.mouse.click = spy_click
+
+        self.run_for(1.5)
+        self.assertTrue(held_during_click,
+                        "the right loop never got a chance to click in this run")
+        self.assertFalse(any(held_during_click),
+                         "a right click happened while an eat-pause was holding "
+                         "the right button")
 
     def _gaps(self, seconds):
         clicks = self.run_for(seconds)
@@ -734,7 +988,6 @@ class ClickLoop(UITestCase):
 
     @darwin_timing
     def test_interval_is_honoured(self):
-        self.ui.button_name.set("left")
         self.ui.click_ms.var.set("200")
         self.ui.jitter_ms.var.set("0")
         gaps = sorted(self._gaps(1.6))
@@ -754,7 +1007,6 @@ class ClickLoop(UITestCase):
         # so an absolute steadiness bound measures the runner, not the code.
         # What must hold is that jitter spreads the interval noticeably more
         # than the machine's own noise does.
-        self.ui.button_name.set("left")
         self.ui.click_ms.var.set("200")
         self.ui.jitter_ms.var.set("0")
         steady = max(g := self._gaps(1.6)) - min(g)
@@ -790,8 +1042,9 @@ class ClickLoop(UITestCase):
         self.ui.eat_mode.set("pause")
         self.ui.eat_every.var.set("5")
         self.ui.eat_hold.var.set("0.5")
-        self.ui.click_ms.var.set("100")
-        self.ui.button_name.set("right")
+        self.ui.left_enabled.set(False)
+        self.ui.right_enabled.set(True)
+        self.ui.right_click_ms.var.set("100")
         self.run_for(6.0)
         self.assertFalse(self.ui.mouse.pressed)
 
@@ -801,7 +1054,6 @@ class ClickLoop(UITestCase):
         self.ui.eat_every.var.set("5")
         self.ui.eat_hold.var.set("0.5")
         self.ui.click_ms.var.set("100")
-        self.ui.button_name.set("left")
         self.run_for(7.0)
         pressed = self.ui.mouse.pressed
         self.assertTrue(any(p[0] == "press" for p in pressed))
@@ -1151,14 +1403,14 @@ class NumBoxFocus(UITestCase):
         self.assertIsNotNone(self.root.focus_get())
 
     def test_a_segmented_control_still_changes_its_variable(self):
-        seg = self._find_segmented_for(self.ui.button_name)
+        seg = self._find_segmented_for(self.ui.click_mode)
         self.focus_and_settle(self.ui.click_ms)
-        self.ui.button_name.set("left")
-        # Third segment ("middle") of three, spanning seg.w wide.
+        self.ui.click_mode.set("buttons")
+        # Second segment ("middle") of two, spanning seg.w wide.
         seg.event_generate("<Button-1>", x=seg.w - 2, y=int(seg.h / 2))
         self.root.update()
         self.assertNotEqual(self.root.focus_get(), self.ui.click_ms.entry)
-        self.assertEqual(self.ui.button_name.get(), "middle")
+        self.assertEqual(self.ui.click_mode.get(), "middle")
 
     def test_a_game_item_still_selects(self):
         self.focus_and_settle(self.ui.click_ms)
@@ -1334,7 +1586,17 @@ class WindowMinimumHeight(UITestCase):
         return sum(c.winfo_reqheight() + cls._pady_total(c) for c in kids)
 
     def test_minimum_height_shrunk_from_the_pre_tab_split_floor(self):
-        self.assertLess(app.WINDOW_MIN_H, 690)
+        # G#55/GH#97 update: this guard's own original point was "don't let
+        # the floor drift back up toward the old, wasteful pre-tab-split
+        # value" -- 690 itself was never the invariant, just this ticket's
+        # own measured value at the time. Independent left/right clicking
+        # config legitimately grew the tallest pane's real content past that
+        # specific number (see test_tallest_pane_still_fits_at_the_floor,
+        # which is what actually re-derives the floor from real content) --
+        # 900 keeps this guarding against an unrelated, accidental jump back
+        # toward pre-split-page territory, not against this feature's own
+        # deliberate growth.
+        self.assertLess(app.WINDOW_MIN_H, 900)
 
     def test_default_launch_height_equals_the_floor(self):
         # Unlike minw/default_w (story #24 feature 3, which deliberately
@@ -2452,7 +2714,7 @@ class TabBarNavigation(UITestCase):
                         "click_ms should already hold this game's value, "
                         "even while its pane is hidden")
         self.assertTrue(hasattr(self.ui, "jitter_ms"))
-        self.assertTrue(hasattr(self.ui, "button_name"))
+        self.assertTrue(hasattr(self.ui, "click_mode"))
 
     def test_appearance_is_the_default_active_settings_tab(self):
         self.ui._show_settings()
@@ -6214,7 +6476,6 @@ class QueuedStatusSurvivesARebuild(UITestCase):
     def test_a_queued_eating_update_lands_on_the_post_rebuild_pill(self):
         self.ui.mouse = FakeMouse()
         self.ui._select("global")
-        self.ui.button_name.set("left")
         self.ui.eat_mode.set("pause")
         self.ui.eat_every.var.set("5")     # the field's own enforced minimum
         self.ui.eat_hold.var.set("5")
@@ -6947,6 +7208,27 @@ class MacroValidation(unittest.TestCase):
     def test_an_unknown_step_type_is_rejected(self):
         self.assertIsNone(app._validate_macro_step({"type": "teleport"}))
 
+    def test_no_interval_is_accepted_and_stays_none(self):
+        m = app._validate_macro(self._valid_blob())
+        self.assertIsNone(m["interval_ms"])
+
+    def test_a_valid_interval_is_accepted_and_coerced_to_int(self):
+        m = app._validate_macro(self._valid_blob(
+            interval_ms=app.MACRO_MIN_INTERVAL_MS + 0.0))
+        self.assertEqual(m["interval_ms"], app.MACRO_MIN_INTERVAL_MS)
+        self.assertIsInstance(m["interval_ms"], int)
+
+    def test_an_interval_below_the_floor_is_rejected(self):
+        self.assertIsNone(app._validate_macro(
+            self._valid_blob(interval_ms=app.MACRO_MIN_INTERVAL_MS - 1)))
+        self.assertIsNone(app._validate_macro(self._valid_blob(interval_ms=0)))
+        self.assertIsNone(app._validate_macro(self._valid_blob(interval_ms=-1)))
+
+    def test_a_non_numeric_interval_is_rejected(self):
+        self.assertIsNone(app._validate_macro(self._valid_blob(interval_ms="fast")))
+        # bool is an int subclass -- same guard as wait_ms's own bool check.
+        self.assertIsNone(app._validate_macro(self._valid_blob(interval_ms=True)))
+
 
 class FakeKeyboard:
     """Records what MacroRunner asked for instead of sending real key
@@ -7071,6 +7353,81 @@ class MacroRunnerReleasesHeldKeys(unittest.TestCase):
                              "cannot prove the real test above is meaningful")
         finally:
             app.MacroRunner.run = original_run
+
+
+class OnCloseDropsControllerReferences(UITestCase):
+    """GH#95/G#53: every UITestCase's AfkAutoclicker opens its own
+    pynput.mouse.Controller() and kb.Controller(), each holding a real Xlib
+    connection under Xvfb (Controller.__del__ closes it, but only once
+    nothing references the Controller any more). Before this fix,
+    self.mouse/self.keyboard survived on_close() as ordinary app attributes
+    -- and the app object itself stays referenced by the running test case
+    well past on_close(), so tearDown's own gc.collect() (context.py's
+    G#27/GH#46 mechanism) never reached them -- and a MacroRunner's own
+    stored copy of both, kept in self._macro_runners since G#47/GH#15,
+    survived independently of the app's attributes entirely. Across a full
+    suite run (~150+ UI-building test classes) that is enough unclosed
+    connections to tip over Xvfb's max-clients ceiling (G#53)."""
+
+    def test_on_close_drops_mouse_and_keyboard_so_they_are_collected(self):
+        mouse_ref = weakref.ref(self.ui.mouse)
+        keyboard_ref = weakref.ref(self.ui.keyboard)
+        self.ui.on_close()
+        gc.collect()
+        self.assertIsNone(
+            mouse_ref(), "on_close() left something referencing the mouse Controller")
+        self.assertIsNone(
+            keyboard_ref(), "on_close() left something referencing the keyboard Controller")
+
+    def test_a_stale_macro_runner_does_not_survive_on_close_either(self):
+        # A MacroRunner stores its own copy of mouse/keyboard
+        # (afk_clicker.py's MacroRunner.__init__), independent of
+        # self.ui.mouse/self.ui.keyboard -- reproduce the shape a finished
+        # real macro run leaves in self._macro_runners (on_close() joins
+        # the thread but never pops the dict entry) without needing a real
+        # hotkey/listener.
+        runner = app.MacroRunner([], self.ui.mouse, self.ui.keyboard, self.ui.CLICK_BUTTON)
+        runner_ref = weakref.ref(runner)
+        thread = threading.Thread(target=lambda: None)
+        thread.start()
+        thread.join()
+        self.ui._macro_runners["fake"] = (runner, thread)
+        del runner
+        self.ui.on_close()
+        gc.collect()
+        self.assertIsNone(
+            runner_ref(),
+            "a stale _macro_runners entry outlived on_close() and kept its "
+            "own mouse/keyboard Controller copies alive with it")
+
+    def test_removing_the_cleanup_fails_the_first_test(self):
+        # Sabotage-verifies the test above actually exercises the fix, not
+        # a Controller that happened to already be unreferenced some other
+        # way: reproduces the exact pre-fix shape (on_close() never clears
+        # self.mouse/self.keyboard) and asserts THAT leaves the weakref
+        # alive.
+        mouse_ref = weakref.ref(self.ui.mouse)
+        original_on_close = app.AfkAutoclicker.on_close
+
+        def sabotaged_on_close(self):
+            mouse = self.mouse
+            keyboard = self.keyboard
+            original_on_close(self)
+            self.mouse = mouse
+            self.keyboard = keyboard
+
+        app.AfkAutoclicker.on_close = sabotaged_on_close
+        try:
+            self.ui.on_close()
+        finally:
+            app.AfkAutoclicker.on_close = original_on_close
+        gc.collect()
+        self.assertIsNotNone(
+            mouse_ref(),
+            "sabotaged on_close() (restores self.mouse afterwards) "
+            "unexpectedly let the Controller be collected anyway -- this "
+            "test's sabotage did not reproduce the pre-fix bug, so it "
+            "cannot prove the real test above is meaningful")
 
 
 class MacrosTab(UITestCase):
@@ -7206,6 +7563,76 @@ class MacrosTab(UITestCase):
         self.ui.on_close()   # must not raise or hang
         self.assertFalse(thread.is_alive())
 
+
+class MacroIntervals(UITestCase):
+    """GH#98: a macro's optional auto-repeat interval_ms -- arming/disarming
+    the self.root.after() timer through the same per-game lifecycle as
+    _macro_hotkey_watchers (_select(), _save_macro(), _delete_macro(),
+    on_close()), independent of whether the macro also has a hotkey. No
+    needs_input_permission anywhere here -- these macros have no hotkey, so
+    nothing here starts a real pynput Listener()."""
+
+    def _interval_macro(self, name="Interval macro", interval_ms=app.MACRO_MIN_INTERVAL_MS):
+        return {"name": name, "hotkey": None,
+                "steps": [{"type": "wait", "ms": 1}], "interval_ms": interval_ms}
+
+    def test_saving_a_macro_with_an_interval_arms_a_timer(self):
+        self.ui._select("minecraft")
+        m = self._interval_macro()
+        ok = self.ui._save_macro("minecraft", None, m["name"], None, m["steps"],
+                                 m["interval_ms"])
+        self.assertTrue(ok)
+        macro_id = self.ui.store.game("minecraft")["macros"][0]["id"]
+        self.assertIn(macro_id, self.ui._macro_interval_after_ids)
+
+    def test_a_macro_with_no_interval_arms_nothing(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "No interval", None,
+                            [{"type": "wait", "ms": 1}])
+        self.assertEqual(self.ui._macro_interval_after_ids, {})
+
+    def test_the_timer_actually_fires_the_macro(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "Fires", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        calls = []
+        original = self.ui._run_macro
+        self.ui._run_macro = lambda m: (calls.append(m), original(m))[1]
+        self.pump_until(lambda: calls, timeout=app.MACRO_MIN_INTERVAL_MS / 1000 + 2.0)
+        self.assertTrue(calls, "the armed interval timer never fired the macro")
+
+    def test_switching_games_disarms_the_previous_games_interval(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "MC interval", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        self.assertEqual(len(self.ui._macro_interval_after_ids), 1)
+        self.ui._select("global")
+        self.assertEqual(self.ui._macro_interval_after_ids, {},
+                         "global must not inherit minecraft's armed interval timer")
+
+    def test_deleting_the_macro_disarms_its_interval(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "To delete", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        macro = self.ui.store.game("minecraft")["macros"][0]
+        self.ui._delete_macro(macro)
+        self.assertEqual(self.ui._macro_interval_after_ids, {})
+
+    def test_editing_out_the_interval_disarms_it(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "Original", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        macro_id = self.ui.store.game("minecraft")["macros"][0]["id"]
+        self.ui._save_macro("minecraft", macro_id, "Edited", None,
+                            [{"type": "wait", "ms": 1}], None)
+        self.assertEqual(self.ui._macro_interval_after_ids, {})
+
+    def test_on_close_disarms_pending_interval_timers(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "Closing", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        self.ui.on_close()   # must not raise or hang
+        self.assertEqual(self.ui._macro_interval_after_ids, {})
 
 def tearDownModule():
     # See GcAutomaticCollectionStaysDisabled above (G#31/GH#54). Checked
