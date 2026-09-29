@@ -64,7 +64,13 @@ Until both are settled, the version stays in `0.x`.
 ## Later
 
 - [ ] Per-game hotkeys, once one global hotkey proves too coarse.
-- [ ] A visible click counter and session timer.
+- [x] **A visible click counter and session timer.** Shown in the header
+      (`self.session_stats_label`), not the Clicking pane, so it costs no
+      extra pane height. Counts only the click loop's own clicks (left/
+      right/middle), not a macro's -- a macro is a separate, deterministic,
+      user-authored sequence. Resets on each `start()`; frozen, not reset,
+      at `stop()` so the last session's totals stay visible until the next
+      `start()`.
 - [ ] Import/export of a game profile, for sharing a known-good configuration.
 - [ ] Linux Wayland: not solvable in-process. Would need a portal-based
       global-shortcut integration, and only on compositors that implement it.

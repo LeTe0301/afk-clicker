@@ -51,6 +51,11 @@ NVIDIA-App. Ein grüner Punkt heißt: läuft gerade. Taucht ein Spiel zum ersten
 Mal auf, springt die Auswahl einmal dorthin; danach bleibt deine Wahl stehen,
 statt sich alle fünf Sekunden selbst zu überschreiben.
 
+Neben der Statusanzeige oben zeigt **Klicks · Zeit** die Klicks und die
+Laufzeit der aktuellen Sitzung — zählt nur den Autoclicker selbst, nicht
+Macros. Setzt sich bei jedem Start zurück; bleibt nach dem Stopp stehen, statt
+zu verschwinden, bis der nächste Start läuft.
+
 **Jedes Spiel hat eigene Werte.** Intervall, Jitter, Auto-Stopp, Maustaste und
 die Ess-Einstellungen werden pro Spiel gespeichert, in
 
