@@ -4432,16 +4432,38 @@ class UIScaleAuto(UITestCase):
         # inside the first event's own settle window must push the deadline
         # out again, not just get folded into the first one.
         #
-        # G#51/GH#92 (macOS-only flake): rewritten from two fixed-wall-clock
-        # pump()+assertEqual(0) checkpoints -- each needing real time to
-        # land inside a narrow margin before the next boundary -- to a
-        # single timestamp comparison after a generous pump_until() wait.
-        # The original failed on macOS CI ("AssertionError: 1 != 0",
-        # reproduced identically on main before this branch existed) when a
-        # slow root.update() call inside pump() overshot a checkpoint's own
+        # G#51/GH#92 (macOS-only flake, two separate causes):
+        #
+        # 1. Rewritten from two fixed-wall-clock pump()+assertEqual(0)
+        # checkpoints -- each needing real time to land inside a narrow
+        # margin before the next boundary -- to a single timestamp
+        # comparison after a generous pump_until() wait. The original
+        # failed on macOS CI ("AssertionError: 1 != 0", reproduced
+        # identically on main before this branch existed) when a slow
+        # root.update() call inside pump() overshot a checkpoint's own
         # margin, firing the timer before the test's next fixed-duration
         # check ran -- a timing artifact of the test's own two-narrow-
         # windows shape, not the debounce behaviour it exists to verify.
+        #
+        # 2. The two target factors below (1.05, 1.15) were raw, unlike
+        # every sibling test in this class (test_s_strictly_increases_...,
+        # test_minsize_tracks_..., etc.), which all multiply by
+        # self.ui._dpi_s before calling _wh_for_factor() -- see Round 4's
+        # own comment on those: _auto_scale_factor()'s clamp range is
+        # DPI-*relative* ([self._dpi_s * AUTO_SCALE_MIN, self._dpi_s *
+        # AUTO_SCALE_MAX]), the exact fix for the G#38 round-4 DPI-
+        # absolute-vs-relative clamp bug this project already hit once on
+        # macOS CI. A real macOS runner's own tk scaling can put _dpi_s
+        # well above 1.0 (unlike this Xvfb suite's own ~1.0), and once
+        # dpi_s*0.9 alone exceeds 1.15, BOTH raw factors clamp to the same
+        # floor -- self.s never actually changes on the second event, so
+        # _request_auto_settle() is never called a second time, and the
+        # rebuild fires once, ~settle_s after the FIRST event alone,
+        # exactly matching both the original and this test's own rewritten
+        # failure (a value just under 1x settle_s, not the ~1.3x a real
+        # reset produces). Scaled by self.ui._dpi_s now, matching every
+        # sibling test, so both factors land at the same relative position
+        # inside the clamp window regardless of the runner's real DPI.
         calls = []
         original = self.ui._rebuild_ui
         def spy():
@@ -4449,7 +4471,7 @@ class UIScaleAuto(UITestCase):
             original()
         self.ui._rebuild_ui = spy
         settle_s = app.AUTO_SETTLE_MS / 1000
-        w1, h1 = self._wh_for_factor(1.05)
+        w1, h1 = self._wh_for_factor(self.ui._dpi_s * 1.05)
         self.root.event_generate("<Configure>", width=w1, height=h1)
         self.root.update()
         t1 = time.monotonic()
@@ -4458,7 +4480,7 @@ class UIScaleAuto(UITestCase):
         # boundary, so no amount of realistic scheduling jitter reaches it.
         self.pump(settle_s * 0.3)
         self.assertEqual(len(calls), 0)
-        w2, h2 = self._wh_for_factor(1.15)
+        w2, h2 = self._wh_for_factor(self.ui._dpi_s * 1.15)
         self.root.event_generate("<Configure>", width=w2, height=h2)
         self.root.update()
         self.pump_until(lambda: calls, timeout=settle_s * 10)
