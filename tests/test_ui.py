@@ -404,12 +404,20 @@ class DeletedGames(UITestCase):
         self.assertEqual({p["id"] for p in self.ui.profiles}, {"global", "minecraft"})
 
     def test_only_custom_profiles_get_a_delete_glyph(self):
+        # GameItem never draws the glyph while the rail is collapsed (no
+        # room next to the icon-only badge) -- force expanded, the same way
+        # WindowResize's own Windows-CI-captured comment does, since a real
+        # window manager's own early <Configure> echo (never sent under
+        # Xvfb) can flip self._rail_collapsed before this test ever gets to
+        # run, independent of anything this test itself does.
+        self.ui._rail_collapsed = False
         self.assertIsNone(self.ui.items["global"].delete_glyph)
         self.assertIsNone(self.ui.items["minecraft"].delete_glyph)
         self.ui._add_game("Some Other Game")
         self.assertIsNotNone(self.ui.items["custom:some other game"].delete_glyph)
 
     def test_clicking_the_delete_glyph_deletes_without_selecting_first(self):
+        self.ui._rail_collapsed = False   # see the sibling test's own comment
         self.ui._add_game("Some Other Game")
         self.ui._select("global")
         item = self.ui.items["custom:some other game"]
