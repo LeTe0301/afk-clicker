@@ -513,6 +513,47 @@ Housekeeping:
       deletion, and there is no delete-branch tool available either. **Still needs a
       human with real push access** (Settings → Branches, or `git push --delete`
       with their own credentials) to actually run the deletion.
+- [x] **Done 2026-09-29, PR #TBD.** G#54 / GH#96 — github: true — **No way to delete a custom game
+      profile** (Leo, 2026-09-29). Only `add_current_game()`/`_add_game()` existed; a custom
+      profile (`game_id = "custom:" + name.lower()`) stuck around in `self.profiles`/`self.by_id`/
+      the store permanently once added. Added a small "✕" glyph on `GameItem`'s own canvas, drawn
+      only for `profile.get("custom")` rows and only when the rail is expanded (no room next to
+      the collapsed badge) — the built-in profiles never draw one, not even disabled. Clicking it
+      (`tag_bind`, returns from the handler via `"break"` so the row's own whole-canvas
+      `<Button-1>` select binding never also fires) calls the new `_delete_game(game_id)`, which
+      removes the profile from `self.profiles`/`self.by_id`, calls the new `Store.delete_game()` to
+      drop its persisted settings/macros, rebuilds the sidebar, and falls back the selection to
+      `"global"` (the same built-in default `__init__` already falls back to for a missing/unknown
+      `"selected"` value) if the deleted profile was the one showing — or, if it wasn't, re-syncs
+      the still-current row's selected/highlighted state, since `_rebuild_list()` replaces every
+      `GameItem` with a fresh, all-unselected one either way (a real bug caught only by testing the
+      non-current-deletion path specifically). Added `DeletedGames` (`tests/test_ui.py`): removal
+      from every place listed above plus across a restart, the current-vs-non-current fallback
+      behavior (with a sabotage test for the resync case), built-ins staying undeletable, the glyph
+      only existing on custom rows, and an end-to-end synthetic-click test proving the click deletes
+      without selecting the row first. README's "Aufbau" section documents the ✕. 488 tests green
+      locally (481 + 7 new), full suite.
+      https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/54
+- [ ] G#55 — github: true — sync pending: GitHub — **Per-button clicking configuration** (Leo,
+      2026-09-29): "the clicking should be individual so not just eating labeled for example it
+      should be the same configurable for LMB RMB or other mouse buttons if there is anything."
+      Today's Clicking pane has exactly one active interval/jitter configuration, shared by
+      whichever single button (`profile["button"]`) is currently selected; `CLICK_BUTTON` only maps
+      left/right/middle. Real product-design questions the ticket itself raises and this session
+      is not resolving unilaterally: which additional buttons pynput actually exposes
+      cross-platform (some, e.g. side/X1/X2, are platform-limited), whether multiple buttons can
+      click concurrently or stay mutually exclusive while each remembers its own settings, and how
+      this interacts with Eating (which already dedicates RMB on Minecraft profiles). Needs
+      product-manager/ux-designer scoping before building.
+      https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/55
+- [ ] G#56 — github: true — sync pending: GitHub — **Configurable interval for recognized/tracked
+      macros** (Leo, 2026-09-29): "recognizable macros should be trackable and set to an
+      intervall." Related to G#13/GH#15's Macros tab (now built, PR #92) but a distinct ask: macros
+      the app recognizes/detects should be listed/tracked somewhere in the UI with their own
+      configurable run interval (Clicking's own Interval row shape), rather than fire-and-forget on
+      a hotkey. Open scoping question the ticket itself defers: whether this rides inside the
+      existing Macros tab as a feature or ships as its own follow-on. Needs product-manager scoping.
+      https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/56
 - Lesson (not a backlog item): **A flake "fix" tends to work by blinding the test — sabotage-verify every
       one.** Three cases in two days, each caught only by deliberately breaking the
       product and checking the test still failed: a settling loop added to a *test*

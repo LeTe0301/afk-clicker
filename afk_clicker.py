@@ -1710,6 +1710,10 @@ class Store:
         self.data["games"][game_id] = values
         return self.save()
 
+    def delete_game(self, game_id):
+        self.data["games"].pop(game_id, None)
+        return self.save()
+
 
 # ── game profiles ─────────────────────────────────────────────────────────
 # A profile is what the program should look like for one game. Only Minecraft
@@ -2400,7 +2404,7 @@ class GameItem(tk.Canvas):
     same fill rules are correct whichever pair those ids point at."""
 
     def __init__(self, parent, profile, on_click, s, collapsed=False,
-                 width=None, height=38):
+                 width=None, height=38, on_delete=None):
         if width is None:
             width = SIDEBAR_RAIL_W - 16 if collapsed else SIDEBAR_W - 16
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, cursor="hand2",
@@ -2429,6 +2433,22 @@ class GameItem(tk.Canvas):
                                         fill=LINE, outline="")
             self.text = self.create_text(30 * s, h / 2, anchor="w", text=profile["name"],
                                          fill=MUTED, font=("Segoe UI", fs(9.5, s)))
+        # GH#96: only a custom profile (added via "Add current game") can be
+        # deleted -- the built-in profiles have no delete affordance at all,
+        # not even a disabled one, matching how this row never draws one in
+        # collapsed mode either (no room next to the icon-only badge; expand
+        # the rail to delete a game).
+        self.delete_glyph = None
+        if on_delete is not None and profile.get("custom") and not collapsed:
+            self.delete_glyph = self.create_text(
+                w - 12 * s, h / 2, anchor="e", text="✕",
+                fill=MUTED, font=("Segoe UI", fs(9.5, s)))
+            self.tag_bind(self.delete_glyph, "<Enter>",
+                          lambda e: self.itemconfig(self.delete_glyph, fill=BAD))
+            self.tag_bind(self.delete_glyph, "<Leave>",
+                          lambda e: self.itemconfig(self.delete_glyph, fill=MUTED))
+            self.tag_bind(self.delete_glyph, "<Button-1>",
+                          lambda e: (on_delete(self.profile["id"]), "break")[1])
         self.bind("<Enter>", lambda e: self._paint(hover=True))
         self.bind("<Leave>", lambda e: self._paint())
         self.bind("<Button-1>", lambda e: self.on_click(self.profile["id"]))
@@ -4058,7 +4078,7 @@ class AfkAutoclicker:
         self.items = {}
         for profile in self.profiles:
             item = GameItem(self.list_frame, profile, self._select, self.s,
-                            collapsed=self._rail_collapsed)
+                            collapsed=self._rail_collapsed, on_delete=self._delete_game)
             item.pack(fill="x", pady=int(1 * self.s))
             self.items[profile["id"]] = item
         self.count_label.config(text=f"GAMES   {len(self.profiles)}")
@@ -4257,6 +4277,33 @@ class AfkAutoclicker:
         self.by_id[game_id] = profile
         self._rebuild_list()
         self._select(game_id)
+
+    def _delete_game(self, game_id):
+        """GH#96: remove a custom game profile -- its GameItem's own delete
+        glyph is the only caller, and that glyph never draws for a
+        built-in profile (see GameItem.__init__), so this only ever
+        double-checks a precondition its one caller already guarantees
+        rather than trusting it blindly."""
+        profile = self.by_id.get(game_id)
+        if profile is None or not profile.get("custom"):
+            return
+        self.profiles = [p for p in self.profiles if p["id"] != game_id]
+        del self.by_id[game_id]
+        self.store.delete_game(game_id)
+        self._rebuild_list()
+        # _rebuild_list() just replaced every GameItem with a fresh, all-
+        # unselected one (same shape as _add_game()'s own rebuild-then-
+        # select pair above) -- a _select() call is required either way to
+        # repaint whichever row is still current, not just when the
+        # deletion actually changes it.
+        if self.current == game_id:
+            # The deleted profile can't stay selected -- fall back to the
+            # same built-in default a missing/unknown "selected" value
+            # already falls back to at startup (__init__, just above
+            # self.profiles/self.by_id).
+            self._select("global")
+        else:
+            self._select(self.current, persist=False)
 
     # ---------- updates ----------
 

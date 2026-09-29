@@ -63,7 +63,10 @@ die Ess-Einstellungen werden pro Spiel gespeichert, in
 **Add current game** legt aus dem gerade aktiven Fenster einen neuen Eintrag an.
 Damit funktioniert die Erkennung für jedes Spiel, nicht nur für die
 mitgelieferten — eingebaute Feinabstimmung gibt es nur für Minecraft, weil das
-das einzige Spiel ist, für dessen Zahlen ich geradestehen kann.
+das einzige Spiel ist, für dessen Zahlen ich geradestehen kann. Ein **✕** am
+rechten Rand des Eintrags entfernt ein so hinzugefügtes Spiel wieder,
+samt seiner Einstellungen und Macros — die mitgelieferten Profile
+(Minecraft, Global) haben dieses ✕ nicht und lassen sich nicht löschen.
 
 Der **Hotkey gilt global**, für alle Spiele derselbe.
 

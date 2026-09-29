@@ -327,6 +327,107 @@ class AddedGames(UITestCase):
         self.assertEqual(self.ui.game_state.cget("text"), "no window found")
 
 
+class DeletedGames(UITestCase):
+    """GH#96: deleting a custom game profile -- from self.profiles/by_id,
+    from the sidebar, and from the persisted store, with the built-in
+    profiles left undeletable."""
+
+    def test_deleting_a_custom_game_removes_it_from_everywhere(self):
+        self.ui._add_game("Some Other Game")
+        self.pump(0.2)
+        self.ui._delete_game("custom:some other game")
+        self.assertNotIn("custom:some other game", self.ui.items)
+        self.assertNotIn("custom:some other game", self.ui.by_id)
+        self.assertNotIn("custom:some other game",
+                         [p["id"] for p in self.ui.profiles])
+        self.assertNotIn("custom:some other game", self.ui.store.data["games"])
+        ui = self.restart()
+        self.assertNotIn("custom:some other game", ui.items)
+
+    def test_deleting_the_current_game_falls_back_to_global(self):
+        self.ui._add_game("Some Other Game")   # _add_game() selects it
+        self.assertEqual(self.ui.current, "custom:some other game")
+        self.ui._delete_game("custom:some other game")
+        self.assertEqual(self.ui.current, "global")
+        self.assertTrue(self.ui.items["global"].selected)
+
+    def test_deleting_a_non_current_game_keeps_the_current_selection(self):
+        self.ui._add_game("First Extra")
+        self.ui._add_game("Second Extra")   # now current
+        self.ui._select("minecraft")
+        self.ui._delete_game("custom:second extra")
+        self.assertEqual(self.ui.current, "minecraft")
+        self.assertTrue(self.ui.items["minecraft"].selected,
+                        "deleting an unrelated game left the still-current "
+                        "row unselected after the sidebar rebuild")
+
+    def test_removing_the_non_current_resync_fails_this_test(self):
+        # Sabotage-verifies the test above: _rebuild_list() replaces every
+        # GameItem with a fresh, all-unselected one, so _delete_game() must
+        # resync the still-current row's selected state even when the
+        # deletion itself didn't touch self.current -- reproduce the
+        # version that skips that resync (only handles self.current ==
+        # game_id) and confirm THAT one leaves the row unselected.
+        def sabotaged_delete_game(self, game_id):
+            profile = self.by_id.get(game_id)
+            if profile is None or not profile.get("custom"):
+                return
+            self.profiles = [p for p in self.profiles if p["id"] != game_id]
+            del self.by_id[game_id]
+            self.store.delete_game(game_id)
+            self._rebuild_list()
+            if self.current == game_id:
+                self._select("global")
+            # else: no resync -- the pre-fix shape.
+
+        self.ui._add_game("First Extra")
+        self.ui._add_game("Second Extra")
+        self.ui._select("minecraft")
+        original = app.AfkAutoclicker._delete_game
+        app.AfkAutoclicker._delete_game = sabotaged_delete_game
+        try:
+            self.ui._delete_game("custom:second extra")
+        finally:
+            app.AfkAutoclicker._delete_game = original
+        self.assertFalse(
+            self.ui.items["minecraft"].selected,
+            "sabotaged _delete_game() (no resync on the non-current path) "
+            "unexpectedly left the row selected anyway -- this test's "
+            "sabotage did not reproduce the pre-fix bug, so it cannot "
+            "prove the real test above is meaningful")
+
+    def test_built_in_profiles_cannot_be_deleted(self):
+        self.ui._delete_game("global")
+        self.ui._delete_game("minecraft")
+        self.assertIn("global", self.ui.items)
+        self.assertIn("minecraft", self.ui.items)
+        self.assertEqual({p["id"] for p in self.ui.profiles}, {"global", "minecraft"})
+
+    def test_only_custom_profiles_get_a_delete_glyph(self):
+        self.assertIsNone(self.ui.items["global"].delete_glyph)
+        self.assertIsNone(self.ui.items["minecraft"].delete_glyph)
+        self.ui._add_game("Some Other Game")
+        self.assertIsNotNone(self.ui.items["custom:some other game"].delete_glyph)
+
+    def test_clicking_the_delete_glyph_deletes_without_selecting_first(self):
+        self.ui._add_game("Some Other Game")
+        self.ui._select("global")
+        item = self.ui.items["custom:some other game"]
+        # Needed before reading bbox(): _add_game()'s _rebuild_list() just
+        # packed a fresh GameItem, and without an intervening update() its
+        # canvas items' on-screen coordinates aren't guaranteed settled yet
+        # -- observed directly as an intermittent wrong-coordinate click
+        # below without this.
+        self.root.update()
+        x1, y1, x2, y2 = item.bbox(item.delete_glyph)
+        item.event_generate("<Button-1>", x=(x1 + x2) // 2, y=(y1 + y2) // 2)
+        self.root.update()
+        self.assertNotIn("custom:some other game", self.ui.items)
+        self.assertEqual(self.ui.current, "global",
+                         "the delete glyph's click also selected the row it "
+                         "deleted, instead of only deleting it")
+
+
 class PollGamesScanDoesNotHoldSelfWhileBlocked(unittest.TestCase):
     def test_scan_only_holds_profiles_not_self_during_detect_running(self):
         # _poll_games()'s scan() thread used to close over self directly.
