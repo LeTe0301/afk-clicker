@@ -3022,7 +3022,7 @@ class AfkAutoclicker:
         percentage steps already do -- doubling both axes, 4x the area,
         yields 2x the factor, not 4x), calibrated against
         AUTO_REFERENCE_FILL so a typical desktop lands at parity with
-        today's "100%" step (docs/spec.md §2). `width`/`height` are real
+        today's "100%" step (docs/history/ac-38-spec.md §2). `width`/`height` are real
         window pixel dimensions, which already carry self._dpi_s baked in
         (the window's own geometry is always sized off self.s, which is
         itself self._dpi_s * something) -- so the raw fill/AUTO_REFERENCE_FILL
@@ -3052,8 +3052,8 @@ class AfkAutoclicker:
         return min(hi, max(lo, factor))
 
     def _request_auto_settle(self):
-        """Auto mode's drag-settle debounce (docs/spec.md "The debounce
-        decision") -- deliberately NOT _request_rebuild()'s after_idle
+        """Auto mode's drag-settle debounce (docs/history/ac-38-spec.md "The
+        debounce decision") -- deliberately NOT _request_rebuild()'s after_idle
         coalescing: after_idle fires the next time Tk's event loop is idle,
         which during a live OS-level drag is typically between every single
         native resize callback, not after the drag as a whole settles. This

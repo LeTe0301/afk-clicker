@@ -447,11 +447,20 @@ Housekeeping:
 - [x] **Done 2026-09-28, PR #92.** G#50 / GH#91 — github: true — Follow-up from PR #89's cycle review (G#38): `README.md` still
       describes UI scale as only the 4 fixed percentage steps, doesn't mention the new Auto default.
       One-sentence fix.
-- [ ] G#51 — github: true — sync pending: GitHub — Follow-up from PR #89's round-4 independent
-      review (G#38): `docs/spec.md` §2 and its AC at line 130 still describe Auto's clamp as the
-      raw DPI-absolute `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]` range; the shipped round-4 fix is
-      DPI-relative (`self._dpi_s * [AUTO_SCALE_MIN, AUTO_SCALE_MAX]`). Code/tests correct, spec
-      text stale. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/51
+- [x] **Done 2026-09-29, PR #TBD.** G#51 / GH#93 — github: true — Follow-up from PR #89's round-4
+      independent review (G#38): `docs/spec.md` §2 and its AC at line 130 still described Auto's
+      clamp as the raw DPI-absolute `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]` range; the shipped round-4
+      fix is DPI-relative (`self._dpi_s * [AUTO_SCALE_MIN, AUTO_SCALE_MAX]`). **Found while fixing
+      this: `docs/spec.md` no longer exists anywhere in git history** — the 2026-09-18 session
+      handoff above left it (plus `design.md`/`implementation.md`/`test-review.md`) sitting
+      uncommitted in that session's own working tree, to be archived "as the last step once the PR
+      merges" — a step nobody performed before that container was reclaimed. The original stale
+      text is unrecoverable. Reconstructed `docs/history/ac-38-spec.md` from the shipped code and
+      tests instead (correct DPI-relative clamp, matching what `_auto_scale_factor()`'s own
+      docstring already implemented), and repointed that docstring's and `_request_auto_settle()`'s
+      `docs/spec.md §2` / "The debounce decision" citations at the new archive path.
+      `design.md`/`implementation.md`/`test-review.md` for G#38 remain lost; only the file GH#93
+      was about got reconstructed. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/51
 - [x] **Done 2026-09-29, PR #92.** G#52 — github: true — Follow-up from PR #89's round-4 independent
       review (G#38): `UIScaleAuto.test_the_settle_timer_resets_on_each_new_event_not_just_the_first`
       (tests/test_ui.py:4243-4267) uses a brittle fixed-duration `pump()` chain instead of
