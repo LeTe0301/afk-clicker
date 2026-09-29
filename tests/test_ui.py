@@ -7055,6 +7055,20 @@ class MacrosTab(UITestCase):
     """G#47/GH#15: the Macros tab itself -- per-game storage, the add/edit/
     delete/run UI wiring, and the hotkey lifecycle tied to _select()."""
 
+    # Same reasoning and same crash as HotkeyPersistence/
+    # HotkeyListenerSurvivesRebuild's own needs_input_permission: a macro
+    # with a real hotkey arms a real HotkeyWatcher (_arm_macro_hotkeys()),
+    # which starts a real pynput kb.Listener() -- on macOS CI this aborts
+    # the whole process with SIGTRAP ("Trace/BPT trap: 5", exit 133)
+    # regardless of what macos_input_permitted() answers (AXIsProcessTrusted
+    # reports trusted there, but the CoreGraphics event tap aborts anyway).
+    # Confirmed directly: PR #92's first macOS run after this class landed
+    # crashed the whole suite here. Skipped on macOS outright, same as
+    # every other real-listener test in this file -- see issue #7.
+    needs_input_permission = unittest.skipIf(
+        app is not None and app.sys.platform == "darwin",
+        "starting a listener aborts the process on macOS -- see issue #7")
+
     def tearDown(self):
         super().tearDown()
         app.set_active_theme("dark")
@@ -7074,6 +7088,7 @@ class MacrosTab(UITestCase):
                  if isinstance(w, tk.Label)]
         self.assertIn("No macros yet for this game.", labels)
 
+    @needs_input_permission
     def test_save_macro_persists_and_arms_its_hotkey(self):
         self.ui._select("minecraft")
         hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
@@ -7088,6 +7103,7 @@ class MacrosTab(UITestCase):
         reloaded = app.Store(self.config)
         self.assertEqual(len(reloaded.data["games"]["minecraft"]["macros"]), 1)
 
+    @needs_input_permission
     def test_editing_a_macro_keeps_its_id_and_replaces_its_content(self):
         self.ui._select("minecraft")
         hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
@@ -7110,6 +7126,7 @@ class MacrosTab(UITestCase):
         self.assertFalse(ok)
         self.assertEqual(self.ui.store.game("minecraft").get("macros", []), [])
 
+    @needs_input_permission
     def test_delete_macro_removes_it_and_disarms_its_hotkey(self):
         self.ui._select("minecraft")
         hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
@@ -7119,6 +7136,7 @@ class MacrosTab(UITestCase):
         self.assertEqual(self.ui.store.game("minecraft")["macros"], [])
         self.assertEqual(len(self.ui._macro_hotkey_watchers), 0)
 
+    @needs_input_permission
     def test_macros_are_scoped_to_their_own_game(self):
         self.ui._select("minecraft")
         hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
