@@ -2807,6 +2807,19 @@ class AfkAutoclicker:
         self._check_seq = 0            # bumped once per check_update() call,
                                         # compared in _apply_check() -- see there
         self.right_held = False
+        # Roadmap "A visible click counter and session timer": counts only
+        # the click loop's own clicks (left/right/middle), not a macro's --
+        # a macro is a separate, deterministic, user-authored sequence, not
+        # part of what "this session's clicking" means. Reset each start(),
+        # frozen (not reset) at stop() so the last session's totals stay
+        # visible until the next start(). Plain attributes, incremented from
+        # the worker thread and read from the main thread with no lock --
+        # the same convention self.right_held/self.running already use; a
+        # rare lost increment under a true race is an acceptable cost for a
+        # cosmetic counter, not a correctness-critical one.
+        self.click_count = 0
+        self._session_started_at = None
+        self._session_elapsed_frozen = None
         self.settings = {}
         self._pending = None
         self._save_failed = False      # last self.store.save()/put_game()
@@ -3277,6 +3290,14 @@ class AfkAutoclicker:
                                                               padx=int(16 * s))
         self.status = StatusPill(header, s, width=250, height=36)
         self.status.pack(side="right", padx=int(14 * s))
+        # Roadmap "A visible click counter and session timer" -- lives in
+        # the header, not the Clicking pane, so it costs no extra pane
+        # height and needs no WINDOW_MIN_H re-derivation. Text set by
+        # _refresh_session_stats(), called from _drain_ui()'s own already-
+        # recurring 40ms tick rather than a new timer.
+        self.session_stats_label = tk.Label(header, text="", bg=CARD, fg=MUTED,
+                                            font=("Segoe UI", fs(9, s)))
+        self.session_stats_label.pack(side="right")
 
         shell = tk.Frame(self.root, bg=BG)
         shell.pack(fill="both", expand=True)
@@ -5011,7 +5032,35 @@ class AfkAutoclicker:
                     return                  # window is really going away
                 continue                    # a rebuilt/destroyed widget's stale
                                              # closure -- drop it, keep draining
+        try:
+            self._refresh_session_stats()
+        except tk.TclError:
+            pass   # same "window is really going away" tolerance as above
         self._timers["drain"] = self.root.after(40, self._drain_ui)
+
+    def _refresh_session_stats(self):
+        """Repaints the header's click-count/session-timer label from the
+        plain counters start()/stop()/loop() maintain. Piggybacks on
+        _drain_ui()'s own recurring 40ms tick instead of arming a second,
+        independent timer with its own start/stop/rebuild lifecycle to get
+        right. Only touches the widget when the text actually changed. --
+        Tk's own .config() is cheap already, but the count/timer share this
+        one label, and a session with no counter yet (never started) should
+        show nothing, not "0 · 0:00"."""
+        if self._session_started_at is None:
+            text = ""
+        else:
+            elapsed = self._session_elapsed_frozen
+            if self.running or elapsed is None:
+                # Still running, or stopped a moment ago but loop()'s own
+                # finally hasn't landed yet (it runs on the worker thread,
+                # not synchronously with stop()) -- compute live either way,
+                # rather than risk a None elapsed in that narrow gap.
+                elapsed = time.monotonic() - self._session_started_at
+            mins, secs = divmod(int(elapsed), 60)
+            text = f"{self.click_count} clicks · {mins}:{secs:02d}"
+        if self.session_stats_label.cget("text") != text:
+            self.session_stats_label.config(text=text)
 
     def _set_status(self, text, color, hint=""):
         """Looked up fresh here, on the main thread when _drain_ui() actually
@@ -5545,6 +5594,9 @@ class AfkAutoclicker:
             self.worker.join(timeout=2.0)
             if self.worker.is_alive():
                 return                     # refuse rather than double-click
+        self.click_count = 0
+        self._session_started_at = time.monotonic()
+        self._session_elapsed_frozen = None
         self.running = True
         self._ui(self.root.focus_set)
         self._ui(self._set_status, "RUNNING", OK,
@@ -5634,6 +5686,7 @@ class AfkAutoclicker:
                     # old "button" choice already did.
                     if now >= due_middle:
                         self.mouse.click(MouseButton.middle)
+                        self.click_count += 1
                         due_middle = self._next_click_due(cfg, now, "click_ms", "jitter_ms")
                     if not self._sleep(self.CLICK_LOOP_TICK_S):
                         break
@@ -5664,12 +5717,14 @@ class AfkAutoclicker:
 
                 if left_enabled and now >= due_left:
                     self.mouse.click(MouseButton.left)
+                    self.click_count += 1
                     due_left = self._next_click_due(cfg, now, "click_ms", "jitter_ms")
                 # self.right_held means Eating currently owns the right
                 # button (hold, or mid-pause-eat above) -- the right loop
                 # must not fight it for the same button.
                 if right_enabled and not self.right_held and now >= due_right:
                     self.mouse.click(MouseButton.right)
+                    self.click_count += 1
                     due_right = self._next_click_due(cfg, now, "right_click_ms", "right_jitter_ms")
 
                 if not self._sleep(self.CLICK_LOOP_TICK_S):
@@ -5683,6 +5738,15 @@ class AfkAutoclicker:
         finally:
             self.running = False
             self._release_right()
+            # Freeze the session timer here, on every exit path (a normal
+            # stop(), auto-stop, or an exception) alike, rather than
+            # duplicating this in each of them -- _refresh_session_stats()
+            # falls back to computing a live elapsed whenever this hasn't
+            # landed yet, so the brief window between stop() setting
+            # self.running = False and this actually running is never a
+            # crash risk, just a few more live-computed reads.
+            if self._session_started_at is not None:
+                self._session_elapsed_frozen = time.monotonic() - self._session_started_at
 
     def _forget_traces(self):
         """Release every write-trace registered on a Variable this UI owns.
