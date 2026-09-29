@@ -534,17 +534,42 @@ Housekeeping:
       without selecting the row first. README's "Aufbau" section documents the ✕. 488 tests green
       locally (481 + 7 new), full suite.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/54
-- [ ] G#55 — github: true — sync pending: GitHub — **Per-button clicking configuration** (Leo,
-      2026-09-29): "the clicking should be individual so not just eating labeled for example it
-      should be the same configurable for LMB RMB or other mouse buttons if there is anything."
-      Today's Clicking pane has exactly one active interval/jitter configuration, shared by
-      whichever single button (`profile["button"]`) is currently selected; `CLICK_BUTTON` only maps
-      left/right/middle. Real product-design questions the ticket itself raises and this session
-      is not resolving unilaterally: which additional buttons pynput actually exposes
-      cross-platform (some, e.g. side/X1/X2, are platform-limited), whether multiple buttons can
-      click concurrently or stay mutually exclusive while each remembers its own settings, and how
-      this interacts with Eating (which already dedicates RMB on Minecraft profiles). Needs
-      product-manager/ux-designer scoping before building.
+- [x] **Done 2026-09-29, PR #TBD.** G#55 / GH#97 — github: true — **Per-button clicking
+      configuration** (Leo, 2026-09-29): "the clicking should be individual so not just eating
+      labeled for example it should be the same configurable for LMB RMB or other mouse buttons if
+      there is anything." Scoping decisions (Leo, 2026-09-29): LMB + RMB only (not every pynput
+      button pynput exposes); both can click concurrently, not mutually exclusive; Middle click
+      stays exactly as it was -- a separate, mutually-exclusive mode using the original shared
+      Interval/jitter, picking it pauses the independent left/right loops.
+      **Schema (`SETTINGS_VERSION` bumped 1 -> 2, `_migrate_settings_v1_to_v2`):** the old single
+      `"button"` field is replaced by `click_mode` ("buttons"/"middle"), `left_enabled`/
+      `right_enabled`, and new `right_click_ms`/`right_jitter_ms` -- `click_ms`/`jitter_ms` keep
+      their exact old keys, now meaning left's own interval/jitter (or middle's, in middle mode),
+      since left/middle already carried the only real prior data an old "button" choice could mean.
+      A migrated "right" profile moves its old click_ms/jitter_ms to the new right_* keys instead of
+      losing them. **Loop (`AfkAutoclicker.loop()`):** kept to the one existing worker thread rather
+      than adding real OS threads (this codebase's own history is exactly why that surface stays
+      small) -- each enabled button now tracks its own next-due timestamp, checked on a shared 20ms
+      tick (`CLICK_LOOP_TICK_S`, matching `_sleep()`'s own existing granularity) instead of blocking
+      for one shared interval, so left and right proceed on fully independent schedules within the
+      same thread. The right loop skips a tick whenever `self.right_held` is true (Eating currently
+      owns RMB), so it never fights Eating for the button instead of needing new locking. **UI:**
+      the old 3-way "Mouse button" Segmented is now `click_mode`'s 2-way Independent/Middle choice,
+      plus new `Left click`/`Right click` `ToggleCheckbox` rows (Enable) and `Right interval`/
+      `Right jitter` `NumBox` rows -- five new rows pushed the tallest pane (Clicking+Eating,
+      Minecraft) past the existing floor, so `WINDOW_MIN_H` moved 620 -> 740 (re-derived from real
+      content the same way every prior round of this constant was, per `WindowMinimumHeight`'s own
+      tests; Windows' own taller font metrics still cannot be measured from this sandbox, same
+      caveat every prior round of this constant already carries).
+      `test_minimum_height_shrunk_from_the_pre_tab_split_floor`'s own threshold moved 690 -> 900 --
+      updated, not deleted, since 690 was never the real invariant, just G#28's own measured value
+      at the time, and this ticket's growth is deliberate, not a regression back toward the old
+      combined-page bloat that guard actually exists to catch. Added/updated tests: 4 new
+      `_migrate_settings_v1_to_v2` cases (`SettingsSchemaVersion`), rewrote `ClickLoop`'s
+      button-selection tests for the new model and added concurrent-independent-interval,
+      middle-mode-exclusivity, and eating-does-not-fight-right-click coverage. 507 tests green
+      locally (500 + 4 migration + 3 new ClickLoop), full suite, `ClickLoop`/floor tests run
+      multiple times for timing stability.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/55
 - [x] **Done 2026-09-29, PR #TBD.** G#56 / GH#98 — github: true — **Configurable interval for
       recognized/tracked macros** (Leo, 2026-09-29): "recognizable macros should be trackable and

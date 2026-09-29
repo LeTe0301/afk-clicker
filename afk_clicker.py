@@ -220,7 +220,7 @@ else:
 
 SIDEBAR_W = 208
 CONTENT_W = 452
-WINDOW_MIN_H = 620   # the window's hard height floor, and (see
+WINDOW_MIN_H = 740   # the window's hard height floor, and (see
     # _apply_minsize()) today's default launch height too -- they are
     # deliberately the same number, unlike minw/default_w after story
     # #24 feature 3 (docs/spec.md's "Why height doesn't get the width
@@ -1568,14 +1568,9 @@ def config_path():
     return os.path.join(base, "afk-farm-clicker", "settings.json")
 
 
-SETTINGS_VERSION = 1   # G#46/GH#15's prerequisite (docs/ROADMAP.md "Settings
-                        # schema version"): every settings.json written from
-                        # here on carries this number, so a future format
-                        # change has something to compare against instead of
-                        # guessing an old file's shape from which keys happen
-                        # to be present. A file with no "version" key at all
-                        # (every one written before this change) is version 0;
-                        # _SETTINGS_MIGRATIONS below carries it forward.
+SETTINGS_VERSION = 2   # G#55/GH#97 bumped this from 1: a single "button"
+                        # choice became independent left/right configs. See
+                        # _migrate_settings_v1_to_v2.
 
 def _migrate_settings_v0_to_v1(data):
     """The one rewrite Store.__init__ already did unconditionally, promoted
@@ -1597,13 +1592,53 @@ def _migrate_settings_v0_to_v1(data):
     return data
 
 
+def _migrate_settings_v1_to_v2(data):
+    """G#55/GH#97: "button" was a single exclusive choice among
+    left/right/middle, sharing one click_ms/jitter_ms pair. Left and right
+    are now independently enabled, each with their own interval/jitter,
+    concurrently -- middle stays a separate, mutually exclusive mode (Leo's
+    own 2026-09-29 scoping call), reusing click_ms/jitter_ms exactly as it
+    already did, so a middle-button profile needs no data migrated at all,
+    only its mode flag set. A right-button profile's old click_ms/jitter_ms
+    WERE right's own values, so those move to the new right_click_ms/
+    right_jitter_ms keys -- click_ms/jitter_ms (now meaning left's) reset to
+    the ordinary defaults, since there is no prior left-specific value to
+    carry forward. Runs on the raw loaded dict, same reasoning as
+    _migrate_settings_v0_to_v1 above."""
+    games = data.get("games")
+    if isinstance(games, dict):
+        for game in games.values():
+            if not isinstance(game, dict) or "button" not in game:
+                continue
+            button = game.pop("button")
+            if button == "right":
+                game["click_mode"] = "buttons"
+                game["left_enabled"] = False
+                game["right_enabled"] = True
+                game["right_click_ms"] = game.get("click_ms", DEFAULT_CLICK_MS)
+                game["right_jitter_ms"] = game.get("jitter_ms", 0)
+                game["click_ms"] = DEFAULT_CLICK_MS
+                game["jitter_ms"] = 0
+            elif button == "middle":
+                game["click_mode"] = "middle"
+                game["left_enabled"] = True
+                game["right_enabled"] = False
+                # click_ms/jitter_ms already ARE middle's values -- untouched.
+            else:   # "left", or anything unrecognized -- the old default
+                game["click_mode"] = "buttons"
+                game["left_enabled"] = True
+                game["right_enabled"] = False
+                # click_ms/jitter_ms already ARE left's values -- untouched.
+    return data
+
+
 # Keyed by the version a file is coming FROM; _run_settings_migrations()
 # below applies them in order until the data reaches SETTINGS_VERSION. Only
 # one step exists today because only one versioned format change has ever
 # happened -- a future one adds its own function and one more entry here,
 # never rewrites an existing step (each step must keep migrating an old file
 # exactly the way it always did, even after a later version exists).
-_SETTINGS_MIGRATIONS = {0: _migrate_settings_v0_to_v1}
+_SETTINGS_MIGRATIONS = {0: _migrate_settings_v0_to_v1, 1: _migrate_settings_v1_to_v2}
 
 
 def _run_settings_migrations(data):
@@ -1746,8 +1781,9 @@ PROFILES = [
         "eating": True,
         "note": "650 ms: Java sword full charge is 600 ms (12 ticks), +1 tick margin.",
         "defaults": {"click_ms": 650, "jitter_ms": 0, "autostop_min": 0,
-                     "button": "left", "eat_mode": "pause",
-                     "eat_every": 75, "eat_hold": 2.0},
+                     "click_mode": "buttons", "left_enabled": True, "right_enabled": False,
+                     "right_click_ms": DEFAULT_CLICK_MS, "right_jitter_ms": 0,
+                     "eat_mode": "pause", "eat_every": 75, "eat_hold": 2.0},
         "min_sweep_ms": DEFAULT_CLICK_MS,   # G#22: the only profile whose
                                              # numbers this hint applies to
     },
@@ -1758,8 +1794,9 @@ PROFILES = [
         "eating": False,
         "note": "Applies when nothing more specific is selected.",
         "defaults": {"click_ms": 250, "jitter_ms": 0, "autostop_min": 0,
-                     "button": "left", "eat_mode": "off",
-                     "eat_every": 75, "eat_hold": 2.0},
+                     "click_mode": "buttons", "left_enabled": True, "right_enabled": False,
+                     "right_click_ms": DEFAULT_CLICK_MS, "right_jitter_ms": 0,
+                     "eat_mode": "off", "eat_every": 75, "eat_hold": 2.0},
         "min_sweep_ms": None,
     },
 ]
@@ -3597,10 +3634,35 @@ class AfkAutoclicker:
         self.jitter_ms = NumBox(self.jitter_row.control, 0, "±ms", s); self.jitter_ms.pack()
         r = Row(cl, "Auto-stop", s, hint="0 means never"); r.pack(fill="x", pady=(int(6 * s), 0))
         self.autostop_min = NumBox(r.control, 0, "min", s); self.autostop_min.pack()
-        r = Row(cl, "Mouse button", s); r.pack(fill="x", pady=(int(8 * s), 0))
-        self.button_name = tk.StringVar(value="left")
-        Segmented(r.control, [("left", "Left"), ("right", "Right"), ("middle", "Mid")],
-                  self.button_name, s, width=180).pack()
+
+        # G#55/GH#97: left and right used to be one exclusive "Mouse button"
+        # choice sharing the Interval/jitter above; they're now independently
+        # enabled and can click concurrently, each on its own interval/jitter.
+        # Middle stays the old, single, mutually-exclusive mode (Leo's own
+        # 2026-09-29 scoping call) -- reusing Interval/jitter above exactly as
+        # it always did, so this row only ever needs two options, not three.
+        r = Row(cl, "Click mode", s, hint="Middle uses Interval/jitter above")
+        r.pack(fill="x", pady=(int(8 * s), 0))
+        self.click_mode = tk.StringVar(value="buttons")
+        Segmented(r.control, [("buttons", "Independent"), ("middle", "Middle")],
+                  self.click_mode, s, width=180).pack()
+
+        r = Row(cl, "Left click", s,
+               hint="uses Interval/jitter above"); r.pack(fill="x", pady=(int(8 * s), 0))
+        self.left_enabled = tk.BooleanVar(value=True)
+        left_toggle = ToggleCheckbox(r.control, self.left_enabled, s)
+        left_toggle.pack(side="left")
+
+        r = Row(cl, "Right click", s); r.pack(fill="x", pady=(int(8 * s), 0))
+        self.right_enabled = tk.BooleanVar(value=False)
+        right_toggle = ToggleCheckbox(r.control, self.right_enabled, s)
+        right_toggle.pack(side="left")
+
+        r = Row(cl, "Right interval", s); r.pack(fill="x", pady=(int(6 * s), 0))
+        self.right_click_ms = NumBox(r.control, DEFAULT_CLICK_MS, "ms", s)
+        self.right_click_ms.pack()
+        r = Row(cl, "Right jitter", s); r.pack(fill="x", pady=(int(6 * s), 0))
+        self.right_jitter_ms = NumBox(r.control, 0, "±ms", s); self.right_jitter_ms.pack()
 
         # "Eating" is kept -- it is a sub-section within Clicking, not a
         # tab (docs/design.md), still Minecraft-only and conditionally
@@ -3649,8 +3711,9 @@ class AfkAutoclicker:
 
         # Any edit belongs to the selected game, so persist as it happens.
         for var in (self.click_ms.var, self.jitter_ms.var, self.autostop_min.var,
-                    self.button_name, self.eat_mode, self.eat_every.var,
-                    self.eat_hold.var):
+                    self.click_mode, self.left_enabled, self.right_enabled,
+                    self.right_click_ms.var, self.right_jitter_ms.var,
+                    self.eat_mode, self.eat_every.var, self.eat_hold.var):
             var.trace_add("write", lambda *_a: self._persist())
 
         self._set_content_tab(self._content_tab)   # hide the inactive pane last
@@ -3704,11 +3767,10 @@ class AfkAutoclicker:
         row = Row(ap, "Theme", s)
         row.pack(fill="x")
         self.appearance_var = tk.StringVar(value=self.store.data["appearance"])
-        # 3-option Segmented inside a Row's control area -- same width as the
-        # other 3-option control in this file (button_name, "Mouse button"
-        # above): ROW_LABEL_W + ROW_LABEL_GAP + 180 = 152 + 180 = 332, well
-        # inside CARD_INNER_W (396) since Row's fixed label column now sits
-        # ahead of it, not a variable-width label sharing the row.
+        # 3-option Segmented inside a Row's control area, explicit width=180:
+        # ROW_LABEL_W + ROW_LABEL_GAP + 180 = 152 + 180 = 332, well inside
+        # CARD_INNER_W (396) since Row's fixed label column sits ahead of it,
+        # not a variable-width label sharing the row.
         Segmented(row.control, [("system", "System"), ("light", "Light"), ("dark", "Dark")],
                   self.appearance_var, s, width=180).pack()
 
@@ -4124,7 +4186,11 @@ class AfkAutoclicker:
         self.click_ms.var.set(fmt_num(values["click_ms"]))
         self.jitter_ms.var.set(fmt_num(values["jitter_ms"]))
         self.autostop_min.var.set(fmt_num(values["autostop_min"]))
-        self.button_name.set(values["button"])
+        self.click_mode.set(values["click_mode"])
+        self.left_enabled.set(values["left_enabled"])
+        self.right_enabled.set(values["right_enabled"])
+        self.right_click_ms.var.set(fmt_num(values["right_click_ms"]))
+        self.right_jitter_ms.var.set(fmt_num(values["right_jitter_ms"]))
         self.eat_every.var.set(fmt_num(values["eat_every"]))
         self.eat_hold.var.set(fmt_num(values["eat_hold"]))
         self.eat_mode.set(values["eat_mode"] if profile["eating"] else "off")
@@ -4269,7 +4335,11 @@ class AfkAutoclicker:
             "click_ms": self._num(self.click_ms, profile["defaults"]["click_ms"], 50),
             "jitter_ms": self._num(self.jitter_ms, 0, 0),
             "autostop_min": self._num(self.autostop_min, 0, 0),
-            "button": self.button_name.get(),
+            "click_mode": self.click_mode.get(),
+            "left_enabled": bool(self.left_enabled.get()),
+            "right_enabled": bool(self.right_enabled.get()),
+            "right_click_ms": self._num(self.right_click_ms, DEFAULT_CLICK_MS, 50),
+            "right_jitter_ms": self._num(self.right_jitter_ms, 0, 0),
             "eat_mode": self.eat_mode.get(),
             "eat_every": self._num(self.eat_every, DEFAULT_EAT_EVERY_S, 5),
             "eat_hold": self._num(self.eat_hold, DEFAULT_EAT_HOLD_S, 0.5),
@@ -4970,7 +5040,11 @@ class AfkAutoclicker:
                 "click_ms": self._num(self.click_ms, DEFAULT_CLICK_MS, 50),
                 "jitter_ms": self._num(self.jitter_ms, 0, 0),
                 "autostop_min": self._num(self.autostop_min, 0, 0),
-                "button": self.button_name.get(),
+                "click_mode": self.click_mode.get(),
+                "left_enabled": bool(self.left_enabled.get()),
+                "right_enabled": bool(self.right_enabled.get()),
+                "right_click_ms": self._num(self.right_click_ms, DEFAULT_CLICK_MS, 50),
+                "right_jitter_ms": self._num(self.right_jitter_ms, 0, 0),
                 "eat_mode": self.eat_mode.get(),
                 "eat_every": self._num(self.eat_every, DEFAULT_EAT_EVERY_S, 5),
                 "eat_hold": self._num(self.eat_hold, DEFAULT_EAT_HOLD_S, 0.5),
@@ -5498,9 +5572,31 @@ class AfkAutoclicker:
     CLICK_BUTTON = {"left": MouseButton.left, "right": MouseButton.right,
                     "middle": MouseButton.middle}
 
+    # G#55/GH#97: left and right now click on their own independent
+    # schedules within this one worker thread (never two real OS threads --
+    # both would touch self.mouse/self.right_held, and this codebase's own
+    # history (docs/history/ac-27-*, the "never leave a button stuck" rule
+    # throughout this method) is exactly why that surface is kept small).
+    # Each button's own next-due timestamp is checked once per tick instead
+    # of blocking for its full interval, so a short, cheap tick is what
+    # keeps two independent schedules from starving each other -- 20 ms
+    # matches _sleep()'s own existing interruptible-sleep granularity, so
+    # this changes nothing about how quickly stopping reacts.
+    CLICK_LOOP_TICK_S = 0.02
+
+    def _next_click_due(self, cfg, now, click_ms_key, jitter_ms_key):
+        interval = cfg.get(click_ms_key, DEFAULT_CLICK_MS) / 1000.0
+        jitter = cfg.get(jitter_ms_key, 0) / 1000.0
+        if jitter:
+            # Spread around the set interval, never below the 50 ms floor
+            # the field itself enforces.
+            interval = max(0.05, interval + random.uniform(-jitter, jitter))
+        return now + interval
+
     def loop(self):
         try:
             started = last_meal = time.monotonic()
+            due_left = due_right = due_middle = 0.0
             while self.running:
                 # Auto-stop is a safety net, not a feature: an autoclicker left
                 # running against an empty farm is the thing that gets an
@@ -5513,16 +5609,11 @@ class AfkAutoclicker:
                     self.running = False
                     break
                 # Re-read every pass, like the numeric fields already are:
-                # picking the mode up once meant switching the control did
-                # nothing until you toggled the clicker off and on again.
+                # picking a change up only on the next full rebuild meant
+                # switching a control did nothing until you toggled the
+                # clicker off and on again.
                 mode = cfg.get("eat_mode", "off")
-                interval = cfg.get("click_ms", DEFAULT_CLICK_MS) / 1000.0
-                jitter = cfg.get("jitter_ms", 0) / 1000.0
-                if jitter:
-                    # Spread around the set interval, never below the 50 ms
-                    # floor the field itself enforces.
-                    interval = max(0.05, interval + random.uniform(-jitter, jitter))
-                button = self.CLICK_BUTTON.get(cfg.get("button", "left"), MouseButton.left)
+                click_mode = cfg.get("click_mode", "buttons")
 
                 if mode == "hold":
                     if not self.right_held:
@@ -5533,7 +5624,29 @@ class AfkAutoclicker:
                     # button down, that keeps blocking/eating forever.
                     self._release_right()
 
-                if mode == "pause" and button is MouseButton.left:
+                now = time.monotonic()
+
+                if click_mode == "middle":
+                    # The one mutually-exclusive legacy mode (Leo's own
+                    # 2026-09-29 scoping call): left/right's own enabled
+                    # flags are ignored entirely while this is active, and
+                    # middle reuses click_ms/jitter_ms exactly as the single
+                    # old "button" choice already did.
+                    if now >= due_middle:
+                        self.mouse.click(MouseButton.middle)
+                        due_middle = self._next_click_due(cfg, now, "click_ms", "jitter_ms")
+                    if not self._sleep(self.CLICK_LOOP_TICK_S):
+                        break
+                    continue
+
+                left_enabled = cfg.get("left_enabled", True)
+                right_enabled = cfg.get("right_enabled", False)
+
+                # Eating-pause only ever applied to the left button (the one
+                # farming click), unchanged: pausing a right loop the user
+                # independently enabled would be a second, unrelated button
+                # eating has no claim over.
+                if mode == "pause" and left_enabled:
                     every = cfg.get("eat_every", DEFAULT_EAT_EVERY_S)
                     if time.monotonic() - last_meal >= every:
                         self._ui(self._set_status, "EATING", ACCENT, "clicks paused")
@@ -5547,9 +5660,19 @@ class AfkAutoclicker:
                             break
                         self._ui(self._set_status, "RUNNING", OK,
                  self.registered_hotkey.label() if self.registered_hotkey else "")
+                        now = time.monotonic()
 
-                self.mouse.click(button)
-                if not self._sleep(interval):
+                if left_enabled and now >= due_left:
+                    self.mouse.click(MouseButton.left)
+                    due_left = self._next_click_due(cfg, now, "click_ms", "jitter_ms")
+                # self.right_held means Eating currently owns the right
+                # button (hold, or mid-pause-eat above) -- the right loop
+                # must not fight it for the same button.
+                if right_enabled and not self.right_held and now >= due_right:
+                    self.mouse.click(MouseButton.right)
+                    due_right = self._next_click_due(cfg, now, "right_click_ms", "right_jitter_ms")
+
+                if not self._sleep(self.CLICK_LOOP_TICK_S):
                     break
         except Exception as exc:
             # Without this the flag stays set: the window keeps saying RUNNING,

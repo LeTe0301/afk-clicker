@@ -77,8 +77,8 @@ Der **Hotkey gilt global**, für alle Spiele derselbe.
 | **Interval** | Abstand zwischen zwei Klicks. 650 ms deckt Javas volle Sword-Sweep-Aufladung ab (12 Ticks / 600 ms) plus einen Tick Puffer. |
 | **Random jitter** | Streut das Intervall, damit der Rhythmus nicht exakt gleichmäßig ist. Bei Minecraft weicht dieser Text einer fett hervorgehobenen Warnung, sobald Intervall minus Jitter unter 650 ms sinkt, und wechselt ab 550 ms zusätzlich auf eine auffälligere Farbe, weil dann der Java-Sword-Sweep wahrscheinlich ausbleibt. |
 | **Auto-stop** | Hält nach N Minuten von selbst an. 0 heißt nie. |
-| **Mouse button** | Links, rechts oder mittig. |
-| **Pause & eat** | Klicken aussetzen, rechte Maustaste halten bis das Essen durch ist, weitermachen. Nur bei Linksklick sinnvoll, deshalb greift es auch nur dort. |
+| **Click mode** | **Independent**: Linksklick und Rechtsklick lassen sich unabhängig voneinander an- und ausschalten, jeder mit eigenem Interval/Jitter (**Right interval**/**Right jitter**) — beide gleichzeitig aktiv ist möglich. **Middle**: der alte Einzelmodus, mittlere Maustaste, nutzt das Interval/Jitter von oben. |
+| **Pause & eat** | Klicken aussetzen, rechte Maustaste halten bis das Essen durch ist, weitermachen. Bezieht sich nur auf den Linksklick, ein zusätzlich aktivierter Rechtsklick pausiert für die Dauer mit. |
 | **Hold RMB** | Rechte Maustaste dauerhaft halten. |
 | **Eat every / Hold for** | Angreifen kostet ~1 Nahrungspunkt pro 20 s, verrottetes Fleisch gibt 4. Fleisch braucht 1,6 s — 2,0 s lässt Luft für einen verzögerten Tick. |
 
