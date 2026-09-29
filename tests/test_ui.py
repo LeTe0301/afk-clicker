@@ -7073,6 +7073,81 @@ class MacroRunnerReleasesHeldKeys(unittest.TestCase):
             app.MacroRunner.run = original_run
 
 
+class OnCloseDropsControllerReferences(UITestCase):
+    """GH#95/G#53: every UITestCase's AfkAutoclicker opens its own
+    pynput.mouse.Controller() and kb.Controller(), each holding a real Xlib
+    connection under Xvfb (Controller.__del__ closes it, but only once
+    nothing references the Controller any more). Before this fix,
+    self.mouse/self.keyboard survived on_close() as ordinary app attributes
+    -- and the app object itself stays referenced by the running test case
+    well past on_close(), so tearDown's own gc.collect() (context.py's
+    G#27/GH#46 mechanism) never reached them -- and a MacroRunner's own
+    stored copy of both, kept in self._macro_runners since G#47/GH#15,
+    survived independently of the app's attributes entirely. Across a full
+    suite run (~150+ UI-building test classes) that is enough unclosed
+    connections to tip over Xvfb's max-clients ceiling (G#53)."""
+
+    def test_on_close_drops_mouse_and_keyboard_so_they_are_collected(self):
+        mouse_ref = weakref.ref(self.ui.mouse)
+        keyboard_ref = weakref.ref(self.ui.keyboard)
+        self.ui.on_close()
+        gc.collect()
+        self.assertIsNone(
+            mouse_ref(), "on_close() left something referencing the mouse Controller")
+        self.assertIsNone(
+            keyboard_ref(), "on_close() left something referencing the keyboard Controller")
+
+    def test_a_stale_macro_runner_does_not_survive_on_close_either(self):
+        # A MacroRunner stores its own copy of mouse/keyboard
+        # (afk_clicker.py's MacroRunner.__init__), independent of
+        # self.ui.mouse/self.ui.keyboard -- reproduce the shape a finished
+        # real macro run leaves in self._macro_runners (on_close() joins
+        # the thread but never pops the dict entry) without needing a real
+        # hotkey/listener.
+        runner = app.MacroRunner([], self.ui.mouse, self.ui.keyboard, self.ui.CLICK_BUTTON)
+        runner_ref = weakref.ref(runner)
+        thread = threading.Thread(target=lambda: None)
+        thread.start()
+        thread.join()
+        self.ui._macro_runners["fake"] = (runner, thread)
+        del runner
+        self.ui.on_close()
+        gc.collect()
+        self.assertIsNone(
+            runner_ref(),
+            "a stale _macro_runners entry outlived on_close() and kept its "
+            "own mouse/keyboard Controller copies alive with it")
+
+    def test_removing_the_cleanup_fails_the_first_test(self):
+        # Sabotage-verifies the test above actually exercises the fix, not
+        # a Controller that happened to already be unreferenced some other
+        # way: reproduces the exact pre-fix shape (on_close() never clears
+        # self.mouse/self.keyboard) and asserts THAT leaves the weakref
+        # alive.
+        mouse_ref = weakref.ref(self.ui.mouse)
+        original_on_close = app.AfkAutoclicker.on_close
+
+        def sabotaged_on_close(self):
+            mouse = self.mouse
+            keyboard = self.keyboard
+            original_on_close(self)
+            self.mouse = mouse
+            self.keyboard = keyboard
+
+        app.AfkAutoclicker.on_close = sabotaged_on_close
+        try:
+            self.ui.on_close()
+        finally:
+            app.AfkAutoclicker.on_close = original_on_close
+        gc.collect()
+        self.assertIsNotNone(
+            mouse_ref(),
+            "sabotaged on_close() (restores self.mouse afterwards) "
+            "unexpectedly let the Controller be collected anyway -- this "
+            "test's sabotage did not reproduce the pre-fix bug, so it "
+            "cannot prove the real test above is meaningful")
+
+
 class MacrosTab(UITestCase):
     """G#47/GH#15: the Macros tab itself -- per-game storage, the add/edit/
     delete/run UI wiring, and the hotkey lifecycle tied to _select()."""

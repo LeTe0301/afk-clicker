@@ -473,16 +473,31 @@ Housekeeping:
       the reset to a coalesce-only no-op, confirmed the rewritten test fails with a clear
       message); `UIScaleAuto` run 5x locally with no flakes.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/52
-- [ ] G#53 — github: true — sync pending: GitHub — Found during PR #89 round 3 (G#38):
-      `pynput.mouse.Controller()` never closes its Xlib connection, so a large local test run can
-      hit Xvfb's max-clients ceiling. Pre-existing, out of scope for G#38. Find/use pynput's own
-      connection-close path. **Mitigated, not closed, 2026-09-28 (PR #92):** the ceiling was
-      actually hit for real on CI (`Xlib.error.DisplayConnectionError: ... Maximum number of
-      clients reached`, run 36489585846, ubuntu-latest) once the Macros tab added a SECOND
-      Xlib connection per test (`kb.Controller()`, alongside the existing `mouse.Controller()`).
-      `.github/workflows/ci.yml`'s `xvfb-run` now passes `-maxclients 2048`, which unblocks CI,
-      but that raises the ceiling rather than fixing the leak this ticket is actually about --
-      the connection-close path is still worth finding.
+- [x] **Done 2026-09-29, PR #TBD.** G#53 / GH#95 — github: true — Found during PR #89 round 3
+      (G#38): `pynput.mouse.Controller()` never closes its Xlib connection, so a large local test
+      run can hit Xvfb's max-clients ceiling. Pre-existing, out of scope for G#38.
+      **Mitigated, not closed, 2026-09-28 (PR #92):** the ceiling was actually hit for real on CI
+      (`Xlib.error.DisplayConnectionError: ... Maximum number of clients reached`, run 36489585846,
+      ubuntu-latest) once the Macros tab added a SECOND Xlib connection per test (`kb.Controller()`,
+      alongside the existing `mouse.Controller()`). `.github/workflows/ci.yml`'s `xvfb-run` now
+      passes `-maxclients 2048`, which unblocks CI, but that raises the ceiling rather than fixing
+      the leak.
+      **Actually closed, 2026-09-29:** pynput's own `Controller.__del__` (`pynput/mouse/_xorg.py`)
+      already closes `self._display` -- the leak was never pynput's fault, it was that
+      `self.mouse`/`self.keyboard` (and each `MacroRunner`'s own copy of both, since G#47/GH#15's
+      `self._macro_runners`) stayed referenced by `AfkAutoclicker` for as long as the app object
+      itself does, and `on_close()` never dropped them -- so with ~150+ UI-building `UITestCase`
+      instances sharing one process, none of those Controllers (and their Xlib connections) were
+      ever eligible for collection until whatever much later point something finally dropped the
+      whole app object. Fixed at the root: `on_close()` now clears `self._macro_runners` and sets
+      `self.mouse`/`self.keyboard` to `None` as its last step, once nothing after that point still
+      needs them -- letting each Controller's own `__del__` close its connection immediately
+      instead of waiting on indefinite, unrelated timing. Added `OnCloseDropsControllerReferences`
+      (`tests/test_ui.py`): `weakref`-based regression tests proving both `self.ui.mouse`/
+      `self.ui.keyboard` and a stale `_macro_runners` entry are actually collected right after
+      `on_close()`, plus a sabotage test (restores `self.mouse` after a real `on_close()` call)
+      confirming the real tests fail without the fix. 481 tests green locally
+      (478 + 3 new), full suite, matching CI's own invocation.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/53
 - [ ] G#46 / GH#85 — github: true — **Delete merged remote branches** (Leo, 2026-09-13). As of
       2026-09-15, 15 branches on `github` are fully merged, listed on the ticket. Keep

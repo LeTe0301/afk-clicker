@@ -5572,6 +5572,22 @@ class AfkAutoclicker:
             # a stuck Xlib.display.Display() connection must not hang close.
             self._poll_thread.join(timeout=2.0)
         self._release_right()          # never leave a mouse button stuck down
+        # GH#95/G#53: pynput's Controller.__del__ closes its own Xlib
+        # connection once nothing references the Controller any more, but
+        # self.mouse/self.keyboard -- and each MacroRunner's own copy of
+        # both, stored in self._macro_runners since G#47/GH#15 -- otherwise
+        # stay referenced for as long as this whole app object does. Across
+        # a test suite sharing one process (~150+ UI-building test classes,
+        # several opening a second Xlib connection each via the Macros
+        # tab), that is long enough for unclosed connections to pile up
+        # past Xvfb's max-clients ceiling before anything ever collects the
+        # app objects holding them (mitigated, not fixed, by raising that
+        # ceiling in .github/workflows/ci.yml -- see G#53). Nothing past
+        # this point uses either Controller; dropping the references here
+        # lets each one's __del__ close its connection immediately.
+        self._macro_runners = {}
+        self.mouse = None
+        self.keyboard = None
         # G#27/ac-27 round 2 (PR #47): this used to also release bind_all()'s
         # funcid (unbind_all()+deletecommand()) and sweep every Variable's
         # traces (self._forget_traces()) here, right after cancelling the
