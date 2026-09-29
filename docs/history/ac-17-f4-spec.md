@@ -332,6 +332,19 @@ new `ui_scale_var.trace_add(...)` must be registered the same way, after
 its `Segmented` is constructed — same ordering, same reason, same safety
 argument, not a new one.
 
+**Correction (fix-pass, this feature's own implementation cycle): the
+paragraph above overstates what the registration order buys.** Reversing
+`appearance_var`'s and `ui_scale_var`'s trace order was checked empirically
+and changed nothing observable — the full suite still passed for Theme and
+UI scale alike. The real reason neither is vulnerable to the `TclError`
+this section describes is that `_apply_appearance`/`_apply_ui_scale` never
+rebuild synchronously inside the trace at all; `after_idle` defers the
+rebuild past the point where trace-firing order could matter, regardless of
+which `trace_add` call came first. The ordering discipline above is still
+worth keeping — it is exactly what a *future* change to a synchronous
+rebuild would need — but it is not today's safety mechanism. See
+`docs/history/ac-17-f4-implementation.md`'s Finding 1 for the experiment.
+
 ### 3. Fonts — checked, no new floor added
 
 The smallest font base anywhere in the file is `int(8 * s)`

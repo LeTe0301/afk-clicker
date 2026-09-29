@@ -60,11 +60,25 @@ jobs:
       # pynput resolves its X11 backend at import time and raises without a
       # display, so on Linux the whole suite needs one -- not just the window
       # tests. Windows and macOS have a window server either way.
+      #
+      # --server-args raises Xvfb's own default client cap (256, the classic
+      # X11 protocol limit): this suite builds a fresh tk.Tk() (an Xlib
+      # client) per test across ~150+ UI-building test classes, several of
+      # which now also open a second Xlib connection each via pynput's mouse
+      # AND keyboard Controllers (G#47/GH#15's MacroRunner needs its own),
+      # plus test_updater.py's own subprocesses that re-import afk_clicker
+      # and open their own connections. With gc.disable() in effect for the
+      # whole run (tests/context.py), a finished test's connection is not
+      # guaranteed to close before the next one opens, so the running total
+      # can exceed 256 well before the suite ends -- reproduced directly:
+      # "Xlib.error.DisplayConnectionError: ... Maximum number of clients
+      # reached" (CI run 36489585846, ubuntu-latest). 2048 is a generous
+      # multiple of what the suite currently needs, not a tuned minimum.
       - name: Run the test suite (Linux)
         if: runner.os == 'Linux'
         env:
           CI: "true"
-        run: xvfb-run -a python -m unittest discover -s tests -t . -v
+        run: xvfb-run -a --server-args="-screen 0 1280x1024x24 -maxclients 2048" python -m unittest discover -s tests -t . -v
 
       - name: Run the test suite (Windows / macOS)
         if: runner.os != 'Linux'

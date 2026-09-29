@@ -1,0 +1,11 @@
+[
+ {"case":"01","found":["01-a","01-b","01-c","01-d"],"partial":[],"missed":["01-e"],"false_positives":[]},
+ {"case":"02","found":["02-a","02-c","02-d"],"partial":["02-b"],"missed":["02-e"],"false_positives":[]},
+ {"case":"03","found":["03-a","03-b","03-e"],"partial":[],"missed":["03-c","03-d"],"false_positives":[]},
+ {"case":"04","found":["04-a","04-b","04-c","04-d","04-e"],"partial":[],"missed":[],"false_positives":[]},
+ {"case":"05","found":["05-a","05-b","05-d"],"partial":["05-c"],"missed":[],"false_positives":[]},
+ {"case":"06","found":["06-a","06-b","06-d","06-e"],"partial":[],"missed":["06-c","06-f"],"false_positives":[]},
+ {"case":"07","found":["07-a","07-b","07-c","07-d","07-e"],"partial":[],"missed":["07-f"],"false_positives":[]},
+ {"case":"08","found":["08-a","08-b","08-c","08-d","08-e"],"partial":[],"missed":["08-f"],"false_positives":[]},
+ {"case":"09","found":["09-a","09-c","09-d"],"partial":["09-b"],"missed":["09-e"],"false_positives":[]}
+]

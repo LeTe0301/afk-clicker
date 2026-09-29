@@ -87,8 +87,11 @@ unter Windows, macOS und GNOME —, einmal beim Start gelesen. Unter
 festlegen, oder wieder auf **System** zurückstellen — die Änderung wirkt
 sofort, ohne Neustart. Auf anderen Linux-Desktops, oder wenn sich der
 Systemwert gar nicht auslesen lässt, öffnet es sich bei **System** dunkel.
-Direkt darunter regelt **UI scale** (90 % / 100 % / 115 % / 130 %) die Größe
-des ganzen Fensters — ebenfalls sofort wirksam, ohne Neustart.
+Direkt darunter regelt **UI scale** die Größe des ganzen Fensters — ebenfalls
+sofort wirksam, ohne Neustart. Voreingestellt ist **Auto**: die Größe folgt
+stufenlos der Fenstergröße, zwischen 90 % und 130 % gedeckelt. Alternativ
+lässt sich auf einen der festen Schritte **90 % / 100 % / 115 % / 130 %**
+umstellen.
 
 ### Hotkey
 
@@ -102,6 +105,19 @@ Viertelsekunden-Debounce fängt Doppelanschläge ab.
 
 Als Hotkey taugt jede Taste, aber eine **Funktionstaste ist die vernünftige
 Wahl**: einen Buchstaben löst du beim Laufen versehentlich mit aus.
+
+### Macros
+
+Dritter Tab neben Hotkey/Clicking, pro Spiel gespeichert wie dessen
+Klick-Einstellungen. Ein Macro ist eine geordnete Liste von Schritten — Taste
+runter, Taste rauf, Klick, Warten — und feuert über einen eigenen, mit
+**Record** aufgenommenen Akkord. **+ New macro** öffnet den Editor: Name,
+Hotkey und Schrittliste; **✕/↑/↓** entfernt bzw. verschiebt einen Schritt,
+gespeichert wird erst mit **Save**. Läuft genau einmal pro Auslösung — ein
+zweiter Tastendruck während das Macro noch läuft wird ignoriert, nicht
+gestapelt. Absichtlich deterministisch: kein Jitter, keine zufällige
+Reihenfolge — dieselbe Regel, die auch das Klick-Intervall nur streut, nicht
+verschleiert.
 
 ## Warum ein eigener Hotkey-Abgleich
 

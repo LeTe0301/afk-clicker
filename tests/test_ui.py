@@ -114,6 +114,14 @@ class UITestCase(CapturesCallbackExceptions, unittest.TestCase):
         # This one-time focus_force() makes the toplevel genuinely own input
         # focus so every focus_set()-based assertion below observes something
         # -- the app itself keeps using focus_set(), never focus_force().
+        #
+        # X input focus is a single resource shared by every process on the
+        # same display, not just within one: a second Tk process calling
+        # focus_force() on the same display steals it back, and every focus
+        # assertion in the first process then reads focus_get() as None. When
+        # deliberately inducing load to chase a flaky focus test, run the
+        # load on a different Xvfb display (e.g. :98) than the suite under
+        # scrutiny (e.g. :99).
         self.root.focus_force()
 
     def tearDown(self):
@@ -228,9 +236,21 @@ class Sidebar(UITestCase):
         self.assertEqual(set(self.ui.items), {"minecraft", "global"})
 
     def test_running_dot_and_follow(self):
+        # G#39/GH#75 (macOS-only flake): no root.update() here, deliberately
+        # -- _mark_running() is a plain synchronous call (set_state()/_paint()
+        # are direct canvas itemconfig() calls, self.current/game_state.cget()
+        # read back plain state with no redraw needed), so nothing below
+        # actually depends on an event-loop pump to observe the update. The
+        # removed update() used to service whichever timer next came due --
+        # on a slow macOS runner, that could be the periodic _poll_games()
+        # reschedule armed back in setUp(), whose own real (never-mocked)
+        # scan result then lands through _apply_scan() -> _mark_running(set())
+        # and clears the dot this test just set, exactly matching the CI
+        # failure this class was named for. No event-loop cycle, no due
+        # timer serviced, no race -- same fix shape as removing an
+        # unnecessary root.update() anywhere else in this suite.
         self.ui._seen_running = set()
         self.ui._mark_running({"minecraft"})
-        self.root.update()
         self.assertTrue(self.ui.items["minecraft"].running)
         self.assertFalse(self.ui.items["global"].running)
         self.assertEqual(self.ui.current, "minecraft")
@@ -427,6 +447,23 @@ class StoreSaveResult(unittest.TestCase):
         finally:
             app.os.replace = original_replace
 
+    def test_a_failed_replace_does_not_leave_a_tmp_file_behind(self):
+        # G#43/GH#79: save() used to write settings.json.tmp and then leave
+        # it on disk if os.replace() raised afterwards (e.g. Windows
+        # PermissionError while another process holds settings.json open).
+        store = app.Store(self.path)
+        original_replace = app.os.replace
+
+        def raising_replace(*a, **kw):
+            raise OSError("another process holds this file open")
+
+        app.os.replace = raising_replace
+        try:
+            self.assertFalse(store.save())
+        finally:
+            app.os.replace = original_replace
+        self.assertFalse(os.path.exists(self.path + ".tmp"))
+
     def test_put_game_returns_saves_own_result(self):
         store = app.Store(self.path)
         self.assertTrue(store.put_game("global", {"click_ms": 700}))
@@ -523,6 +560,113 @@ class StoreMigration(UITestCase):
         self.assertEqual(on_disk["games"]["minecraft"]["click_ms"], 650)
         store2 = app.Store(self.config)
         self.assertEqual(store2.data["games"]["minecraft"]["click_ms"], 650)
+
+
+class SettingsSchemaVersion(UITestCase):
+    """G#46/GH#15's prerequisite (docs/ROADMAP.md "Settings schema
+    version"): settings.json now carries a version field, so a future
+    format change has something to compare against instead of guessing an
+    old file's shape from which keys happen to be present."""
+
+    def _write(self, data):
+        with open(self.config, "w") as fh:
+            json.dump(data, fh)
+
+    def test_a_fresh_store_is_at_the_current_version(self):
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+
+    def test_a_saved_store_writes_the_current_version_to_disk(self):
+        store = app.Store(self.config)
+        store.save()
+        with open(self.config, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        self.assertEqual(on_disk["version"], app.SETTINGS_VERSION)
+
+    def test_a_file_with_no_version_key_is_treated_as_version_0(self):
+        # Every settings.json ever written before this change -- the exact
+        # real-world case this migration exists for.
+        self._write({"games": {"minecraft": {"click_ms": 510}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+        # The v0->v1 migration (the promoted click_ms rewrite) still ran.
+        self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 650)
+
+    def test_a_file_already_at_the_current_version_is_not_migrated_again(self):
+        self._write({"version": app.SETTINGS_VERSION,
+                     "games": {"minecraft": {"click_ms": 510}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+        # Already at v1 -- a real, deliberately-chosen 510 must survive,
+        # unlike the v0 case above where it's the old, auto-saved default.
+        self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 510)
+
+    def test_a_garbage_version_value_is_treated_as_version_0(self):
+        # Same "untrustworthy value is as untrustworthy as a damaged file"
+        # contract as every other field Store.__init__ defends (appearance,
+        # ui_scale, games' own shape).
+        for bad in ("not a number", None, -1, 4.5):
+            with self.subTest(bad=bad):
+                self._write({"version": bad,
+                             "games": {"minecraft": {"click_ms": 510}}})
+                store = app.Store(self.config)
+                self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+                self.assertEqual(
+                    store.data["games"]["minecraft"]["click_ms"], 650)
+
+    def test_a_future_version_this_build_does_not_know_is_left_alone(self):
+        # A file written by a newer build than this one -- no migration
+        # path exists (or is needed) going backward, so the known top-level
+        # keys are taken as-is rather than guessed at.
+        self._write({"version": app.SETTINGS_VERSION + 1,
+                     "games": {"minecraft": {"click_ms": 510}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION + 1)
+        self.assertEqual(store.data["games"]["minecraft"]["click_ms"], 510)
+
+
+class StoreMacroFiltering(UITestCase):
+    """G#47/GH#15: a per-game "macros" list is filtered through
+    _validate_macro() at load time, the same "corrupt is dropped, never
+    fatal" contract Store.__init__ already applies to the games dict
+    itself -- a malformed macro must not crash startup or, worse, survive
+    into MacroRunner as real input."""
+
+    def _write(self, data):
+        with open(self.config, "w") as fh:
+            json.dump(data, fh)
+
+    def test_a_well_formed_macro_survives_a_load(self):
+        self._write({"games": {"minecraft": {"macros": [
+            {"id": "abc", "name": "Restock", "hotkey": None,
+             "steps": [{"type": "wait", "ms": 10}]},
+        ]}}})
+        store = app.Store(self.config)
+        macros = store.data["games"]["minecraft"]["macros"]
+        self.assertEqual(len(macros), 1)
+        self.assertEqual(macros[0]["name"], "Restock")
+
+    def test_a_malformed_macro_is_dropped_not_fatal(self):
+        self._write({"games": {"minecraft": {"macros": [
+            {"id": "abc", "name": "Good", "hotkey": None,
+             "steps": [{"type": "wait", "ms": 10}]},
+            {"name": "Bad -- no steps at all"},
+            {"name": "", "steps": []},   # empty name
+            "not even a dict",
+        ]}}})
+        store = app.Store(self.config)
+        macros = store.data["games"]["minecraft"]["macros"]
+        self.assertEqual([m["name"] for m in macros], ["Good"])
+
+    def test_a_non_list_macros_value_does_not_crash_the_load(self):
+        self._write({"games": {"minecraft": {"macros": "oops"}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"]["minecraft"].get("macros", []), [])
+
+    def test_a_missing_macros_key_defaults_to_empty_at_read_time(self):
+        self._write({"games": {"minecraft": {"click_ms": 700}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["games"]["minecraft"].get("macros", []), [])
 
 
 class ClickLoop(UITestCase):
@@ -1166,6 +1310,29 @@ class WindowMinimumHeight(UITestCase):
     reach below the bootstrap value instead of always clamping upward."""
     INITIAL_UI_SCALE = "100"
 
+    @staticmethod
+    def _pady_total(widget):
+        pady = widget.pack_info().get("pady", 0)
+        if isinstance(pady, (tuple, list)):
+            return int(pady[0]) + int(pady[1])
+        return 2 * int(pady)
+
+    @classmethod
+    def _required_natural(cls, pane, top, bottom):
+        # G#42/GH#81: each mapped non-spacer child's own winfo_reqheight()
+        # plus its pack pady (read via pack_info(), the accounting
+        # _fill_pane()'s own docstring insists on) against the pane's
+        # available height -- NOT each child's *allocated* winfo_y()/
+        # winfo_height(), which is what test_sweep_hint_height_floor_
+        # minecraft_with_eating's own comment (below) found blind to real
+        # clipping: pack() silently shrinks the last-packed child to fit
+        # rather than ever letting an allocated span exceed the pane, so a
+        # natural built from allocated heights can never exceed
+        # pane.winfo_height() no matter how much content actually overflows.
+        kids = [c for c in pane.winfo_children()
+                if c.winfo_ismapped() and c not in (top, bottom)]
+        return sum(c.winfo_reqheight() + cls._pady_total(c) for c in kids)
+
     def test_minimum_height_shrunk_from_the_pre_tab_split_floor(self):
         self.assertLess(app.WINDOW_MIN_H, 690)
 
@@ -1194,10 +1361,7 @@ class WindowMinimumHeight(UITestCase):
         # this pane directly, Tk silently ignores config(height=0) on a
         # plain Frame here anyway, so a reset step would be a no-op.
         pane.update_idletasks()
-        kids = [c for c in pane.winfo_children()
-                if c.winfo_ismapped() and c not in (top, bottom)]
-        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
-                   - min(c.winfo_y() for c in kids))
+        natural = self._required_natural(pane, top, bottom)
         self.assertLessEqual(natural, pane.winfo_height())
 
     def test_tallest_pane_still_fits_at_the_floor_reverse_order(self):
@@ -1224,10 +1388,7 @@ class WindowMinimumHeight(UITestCase):
         self.root.update()
         pane, top, bottom = self.ui._pane_fills["clicking"]
         pane.update_idletasks()
-        kids = [c for c in pane.winfo_children()
-                if c.winfo_ismapped() and c not in (top, bottom)]
-        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
-                   - min(c.winfo_y() for c in kids))
+        natural = self._required_natural(pane, top, bottom)
         self.assertLessEqual(natural, pane.winfo_height())
         self.assertTrue(top.winfo_ismapped())
         self.assertTrue(bottom.winfo_ismapped())
@@ -1248,10 +1409,7 @@ class WindowMinimumHeight(UITestCase):
         # No zero-spacers step here either -- see the sibling test above.
         pane, top, bottom = self.ui._pane_fills["clicking"]
         pane.update_idletasks()
-        kids = [c for c in pane.winfo_children()
-                if c.winfo_ismapped() and c not in (top, bottom)]
-        natural = (max(c.winfo_y() + c.winfo_height() for c in kids)
-                   - min(c.winfo_y() for c in kids))
+        natural = self._required_natural(pane, top, bottom)
         self.assertLessEqual(natural, pane.winfo_height())
 
     def test_sweep_hint_height_floor_minecraft_with_eating(self):
@@ -1295,17 +1453,6 @@ class WindowMinimumHeight(UITestCase):
         # likely fail", 120px used) despite being three characters shorter,
         # purely because of where its words break -- BAD is not established
         # to be the worse case, so this test no longer assumes it is.
-        def _pady_total(widget):
-            pady = widget.pack_info().get("pady", 0)
-            if isinstance(pady, (tuple, list)):
-                return int(pady[0]) + int(pady[1])
-            return 2 * int(pady)
-
-        def _required_natural(pane, top, bottom):
-            kids = [c for c in pane.winfo_children()
-                    if c.winfo_ismapped() and c not in (top, bottom)]
-            return sum(c.winfo_reqheight() + _pady_total(c) for c in kids)
-
         for scale in ("90", "130"):
             with self.subTest(scale=scale):
                 self.ui.store.data["ui_scale"] = scale
@@ -1329,7 +1476,7 @@ class WindowMinimumHeight(UITestCase):
 
                         pane, top, bottom = ui._pane_fills["clicking"]
                         pane.update_idletasks()
-                        natural = _required_natural(pane, top, bottom)
+                        natural = self._required_natural(pane, top, bottom)
                         self.assertLessEqual(natural, pane.winfo_height())
 
                         warning_h = ui.jitter_row.winfo_reqheight()
@@ -3110,6 +3257,24 @@ class FlatChrome(unittest.TestCase):
         self.assertIn("rectangle", types)
         self.assertNotIn("polygon", types)
 
+    def test_tab_bar_underline_uses_its_own_height_not_the_module_default(self):
+        # G#44/GH#83: _paint() used to rebuild h from the module-level
+        # TAB_HEIGHT constant instead of self.h, so a TabBar built with a
+        # non-default height (the only call sites today omit height=, so
+        # this couldn't happen yet) would draw its underline at the wrong
+        # y -- against TAB_HEIGHT's floor/height, not its own.
+        var = tk.StringVar(value="a")
+        custom_height = app.TAB_HEIGHT + 20
+        bar = app.TabBar(self.root, [("a", "A"), ("b", "B")], var, 1.0,
+                         height=custom_height)
+        underline_h = int(app.TAB_UNDERLINE_H * bar.s)
+        expected_top = bar.h - underline_h
+        self.assertNotEqual(bar.h, int(app.TAB_HEIGHT * bar.s),
+                            "test is meaningless unless the custom height differs")
+        coords = bar.coords(bar.underline)
+        self.assertEqual(coords[1], expected_top)
+        self.assertEqual(coords[3], bar.h)
+
 
 @needs_display
 class SectionHeader(unittest.TestCase):
@@ -4187,6 +4352,27 @@ class UIScaleAuto(UITestCase):
                     self.assertGreater(self.ui.s, prev_s)
                 prev_s = self.ui.s
 
+    def test_a_genuinely_out_of_range_factor_clamps_to_the_scale_bound(self):
+        # G#43/GH#90: every back-solved factor above (0.92-1.28) already
+        # sits inside [AUTO_SCALE_MIN, AUTO_SCALE_MAX], so the
+        # assertGreaterEqual/assertLessEqual pair above passes whether or
+        # not the clamp in _auto_scale_factor() actually exists --
+        # sabotage-verified: removing the clamp there left that test green
+        # while a direct call showed unclamped factors of 2.25/0.078 for
+        # extreme window sizes. These two factors are genuinely out of
+        # [AUTO_SCALE_MIN, AUTO_SCALE_MAX] by construction (_wh_for_factor
+        # back-solves for the exact raw, pre-clamp factor), so self.ui.s
+        # must land exactly at the clamp boundary, not merely somewhere
+        # inside it.
+        self.ui._screen_w, self.ui._screen_h = 3840, 2160
+        self._suppress_self_triggered_real_growth()
+        for factor, bound in ((1.6, app.AUTO_SCALE_MAX), (0.5, app.AUTO_SCALE_MIN)):
+            with self.subTest(factor=factor):
+                w, h = self._wh_for_factor(self.ui._dpi_s * factor)
+                self.root.event_generate("<Configure>", width=w, height=h)
+                self.root.update()
+                self.assertEqual(self.ui.s, self.ui._dpi_s * bound)
+
     def test_minsize_tracks_the_live_scale_during_a_continuous_shrink(self):
         # Same forced-screen/synthetic-event reasoning as
         # test_s_strictly_increases_with_increasing_window_size above --
@@ -4243,28 +4429,74 @@ class UIScaleAuto(UITestCase):
     def test_the_settle_timer_resets_on_each_new_event_not_just_the_first(self):
         # Distinguishes real debounce from mere after_idle-style coalescing
         # (docs/spec.md "The debounce decision"): a second event arriving
-        # inside the first event's own settle window must push the
-        # deadline out again, not just get folded into the first one.
+        # inside the first event's own settle window must push the deadline
+        # out again, not just get folded into the first one.
+        #
+        # G#51/GH#92 (macOS-only flake, two separate causes):
+        #
+        # 1. Rewritten from two fixed-wall-clock pump()+assertEqual(0)
+        # checkpoints -- each needing real time to land inside a narrow
+        # margin before the next boundary -- to a single timestamp
+        # comparison after a generous pump_until() wait. The original
+        # failed on macOS CI ("AssertionError: 1 != 0", reproduced
+        # identically on main before this branch existed) when a slow
+        # root.update() call inside pump() overshot a checkpoint's own
+        # margin, firing the timer before the test's next fixed-duration
+        # check ran -- a timing artifact of the test's own two-narrow-
+        # windows shape, not the debounce behaviour it exists to verify.
+        #
+        # 2. The two target factors below (1.05, 1.15) were raw, unlike
+        # every sibling test in this class (test_s_strictly_increases_...,
+        # test_minsize_tracks_..., etc.), which all multiply by
+        # self.ui._dpi_s before calling _wh_for_factor() -- see Round 4's
+        # own comment on those: _auto_scale_factor()'s clamp range is
+        # DPI-*relative* ([self._dpi_s * AUTO_SCALE_MIN, self._dpi_s *
+        # AUTO_SCALE_MAX]), the exact fix for the G#38 round-4 DPI-
+        # absolute-vs-relative clamp bug this project already hit once on
+        # macOS CI. A real macOS runner's own tk scaling can put _dpi_s
+        # well above 1.0 (unlike this Xvfb suite's own ~1.0), and once
+        # dpi_s*0.9 alone exceeds 1.15, BOTH raw factors clamp to the same
+        # floor -- self.s never actually changes on the second event, so
+        # _request_auto_settle() is never called a second time, and the
+        # rebuild fires once, ~settle_s after the FIRST event alone,
+        # exactly matching both the original and this test's own rewritten
+        # failure (a value just under 1x settle_s, not the ~1.3x a real
+        # reset produces). Scaled by self.ui._dpi_s now, matching every
+        # sibling test, so both factors land at the same relative position
+        # inside the clamp window regardless of the runner's real DPI.
         calls = []
         original = self.ui._rebuild_ui
         def spy():
-            calls.append(1)
+            calls.append(time.monotonic())
             original()
         self.ui._rebuild_ui = spy
-        w1, h1 = self._wh_for_factor(1.05)
+        settle_s = app.AUTO_SETTLE_MS / 1000
+        w1, h1 = self._wh_for_factor(self.ui._dpi_s * 1.05)
         self.root.event_generate("<Configure>", width=w1, height=h1)
         self.root.update()
-        self.pump(app.AUTO_SETTLE_MS / 1000 * 0.6)   # well within the window
+        t1 = time.monotonic()
+        # Comfortably inside the first event's own window -- if this ever
+        # fires, the settle timer isn't debouncing at all. Nowhere near a
+        # boundary, so no amount of realistic scheduling jitter reaches it.
+        self.pump(settle_s * 0.3)
         self.assertEqual(len(calls), 0)
-        w2, h2 = self._wh_for_factor(1.15)
+        w2, h2 = self._wh_for_factor(self.ui._dpi_s * 1.15)
         self.root.event_generate("<Configure>", width=w2, height=h2)
         self.root.update()
-        self.pump(app.AUTO_SETTLE_MS / 1000 * 0.6)   # would have fired for
-            # the FIRST event's own window by now if the timer hadn't reset
-        self.assertEqual(len(calls), 0)
-        self.pump(app.AUTO_SETTLE_MS / 1000 * 0.6)   # now past the second
-                                                       # event's own window
-        self.assertEqual(len(calls), 1)
+        self.pump_until(lambda: calls, timeout=settle_s * 10)
+        self.assertEqual(len(calls), 1, "settle timer never fired")
+        # The property that actually distinguishes reset from coalesced: if
+        # the second event had merely been folded into the first event's
+        # already-pending deadline, the rebuild lands close to
+        # t1 + settle_s (~1.0x). A real reset lands close to the second
+        # event's own time -- itself already > t1 + settle_s*0.3 -- plus a
+        # full settle_s, i.e. comfortably past t1 + settle_s*1.3. 1.15x
+        # sits clearly between the two, with margin on both sides for
+        # scheduling jitter.
+        self.assertGreater(calls[0] - t1, settle_s * 1.15,
+                           "rebuild landed too soon after the first event -- "
+                           "looks coalesced into its deadline, not reset by "
+                           "the second event")
 
     def test_shrinking_past_the_threshold_collapses_the_rail_under_auto(self):
         # Mirrors WindowResize.test_shrinking_past_the_threshold_collapses_
@@ -5312,6 +5544,45 @@ class AfterJobsAreNotDuplicated(UITestCase):
         self.assertEqual(len(self.ui._timers), 3)
         self.pump(1.0)
         self.assertEqual(len(self.ui._timers), 3)
+
+
+class RebuildCancelsAPendingPaneFill(UITestCase):
+    """G#45/GH#84: _rebuild_ui() cancelled a pending self._rebuild_after_id
+    but left self._pane_fill_after_id (from _request_pane_fill()) alone --
+    on_close() already cancels both. A pending pane fill landing after a
+    rebuild was harmless in practice (the same test would still pass
+    without this fix, since _run_pane_fill() resolves its key against the
+    live tree at drain time), but nothing enforced it: this asserts the
+    job itself is gone, not just that it's harmless."""
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_a_queued_pane_fill_is_cancelled_before_a_rebuild(self):
+        # Asserts the mechanism directly (the pre-rebuild job id is actually
+        # passed to after_cancel), rather than that self._pane_fill_after_id
+        # reads None afterward -- rebuilding the pane tree legitimately
+        # requests a fresh pane fill of its own (every pane's <Configure>
+        # binding calls _request_pane_fill()), so a new, different job is
+        # expected to be pending again right after _rebuild_ui() returns;
+        # that would make a bare "is None" check pass either way and prove
+        # nothing about whether the OLD job was ever cancelled.
+        self.ui._request_pane_fill("hotkey")
+        pending_id = self.ui._pane_fill_after_id
+        self.assertIsNotNone(pending_id)
+        cancelled = []
+        original_cancel = self.root.after_cancel
+
+        def spy(job_id):
+            cancelled.append(job_id)
+            return original_cancel(job_id)
+        self.root.after_cancel = spy
+        try:
+            self.ui._rebuild_ui()
+        finally:
+            self.root.after_cancel = original_cancel
+        self.assertIn(pending_id, cancelled)
 
 
 class BindAllBoundOnce(UITestCase):
@@ -6574,6 +6845,366 @@ class UpdateLogPrompt(CapturesCallbackExceptions, unittest.TestCase):
 
     def test_fallback_is_not_clipped_at_130_percent(self):
         self._assert_fallback_not_clipped("130")
+
+
+class MacroValidation(unittest.TestCase):
+    """G#47/GH#15: _validate_macro()/_validate_macro_step() reject-not-coerce
+    contract, matching Hotkey.from_json()'s own reasoning -- a malformed
+    macro feeds MacroRunner real input, so anything not exactly well-formed
+    is dropped rather than silently repaired into a different, plausible-
+    looking macro. No Tk/display needed -- these are plain functions."""
+
+    def _valid_blob(self, **overrides):
+        blob = {
+            "name": "Restock hotbar",
+            "hotkey": {"mods": ["ctrl"], "keys": [["f8", None, None]]},
+            "steps": [
+                {"type": "key_down", "key": ["f1", None, None]},
+                {"type": "wait", "ms": 50},
+                {"type": "key_up", "key": ["f1", None, None]},
+                {"type": "click", "button": "left"},
+            ],
+        }
+        blob.update(overrides)
+        return blob
+
+    def test_a_well_formed_macro_is_accepted(self):
+        m = app._validate_macro(self._valid_blob())
+        self.assertIsNotNone(m)
+        self.assertEqual(m["name"], "Restock hotbar")
+        self.assertEqual(len(m["steps"]), 4)
+
+    def test_a_missing_id_is_assigned_one(self):
+        m = app._validate_macro(self._valid_blob())
+        self.assertIsInstance(m["id"], str)
+        self.assertTrue(m["id"])
+
+    def test_an_existing_id_survives_revalidation(self):
+        m = app._validate_macro(self._valid_blob())
+        m2 = app._validate_macro(m)
+        self.assertEqual(m["id"], m2["id"])
+
+    def test_a_macro_with_no_hotkey_is_accepted(self):
+        m = app._validate_macro(self._valid_blob(hotkey=None))
+        self.assertIsNotNone(m)
+        self.assertIsNone(m["hotkey"])
+
+    def test_not_a_dict_is_rejected(self):
+        self.assertIsNone(app._validate_macro(["not", "a", "dict"]))
+
+    def test_an_empty_name_is_rejected(self):
+        self.assertIsNone(app._validate_macro(self._valid_blob(name="")))
+        self.assertIsNone(app._validate_macro(self._valid_blob(name="   ")))
+        self.assertIsNone(app._validate_macro(self._valid_blob(name=None)))
+
+    def test_a_malformed_hotkey_rejects_the_whole_macro(self):
+        # {"keys": "nope"} is Hotkey.from_json()'s own canonical garbage
+        # case -- iterating a string hands back characters and would build
+        # a plausible-looking hotkey out of nothing.
+        self.assertIsNone(app._validate_macro(
+            self._valid_blob(hotkey={"keys": "nope"})))
+
+    def test_steps_must_be_a_list(self):
+        self.assertIsNone(app._validate_macro(self._valid_blob(steps="nope")))
+        self.assertIsNone(app._validate_macro(self._valid_blob(steps={"a": 1})))
+
+    def test_too_many_steps_is_rejected(self):
+        steps = [{"type": "wait", "ms": 1}] * (app.MACRO_MAX_STEPS + 1)
+        self.assertIsNone(app._validate_macro(self._valid_blob(steps=steps)))
+
+    def test_one_malformed_step_rejects_the_whole_macro(self):
+        steps = [{"type": "wait", "ms": 1}, {"type": "not_a_real_type"}]
+        self.assertIsNone(app._validate_macro(self._valid_blob(steps=steps)))
+
+    def test_click_button_must_be_a_known_value(self):
+        self.assertIsNone(app._validate_macro_step({"type": "click", "button": "up"}))
+        for button in app.MACRO_BUTTONS:
+            with self.subTest(button=button):
+                self.assertIsNotNone(
+                    app._validate_macro_step({"type": "click", "button": button}))
+
+    def test_wait_ms_must_be_a_non_negative_number_within_bounds(self):
+        self.assertIsNone(app._validate_macro_step({"type": "wait", "ms": -1}))
+        self.assertIsNone(app._validate_macro_step(
+            {"type": "wait", "ms": app.MACRO_MAX_WAIT_MS + 1}))
+        # bool is an int subclass -- isinstance(True, int) is True -- so a
+        # bare isinstance check alone would accept True/False as 1/0 ms.
+        self.assertIsNone(app._validate_macro_step({"type": "wait", "ms": True}))
+        self.assertIsNotNone(app._validate_macro_step({"type": "wait", "ms": 0}))
+        self.assertIsNotNone(
+            app._validate_macro_step({"type": "wait", "ms": app.MACRO_MAX_WAIT_MS}))
+
+    def test_key_down_and_key_up_reuse_hotkeys_own_key_record_vocabulary(self):
+        # Same malformed shapes Hotkey.from_json() rejects for a chord key.
+        for bad_key in (None, "f1", [], [None, None, None, None],
+                        [True, None, None], ["not_a_real_key_name", None, None]):
+            with self.subTest(bad_key=bad_key):
+                self.assertIsNone(app._validate_macro_step(
+                    {"type": "key_down", "key": bad_key}))
+        self.assertIsNotNone(app._validate_macro_step(
+            {"type": "key_down", "key": ["f1", None, None]}))
+
+    def test_an_unknown_step_type_is_rejected(self):
+        self.assertIsNone(app._validate_macro_step({"type": "teleport"}))
+
+
+class FakeKeyboard:
+    """Records what MacroRunner asked for instead of sending real key
+    events -- same style as FakeMouse above."""
+
+    def __init__(self):
+        self.pressed = []
+        self.released = []
+
+    def press(self, key):
+        self.pressed.append(key)
+
+    def release(self, key):
+        self.released.append(key)
+
+
+class MacroRunnerReleasesHeldKeys(unittest.TestCase):
+    """G#47/GH#15's own explicit acceptance criterion: 'every key a macro
+    presses must be tracked and released on any exit path' -- the click
+    loop already proved this discipline necessary for one fixed mouse
+    button (AfkAutoclicker.loop's own finally/_release_right, and a review
+    round found the test covering that passed with the finally deleted).
+    No Tk/display needed -- MacroRunner only touches the mouse/keyboard
+    fakes given to it."""
+
+    BUTTONS = {"left": "L", "right": "R", "middle": "M"}
+
+    def test_a_normal_run_presses_and_releases_in_order(self):
+        kbd, mouse = FakeKeyboard(), FakeMouse()
+        steps = [
+            {"type": "key_down", "key": ["f1", None, None]},
+            {"type": "click", "button": "left"},
+            {"type": "key_up", "key": ["f1", None, None]},
+        ]
+        app.MacroRunner(steps, mouse, kbd, self.BUTTONS).run()
+        self.assertEqual(kbd.pressed, [app.kb.Key.f1])
+        self.assertEqual(kbd.released, [app.kb.Key.f1])
+        self.assertEqual(mouse.clicks[0][0], "L")
+
+    def test_stopping_mid_wait_still_releases_a_held_key(self):
+        kbd, mouse = FakeKeyboard(), FakeMouse()
+        steps = [
+            {"type": "key_down", "key": ["f2", None, None]},
+            {"type": "wait", "ms": 5000},
+            {"type": "key_up", "key": ["f2", None, None]},
+        ]
+        runner = app.MacroRunner(steps, mouse, kbd, self.BUTTONS)
+        t = threading.Thread(target=runner.run)
+        t.start()
+        # No fixed sleep-then-stop race: pump until the key is actually
+        # pressed, so this doesn't depend on how fast the runner thread
+        # gets scheduled.
+        deadline = time.monotonic() + 2.0
+        while not kbd.pressed and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(kbd.pressed, "runner never reached the key_down step")
+        runner.stop()
+        t.join(timeout=2.0)
+        self.assertFalse(t.is_alive(), "runner did not stop promptly")
+        self.assertEqual(kbd.released, [app.kb.Key.f2])
+
+    def test_an_exception_mid_sequence_still_releases_a_held_key(self):
+        class BoomMouse:
+            def click(self, button):
+                raise RuntimeError("boom")
+        kbd = FakeKeyboard()
+        steps = [
+            {"type": "key_down", "key": ["f3", None, None]},
+            {"type": "click", "button": "left"},
+        ]
+        runner = app.MacroRunner(steps, BoomMouse(), kbd, self.BUTTONS)
+        with self.assertRaises(RuntimeError):
+            runner.run()
+        self.assertEqual(kbd.released, [app.kb.Key.f3])
+
+    def test_a_deleted_finally_fails_this_test(self):
+        # Sabotage-verifies test_stopping_mid_wait_still_releases_a_held_key
+        # above actually exercises the guarantee, not merely a run that
+        # happens to reach key_up anyway -- same discipline story #15 asks
+        # for ("a test that fails when the finally is deleted"). Runs the
+        # identical scenario against a version of run() with the finally
+        # removed (the exact pre-fix shape) and asserts THAT one fails to
+        # release, proving the real test above is not vacuous.
+        def sabotaged_run(self):
+            for step in self.steps:
+                if self._stop.is_set():
+                    break
+                kind = step["type"]
+                if kind == "key_down":
+                    self._press(step["key"])
+                elif kind == "key_up":
+                    self._release(step["key"])
+                elif kind == "click":
+                    self.mouse.click(self.click_buttons[step["button"]])
+                elif kind == "wait":
+                    self._stop.wait(step["ms"] / 1000)
+            # No finally: _release_all() only runs if every step above did.
+
+        kbd, mouse = FakeKeyboard(), FakeMouse()
+        steps = [
+            {"type": "key_down", "key": ["f2", None, None]},
+            {"type": "wait", "ms": 5000},
+            {"type": "key_up", "key": ["f2", None, None]},
+        ]
+        runner = app.MacroRunner(steps, mouse, kbd, self.BUTTONS)
+        original_run = app.MacroRunner.run
+        app.MacroRunner.run = sabotaged_run
+        try:
+            t = threading.Thread(target=runner.run)
+            t.start()
+            deadline = time.monotonic() + 2.0
+            while not kbd.pressed and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(kbd.pressed, "runner never reached the key_down step")
+            runner.stop()
+            t.join(timeout=2.0)
+            self.assertFalse(t.is_alive(), "sabotaged runner did not stop promptly")
+            self.assertEqual(kbd.released, [],
+                             "sabotaged run() (no finally) unexpectedly "
+                             "released the held key -- this test's sabotage "
+                             "did not reproduce the pre-fix bug, so it "
+                             "cannot prove the real test above is meaningful")
+        finally:
+            app.MacroRunner.run = original_run
+
+
+class MacrosTab(UITestCase):
+    """G#47/GH#15: the Macros tab itself -- per-game storage, the add/edit/
+    delete/run UI wiring, and the hotkey lifecycle tied to _select()."""
+
+    # Same reasoning and same crash as HotkeyPersistence/
+    # HotkeyListenerSurvivesRebuild's own needs_input_permission: a macro
+    # with a real hotkey arms a real HotkeyWatcher (_arm_macro_hotkeys()),
+    # which starts a real pynput kb.Listener() -- on macOS CI this aborts
+    # the whole process with SIGTRAP ("Trace/BPT trap: 5", exit 133)
+    # regardless of what macos_input_permitted() answers (AXIsProcessTrusted
+    # reports trusted there, but the CoreGraphics event tap aborts anyway).
+    # Confirmed directly: PR #92's first macOS run after this class landed
+    # crashed the whole suite here. Skipped on macOS outright, same as
+    # every other real-listener test in this file -- see issue #7.
+    needs_input_permission = unittest.skipIf(
+        app is not None and app.sys.platform == "darwin",
+        "starting a listener aborts the process on macOS -- see issue #7")
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    def test_macros_is_a_real_tab_alongside_hotkey_and_clicking(self):
+        self.assertIn(self.ui._content_tab, ("hotkey", "clicking", "macros"))
+        self.ui._set_content_tab("macros")
+        self.root.update()
+        self.assertEqual(self.ui.macros_pane.winfo_manager(), "pack")
+        self.assertEqual(self.ui.hotkey_pane.winfo_manager(), "")
+        self.assertEqual(self.ui.clicking_pane.winfo_manager(), "")
+
+    def test_a_fresh_game_has_no_macros_and_the_pane_says_so(self):
+        self.ui._select("minecraft")
+        self.assertEqual(self.ui.store.game("minecraft").get("macros", []), [])
+        labels = [w.cget("text") for w in self.ui.macros_list.winfo_children()
+                 if isinstance(w, tk.Label)]
+        self.assertIn("No macros yet for this game.", labels)
+
+    @needs_input_permission
+    def test_save_macro_persists_and_arms_its_hotkey(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        steps = [{"type": "wait", "ms": 10}]
+        ok = self.ui._save_macro("minecraft", None, "Test macro", hotkey, steps)
+        self.assertTrue(ok)
+        macros = self.ui.store.game("minecraft")["macros"]
+        self.assertEqual(len(macros), 1)
+        self.assertEqual(macros[0]["name"], "Test macro")
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 1)
+        # Persisted to disk, not just in memory.
+        reloaded = app.Store(self.config)
+        self.assertEqual(len(reloaded.data["games"]["minecraft"]["macros"]), 1)
+
+    @needs_input_permission
+    def test_editing_a_macro_keeps_its_id_and_replaces_its_content(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        self.ui._save_macro("minecraft", None, "Original", hotkey, [{"type": "wait", "ms": 1}])
+        original_id = self.ui.store.game("minecraft")["macros"][0]["id"]
+        self.ui._save_macro("minecraft", original_id, "Renamed", None,
+                            [{"type": "wait", "ms": 2}])
+        macros = self.ui.store.game("minecraft")["macros"]
+        self.assertEqual(len(macros), 1)
+        self.assertEqual(macros[0]["id"], original_id)
+        self.assertEqual(macros[0]["name"], "Renamed")
+        self.assertIsNone(macros[0]["hotkey"])
+        # The now-hotkey-less macro must no longer have an armed watcher.
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 0)
+
+    def test_saving_an_invalid_macro_is_refused(self):
+        self.ui._select("minecraft")
+        ok = self.ui._save_macro("minecraft", None, "x", None,
+                                 [{"type": "not_a_real_type"}])
+        self.assertFalse(ok)
+        self.assertEqual(self.ui.store.game("minecraft").get("macros", []), [])
+
+    @needs_input_permission
+    def test_delete_macro_removes_it_and_disarms_its_hotkey(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        self.ui._save_macro("minecraft", None, "To delete", hotkey, [{"type": "wait", "ms": 1}])
+        macro = self.ui.store.game("minecraft")["macros"][0]
+        self.ui._delete_macro(macro)
+        self.assertEqual(self.ui.store.game("minecraft")["macros"], [])
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 0)
+
+    @needs_input_permission
+    def test_macros_are_scoped_to_their_own_game(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        self.ui._save_macro("minecraft", None, "MC macro", hotkey, [{"type": "wait", "ms": 1}])
+        self.ui._select("global")
+        self.assertEqual(self.ui.store.game("global").get("macros", []), [])
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 0,
+                         "global's macro hotkeys must not include minecraft's")
+        self.ui._select("minecraft")
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 1)
+
+    def test_run_macro_refuses_a_retrigger_while_still_running(self):
+        self.ui._select("minecraft")
+        slow_done = threading.Event()
+
+        class SlowMouse:
+            def click(self, button):
+                slow_done.wait(timeout=2.0)
+        self.ui.mouse = SlowMouse()
+        macro = {"id": "slow", "name": "Slow", "hotkey": None,
+                "steps": [{"type": "click", "button": "left"}]}
+        try:
+            self.ui._run_macro(macro)
+            _runner1, thread1 = self.ui._macro_runners["slow"]
+            self.ui._run_macro(macro)
+            _runner2, thread2 = self.ui._macro_runners["slow"]
+            self.assertIs(thread1, thread2,
+                         "a retrigger while running must not start a second run")
+        finally:
+            slow_done.set()
+            thread1.join(timeout=2.0)
+
+    def test_on_close_stops_and_joins_an_in_flight_macro_run(self):
+        self.ui._select("minecraft")
+
+        class SlowMouse:
+            def click(self, button):
+                time.sleep(0.3)
+        self.ui.mouse = SlowMouse()
+        macro = {"id": "closing", "name": "Closing", "hotkey": None,
+                "steps": [{"type": "click", "button": "left"}]}
+        self.ui._run_macro(macro)
+        _runner, thread = self.ui._macro_runners["closing"]
+        self.assertTrue(thread.is_alive())
+        self.ui.on_close()   # must not raise or hang
+        self.assertFalse(thread.is_alive())
 
 
 def tearDownModule():
