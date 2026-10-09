@@ -20,6 +20,15 @@ if app is not None:
     import tkinter as tk
     from tkinter import font as tkfont
 
+if app is not None and sys.platform.startswith("linux"):
+    # G#62: only used to monkeypatch Xlib.display.Display in the
+    # _window_titles() connection-reuse tests below. python-xlib is a
+    # transitive pynput dependency only on Linux (pynput's own metadata:
+    # `Requires-Dist: python-xlib>=0.17; "linux" in sys_platform`) -- ci.yml
+    # never installs it on windows-latest/macos-latest, so this import must
+    # stay off those legs the same way the X11-only tests below do.
+    import Xlib.display
+
 
 class FakeMouse:
     """Records what the loop asked for instead of moving a real pointer."""
@@ -757,6 +766,363 @@ class PollGamesScanDoesNotHoldSelfWhileBlocked(unittest.TestCase):
                 root.destroy()
             except tk.TclError:
                 pass
+
+
+class _FakeX11Window:
+    """Stand-in for an Xlib window node: no titles, no children -- just
+    enough for walk() (afk_clicker.py's _window_titles() X11 branch) to
+    terminate immediately without touching a real X server."""
+
+    def get_wm_name(self):
+        return None
+
+    def query_tree(self):
+        class _Tree:
+            children = []
+        return _Tree()
+
+
+class _FakeX11Screen:
+    def __init__(self):
+        self.root = _FakeX11Window()
+
+
+@unittest.skipUnless(
+    sys.platform.startswith("linux"),
+    "X11-only (G#62): python-xlib is a Linux-only pynput dependency, and "
+    "_window_titles()'s shared-connection path only runs on the X11 branch")
+class WindowTitlesReusesXlibConnection(unittest.TestCase):
+    """G#62: _window_titles()'s X11 branch now shares one lazily-(re)
+    connected module-level connection (app._x11_display) across calls
+    instead of opening+closing a fresh Xlib.display.Display() every call.
+    Monkeypatches Xlib.display.Display itself (not app.xdisplay -- that name
+    only ever exists inside _window_titles()'s own local `from Xlib import
+    display as xdisplay`, re-resolved fresh every call, so patching the real
+    Xlib.display.Display class is the only seam available), same
+    monkeypatch-and-restore style as DetectOsTheme above -- no
+    unittest.mock anywhere in this suite."""
+
+    def setUp(self):
+        self._original_display_ctor = Xlib.display.Display
+        # Isolate from whatever a concurrently-running real UI test's own
+        # scan may have installed; close it first rather than leak it.
+        self._original_shared = app._x11_display
+        if self._original_shared is not None:
+            try:
+                self._original_shared.close()
+            except Exception:
+                pass
+        app._x11_display = None
+
+    def tearDown(self):
+        Xlib.display.Display = self._original_display_ctor
+        if app._x11_display is not None:
+            try:
+                app._x11_display.close()
+            except Exception:
+                pass
+        app._x11_display = None
+
+    def test_second_call_reuses_the_first_connection(self):
+        opens = {"n": 0}
+
+        class FakeDisplay:
+            def __init__(self):
+                opens["n"] += 1
+
+            def screen(self):
+                return _FakeX11Screen()
+
+            def close(self):
+                pass
+
+        Xlib.display.Display = FakeDisplay
+        app._window_titles()
+        app._window_titles()
+        self.assertEqual(
+            opens["n"], 1,
+            "second _window_titles() call opened a new Display instead of "
+            "reusing the shared one")
+
+    def test_falls_back_to_a_fresh_connection_when_the_shared_one_raises(self):
+        opens = {"n": 0}
+        screen_calls = {"n": 0}
+        closes = {"n": 0}
+
+        class FakeDisplay:
+            def __init__(self):
+                opens["n"] += 1
+
+            def screen(self):
+                screen_calls["n"] += 1
+                if screen_calls["n"] == 2:
+                    # Simulates the shared connection dying mid-use on its
+                    # second use (the first use is the initial install).
+                    raise RuntimeError("connection reset")
+                return _FakeX11Screen()
+
+            def close(self):
+                closes["n"] += 1
+
+        Xlib.display.Display = FakeDisplay
+        app._window_titles()   # installs the shared connection (opens=1)
+        titles = app._window_titles()   # its screen() raises -> fallback
+        self.assertEqual(titles, [], "fallback call should still return a "
+                                      "usable (empty) title list, not raise")
+        self.assertEqual(opens["n"], 2,
+                          "a failed shared connection should fall back to "
+                          "exactly one fresh throwaway connection")
+        self.assertGreaterEqual(closes["n"], 1,
+                                 "the dead shared connection should be closed")
+        self.assertIsNone(app._x11_display,
+                           "a connection that raised on use must be "
+                           "discarded, not left installed")
+
+    def test_returns_an_empty_list_when_the_retry_itself_also_fails(self):
+        # Defect 1 (test-review round): the double-failure shape named by
+        # docs/spec.md's own edge case ("X server restart, socket reset") --
+        # the shared connection dies mid-use AND the immediate reconnect
+        # attempt also fails. Must still degrade to an empty list, not raise
+        # out of _window_titles(), and must not leave the dead connection
+        # installed.
+        opens = {"n": 0}
+        screen_calls = {"n": 0}
+
+        class FakeDisplay:
+            def __init__(self):
+                opens["n"] += 1
+                if opens["n"] == 2:
+                    # The retry's own Display() open also fails.
+                    raise RuntimeError("cannot open display: maximum clients reached")
+
+            def screen(self):
+                screen_calls["n"] += 1
+                if screen_calls["n"] == 2:
+                    raise RuntimeError("connection reset")
+                return _FakeX11Screen()
+
+            def close(self):
+                pass
+
+        Xlib.display.Display = FakeDisplay
+        app._window_titles()   # installs the shared connection (opens=1)
+        titles = app._window_titles()   # screen() raises -> retry Display() also raises
+        self.assertEqual(titles, [], "must still return a usable (empty) "
+                                      "list, not raise out of _window_titles()")
+        self.assertIsNone(app._x11_display,
+                           "the dead shared connection must stay discarded "
+                           "even when the retry itself also fails")
+
+    def test_returns_an_empty_list_when_the_fallbacks_own_screen_fails(self):
+        # Finding 1 (test-review fix round): the fallback's Display() open
+        # succeeds, but its own screen()/walk() call -- the next operation
+        # in the same rescue block -- also breaks (same correlated-failure
+        # window docs/spec.md names: "X server restart, socket reset").
+        # Must still degrade to [], not raise out of _window_titles().
+        opens = {"n": 0}
+        screen_calls = {"n": 0}
+
+        class FakeDisplay:
+            def __init__(self):
+                opens["n"] += 1
+
+            def screen(self):
+                screen_calls["n"] += 1
+                if screen_calls["n"] == 2:
+                    # Shared connection's screen() dies mid-use.
+                    raise RuntimeError("connection reset")
+                if screen_calls["n"] == 3:
+                    # The fallback's own screen() also dies.
+                    raise RuntimeError("fallback screen() also broken")
+                return _FakeX11Screen()
+
+            def close(self):
+                pass
+
+        Xlib.display.Display = FakeDisplay
+        app._window_titles()   # installs the shared connection (opens=1)
+        titles = app._window_titles()   # screen() raises -> fallback opens
+                                         # fine -> fallback.screen() raises
+        self.assertEqual(titles, [], "must still return a usable (empty) "
+                                      "list, not raise out of _window_titles()")
+
+    def test_returns_the_titles_it_found_when_the_fallbacks_own_close_fails(self):
+        # Finding 1 (test-review fix round): the fallback's walk() succeeds
+        # and finds titles, but the fallback's own close() call -- which a
+        # bare `finally` would let override a good result -- also breaks.
+        # The already-found titles must still come back, not be discarded.
+        opens = {"n": 0}
+        screen_calls = {"n": 0}
+        closes = {"n": 0}
+
+        class _NamedWindow:
+            def get_wm_name(self):
+                return "Fallback Game"
+
+            def query_tree(self):
+                class _Tree:
+                    children = []
+                return _Tree()
+
+        class _NamedScreen:
+            root = _NamedWindow()
+
+        class FakeDisplay:
+            def __init__(self):
+                opens["n"] += 1
+
+            def screen(self):
+                screen_calls["n"] += 1
+                if screen_calls["n"] == 2:
+                    raise RuntimeError("connection reset")
+                return _NamedScreen()
+
+            def close(self):
+                closes["n"] += 1
+                if closes["n"] == 2:
+                    # The fallback's own close() breaks, after a
+                    # successful walk already populated titles.
+                    raise RuntimeError("close also broken")
+
+        Xlib.display.Display = FakeDisplay
+        app._window_titles()   # installs the shared connection (opens=1)
+        titles = app._window_titles()   # screen() raises -> fallback walk
+                                         # succeeds -> fallback.close() raises
+        self.assertEqual(titles, ["Fallback Game"],
+                          "a successful fallback walk's titles must not be "
+                          "discarded just because the fallback's own "
+                          "close() afterwards also raised")
+
+    def test_reconnects_after_a_discarded_failure_instead_of_staying_broken(self):
+        opens = {"n": 0}
+        screen_calls = {"n": 0}
+
+        class FakeDisplay:
+            def __init__(self):
+                opens["n"] += 1
+
+            def screen(self):
+                screen_calls["n"] += 1
+                if screen_calls["n"] == 2:
+                    raise RuntimeError("connection reset")
+                return _FakeX11Screen()
+
+            def close(self):
+                pass
+
+        Xlib.display.Display = FakeDisplay
+        app._window_titles()   # opens=1, installs
+        app._window_titles()   # screen() raises, discards, falls back: opens=2
+        self.assertIsNone(app._x11_display)
+        app._window_titles()   # must reconnect, not stay permanently broken
+        self.assertIsNotNone(app._x11_display,
+                              "a call after a discarded failure should "
+                              "reconnect the shared connection")
+        self.assertEqual(opens["n"], 3,
+                          "the third call should have opened exactly one "
+                          "more Display to reconnect")
+
+    def test_opening_a_new_connection_never_blocks_a_concurrent_call(self):
+        # The crux guarantee (docs/spec.md "why the open happens outside the
+        # lock"): Xlib.display.Display() is the one call known to stall
+        # unboundedly (G#39's own documented failure mode). If the open
+        # happened under _x11_display_lock, thread A's stuck open would
+        # also block thread B's entirely unrelated call. It must not.
+        opens = {"n": 0}
+        entered_first_open = threading.Event()
+        release_first_open = threading.Event()
+
+        class FakeDisplay:
+            def __init__(self):
+                opens["n"] += 1
+                if opens["n"] == 1:
+                    entered_first_open.set()
+                    release_first_open.wait(5)
+
+            def screen(self):
+                return _FakeX11Screen()
+
+            def close(self):
+                pass
+
+        Xlib.display.Display = FakeDisplay
+        results = {}
+
+        def call_a():
+            results["a"] = app._window_titles()
+
+        thread_a = threading.Thread(target=call_a, daemon=True)
+        thread_a.start()
+        self.assertTrue(
+            entered_first_open.wait(5),
+            "thread A never reached the (fake) blocking Display() open")
+
+        b_done = threading.Event()
+
+        def call_b():
+            results["b"] = app._window_titles()
+            b_done.set()
+
+        thread_b = threading.Thread(target=call_b, daemon=True)
+        thread_b.start()
+        self.assertTrue(
+            b_done.wait(2),
+            "thread B blocked on thread A's still-stuck connection open -- "
+            "the open must never happen under _x11_display_lock")
+        self.assertEqual(results.get("b"), [])
+
+        release_first_open.set()
+        thread_a.join(5)
+        self.assertFalse(thread_a.is_alive(), "thread A never finished after release")
+        self.assertEqual(results.get("a"), [])
+        # Both opened their own connection (opens==2); whichever lost the
+        # install race closed its own and used the winner's -- never more
+        # than one connection stays installed.
+        self.assertEqual(opens["n"], 2)
+        self.assertIsNotNone(app._x11_display)
+
+
+class OnCloseClosesTheSharedXlibConnection(UITestCase):
+    """G#62: on_close() drops the shared Xlib connection the same way, and
+    for the same reason, it already drops self.mouse/self.keyboard
+    (GH#95/G#53) -- cheap insurance against Xvfb's already-marginal
+    max-clients ceiling in a test suite sharing one process across ~150+
+    UI-building test classes."""
+
+    def setUp(self):
+        super().setUp()
+        # setUp()'s own real startup scan may have installed a real shared
+        # connection already; close it before replacing it with a fake so
+        # this test doesn't leak it.
+        if app._x11_display is not None:
+            try:
+                app._x11_display.close()
+            except Exception:
+                pass
+            app._x11_display = None
+
+    def test_on_close_closes_and_clears_the_shared_connection(self):
+        closed = threading.Event()
+
+        class FakeDisplay:
+            def close(self):
+                closed.set()
+
+        app._x11_display = FakeDisplay()
+        self.ui.on_close()
+        self.assertTrue(closed.is_set(),
+                         "on_close() did not close the shared connection")
+        self.assertIsNone(app._x11_display,
+                           "on_close() did not clear the module-level reference")
+
+    def test_on_close_does_not_raise_even_if_close_itself_raises(self):
+        class RaisingDisplay:
+            def close(self):
+                raise RuntimeError("already dead")
+
+        app._x11_display = RaisingDisplay()
+        self.ui.on_close()   # must not raise
+        self.assertIsNone(app._x11_display)
 
 
 class GcAutomaticCollectionStaysDisabled(unittest.TestCase):
