@@ -3545,7 +3545,28 @@ class AfkAutoclicker:
         self._timers = {}
         self._sync_settings()
         self._drain_ui()
-        self._poll_games()
+        # G#60 PR #107 review, CI rounds 1-6: calling self._poll_games()
+        # synchronously, right here, spawns a new scan thread whose
+        # detect_running() -> _window_titles() shells out via subprocess on
+        # macOS (afk_clicker.py:2032) -- every time _build_ui() runs, which
+        # includes every real-WM-triggered rebuild, not just construction.
+        # subprocess.Popen() internally forks/spawns from that new thread
+        # while the main thread can still be inside Cocoa's own live resize-
+        # tracking run loop (a real root.geometry() call, confirmed directly
+        # via PYTHONFAULTHANDLER dumps on several CI runs: a background
+        # thread's subprocess._execute_child racing the main thread, which
+        # is inside tkinter's update() at the moment of the crash). Deferred
+        # by one short tick instead of calling inline: gives any live native
+        # resize-tracking context room to fully unwind back to a normal Tk
+        # mainloop iteration before the new thread (and its subprocess
+        # call) actually starts, rather than racing it. settle() (tests/
+        # test_ui.py) already waits for _seen_running to appear rather than
+        # assuming the scan starts synchronously -- including tolerating a
+        # multi-second cold osascript start on a loaded CI runner -- so a
+        # short, bounded extra delay here changes no test's own contract.
+        # Tracked in self._timers like every other periodic job here so
+        # on_close() still cancels it if the window closes before it fires.
+        self._timers["poll_games"] = self.root.after(50, self._poll_games)
 
     def _rebuild_ui(self):
         """

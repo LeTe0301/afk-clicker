@@ -734,7 +734,16 @@ class PollGamesScanDoesNotHoldSelfWhileBlocked(unittest.TestCase):
         root = tk.Tk()
         try:
             ui = app.AfkAutoclicker(root, store=app.Store(config))
-            root.update()
+            # G#60 PR #107 review: _build_ui()'s tail now defers its
+            # self._poll_games() call by one short after() tick instead of
+            # calling it inline (afk_clicker.py's own comment there explains
+            # why), so a single root.update() right after construction is no
+            # longer guaranteed to have processed it yet -- poll briefly
+            # instead, well inside entered.wait()'s own 5s budget below.
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and not entered.is_set():
+                root.update()
+                time.sleep(0.01)
             self.assertTrue(entered.wait(5), "scan thread never reached detect_running")
             self.assertNotIn(
                 "me", seen_locals,
