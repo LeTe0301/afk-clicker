@@ -33,7 +33,24 @@ by `_select()`'s own existing coercion for any non-eating profile) — decided i
 upfront, not a gap found downstream; reviewer agreed. 548/548 tests green (527 pre-existing + 21
 new), independently re-run and several specific claims independently reproduced (vertical-budget
 check at 130% scale/11 games, collapsed-rail glyphs via a real resize, WCAG contrast recomputed from
-scratch). Full report: `docs/history/ac-60-*.md`. Committed (`8f5466c`). Next: push, open PR.
+scratch). Full report: `docs/history/ac-60-*.md`. Committed (`8f5466c`), pushed, PR #107 opened.
+
+**Independent PR-level review, round 1: CI caught two real cross-platform issues.** `ubuntu-latest`
+passed. `windows-latest` failed 6 new tests, all misreading the sidebar status label as the
+collapsed-rail glyph `"!"` instead of the real message — confirmed root cause: a real WM's own early
+`<Configure>` echo (never sent under Xvfb) can flip `self.ui._rail_collapsed` to `True` before a
+test body runs, same mechanism already worked around elsewhere in `tests/test_ui.py` for a sibling
+class. Fixed: `ExportedGames`/`ImportedGames` now force `_rail_collapsed = False` in `setUp()`.
+`macos-latest` **segfaulted** (exit 139, zero Python-level output) in
+`RailCollapse.test_add_current_game_button_survives_collapse` — the first test in the run to drive a
+real WM-triggered rebuild of the new sidebar footer widgets. Investigated exhaustively (construction
+order, the historical `<Configure>`-reentrancy bug class, layout/negative-size squeeze, GC/thread
+hazards, a font-substitution theory for the new ↑/↓ glyphs) — **could not confirm a root cause**, and
+declined to ship a speculative fix rather than repeat this session's own G#57 lesson about trusting a
+guess over confirming from source. Added `PYTHONFAULTHANDLER=1` to the CI step instead (zero behavior
+change) so a recurrence points at the actual native call site. Pushed (`1a4fbb4`), new CI run in
+flight — a transient macOS/Tcl-Tk crash with no reproduction on Linux has precedent in this repo
+(the G#27 interpreter-shutdown saga).
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
