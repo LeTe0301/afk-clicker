@@ -2269,23 +2269,35 @@ class RailCollapse(UITestCase):
     def test_add_current_game_button_survives_collapse(self):
         s = self.ui.s
         target_w = int((app.RAIL_COLLAPSE_THRESHOLD * s) - 50)
-        # macOS CI segfault (PR #107 review): the collapse below triggers
-        # _rebuild_ui() -> _build_ui(), whose own tail unconditionally calls
-        # self._poll_games() again (afk_clicker.py:3540) to keep the
-        # running-games indicator alive across the rebuild. That spawns a
-        # new scan thread whose detect_running() -> _window_titles()
-        # (afk_clicker.py:2032) shells out via subprocess from a background
-        # thread -- forking while this test's own root.update() below is
-        # inside Cocoa's real event loop is a known macOS crash class
-        # (Apple's Objective-C runtime isn't fork-safe across threads), not
-        # anything this test is actually about. Same stub-to-no-op pattern
-        # as AnOlderScanResultDoesNotOverwriteANewerOne (tests/test_ui.py
-        # ~6911-6912/6962): this test only asserts rail-collapse button
-        # glyphs, it has no need for a live poller during the collapse.
+        # macOS CI segfault (PR #107 review, 3 rounds): fixed one confirmed
+        # cause (see the _poll_games stub below) but a second, deterministic
+        # native crash (zero Python frames, stuck inside tkinter.update(),
+        # same line every run -- CI 37947940301/37950130698/37951889250)
+        # persisted even after eliminating that race and after ruling out a
+        # Unicode-glyph-fallback hypothesis (switching "↑"/"↓" to "E"/"I"
+        # made no difference). Tried redirecting through the sibling tests'
+        # synthetic event_generate("<Configure>", ...) pattern next, but
+        # that doesn't substitute here: _build_ui()'s own tail re-derives
+        # self._rail_collapsed from the REAL self.root.winfo_width() on
+        # every rebuild (its own comment: "Re-derive ... from *current*
+        # geometry"), so a synthetic event's fake width gets silently
+        # overwritten back to the real (unchanged) one the moment the
+        # rebuild actually runs -- confirmed directly, not assumed:
+        # _rail_collapsed read back False after the synthetic event.
+        # This test only cares whether _build_ui()'s own collapsed-state
+        # widget construction is correct, not how a resize is detected
+        # (that's what the sibling tests above already cover) -- so instead
+        # of triggering a collapse via any <Configure> path at all, patch
+        # what _build_ui() actually reads (root.winfo_width()) and call the
+        # real rebuild directly. This exercises the identical production
+        # construction code with zero real OS-level window resize, which is
+        # what every crash round traced back to.
         original_poll_games = self.ui._poll_games
+        original_winfo_width = self.root.winfo_width
         self.ui._poll_games = lambda: None
+        self.root.winfo_width = lambda: target_w
         try:
-            self.root.geometry(f"{target_w}x{int(700 * s)}")
+            self.ui._rebuild_ui()
             self.root.update()
             self.assertTrue(self.ui._rail_collapsed)
             # G#60: Export/Import collapse to their own stacked icon-only
@@ -2298,6 +2310,7 @@ class RailCollapse(UITestCase):
             self.assertEqual(texts, ["+", "E", "I"])
         finally:
             self.ui._poll_games = original_poll_games
+            self.root.winfo_width = original_winfo_width
 
     def test_rail_rederives_on_a_ui_scale_change_with_width_held_fixed(self):
         # docs/spec.md's own "Edge cases": a UI-scale change moves the
