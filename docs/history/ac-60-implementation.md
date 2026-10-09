@@ -246,3 +246,58 @@ No file outside `afk_clicker.py`/`tests/test_ui.py` was touched by the code
 change itself; no scratch file was left in the repo tree (ad-hoc verification
 scripts were run as inline `python3 - <<'EOF'` heredocs against temp
 directories, never written into the working tree).
+
+## CI fix round 2 (PR #107 review, macOS segfault)
+
+macOS CI (commit 1a4fbb4 made Windows green first) segfaulted in
+`RailCollapse.test_add_current_game_button_survives_collapse`. With
+`PYTHONFAULTHANDLER=1` (added in round 1) the faulthandler dump from CI run
+37947940301/job 113879182323 caught the real mechanism:
+
+```
+Thread ...: subprocess.py:1908 _execute_child <- afk_clicker.py:2032
+  _window_titles <- afk_clicker.py:2065 detect_running <- afk_clicker.py:5186
+  scan <- threading.py:1012 run
+Current thread: tkinter/__init__.py:1373 update <- tests/test_ui.py:2273
+  test_add_current_game_button_survives_collapse
+```
+
+**Root cause**: this test's `geometry()` + `update()` call collapses the
+rail, which runs `_rebuild_ui()` -> `_build_ui()`. `_build_ui()`'s own tail
+unconditionally calls `self._poll_games()` again (`afk_clicker.py:3540`, so
+the running-games indicator survives a rebuild) — and `_poll_games()` always
+spawns a new background thread (`afk_clicker.py:5186-5192` `scan()` ->
+`detect_running()` -> `_window_titles()`, which shells out via
+`subprocess.run`/`Popen` at `afk_clicker.py:2032`). Forking a subprocess from
+a background thread while the main thread is inside Cocoa's real event loop
+(this test's `root.update()`, driven by a real WM-triggered geometry change)
+is a known macOS crash class (Apple's Objective-C runtime isn't fork-safe
+across threads). This is a pre-existing production hazard — `_poll_games()`
+reschedules itself every 5000ms during normal app use too — not anything
+introduced by this ticket's sidebar widgets; this test's real-WM-driven
+`update()` just holds long enough, often enough, to land inside that window.
+
+**Fix**: stubbed `self.ui._poll_games = lambda: None` for the duration of
+`test_add_current_game_button_survives_collapse`'s geometry/update/assert
+block, restored in `finally` — the same pattern already used by
+`AnOlderScanResultDoesNotOverwriteANewerOne`
+(`tests/test_ui.py:6911-6912/6962`). Confirmed the stub doesn't invalidate
+what this test actually checks: it asserts rail-collapse button glyphs
+(`"+"`, `"↑"`, `"↓"`), which come from `_build_ui()`'s widget construction,
+not from any live poll result.
+
+**Follow-up filed, not fixed here** (out of scope — G#60 is import/export):
+the underlying race (`_poll_games()`'s background-thread `subprocess` call
+racing the main thread's Tk event loop on macOS) is a real crash risk during
+normal app usage, not just this one test's timing. Filed as its own backlog
+item per this project's convention (G#57's `put_game()` bug was split out
+the same way) rather than fixed inline here.
+
+Verified locally (Linux/Xvfb — the segfault itself is macOS/Cocoa-specific
+and cannot reproduce here):
+```
+DISPLAY=:99 PYTHONFAULTHANDLER=1 python -m unittest discover -s tests -t .
+Ran 548 tests in 113.288s
+OK (skipped=10)
+```
+Same 548/10-skip result as round 1 — no regression, stubbed test passes.

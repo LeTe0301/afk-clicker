@@ -2269,15 +2269,33 @@ class RailCollapse(UITestCase):
     def test_add_current_game_button_survives_collapse(self):
         s = self.ui.s
         target_w = int((app.RAIL_COLLAPSE_THRESHOLD * s) - 50)
-        self.root.geometry(f"{target_w}x{int(700 * s)}")
-        self.root.update()
-        self.assertTrue(self.ui._rail_collapsed)
-        # G#60: Export/Import collapse to their own stacked icon-only
-        # buttons ("↑"/"↓"), direct children of the rail like "+" --
-        # mirroring how Add already collapses (docs/design.md).
-        buttons = [w for w in self.ui.side.winfo_children() if isinstance(w, app.Button)]
-        texts = [b.itemcget(b.label, "text") for b in buttons]
-        self.assertEqual(texts, ["+", "↑", "↓"])
+        # macOS CI segfault (PR #107 review): the collapse below triggers
+        # _rebuild_ui() -> _build_ui(), whose own tail unconditionally calls
+        # self._poll_games() again (afk_clicker.py:3540) to keep the
+        # running-games indicator alive across the rebuild. That spawns a
+        # new scan thread whose detect_running() -> _window_titles()
+        # (afk_clicker.py:2032) shells out via subprocess from a background
+        # thread -- forking while this test's own root.update() below is
+        # inside Cocoa's real event loop is a known macOS crash class
+        # (Apple's Objective-C runtime isn't fork-safe across threads), not
+        # anything this test is actually about. Same stub-to-no-op pattern
+        # as AnOlderScanResultDoesNotOverwriteANewerOne (tests/test_ui.py
+        # ~6911-6912/6962): this test only asserts rail-collapse button
+        # glyphs, it has no need for a live poller during the collapse.
+        original_poll_games = self.ui._poll_games
+        self.ui._poll_games = lambda: None
+        try:
+            self.root.geometry(f"{target_w}x{int(700 * s)}")
+            self.root.update()
+            self.assertTrue(self.ui._rail_collapsed)
+            # G#60: Export/Import collapse to their own stacked icon-only
+            # buttons ("↑"/"↓"), direct children of the rail like "+" --
+            # mirroring how Add already collapses (docs/design.md).
+            buttons = [w for w in self.ui.side.winfo_children() if isinstance(w, app.Button)]
+            texts = [b.itemcget(b.label, "text") for b in buttons]
+            self.assertEqual(texts, ["+", "↑", "↓"])
+        finally:
+            self.ui._poll_games = original_poll_games
 
     def test_rail_rederives_on_a_ui_scale_change_with_width_held_fixed(self):
         # docs/spec.md's own "Edge cases": a UI-scale change moves the

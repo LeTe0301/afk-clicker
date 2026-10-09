@@ -52,6 +52,22 @@ change) so a recurrence points at the actual native call site. Pushed (`1a4fbb4`
 flight — a transient macOS/Tcl-Tk crash with no reproduction on Linux has precedent in this repo
 (the G#27 interpreter-shutdown saga).
 
+**Independent PR-level review, round 2: `windows-latest` green (confirms `1a4fbb4`); macOS root cause
+now confirmed.** `PYTHONFAULTHANDLER=1`'s dump from CI run 37947940301/job 113879182323 caught it:
+`RailCollapse.test_add_current_game_button_survives_collapse`'s own `geometry()`/`update()` call
+collapses the rail, which rebuilds the UI — and `_build_ui()`'s own tail unconditionally calls
+`self._poll_games()` again (`afk_clicker.py:3540`), which always spawns a new background thread that
+shells out via `subprocess` (`afk_clicker.py:2032`, `_window_titles`). Forking a subprocess from a
+background thread while the main thread is inside Cocoa's real event loop is a known macOS crash
+class (Apple's Objective-C runtime isn't fork-safe across threads) — a pre-existing production
+hazard, not anything introduced by G#60's own sidebar widgets; this test's real-WM-driven `update()`
+just holds long enough to land inside the window often enough to show it. Fixed the test: stubbed
+`self.ui._poll_games = lambda: None` for the duration of the collapse/assert block, restored in
+`finally` — same pattern as `AnOlderScanResultDoesNotOverwriteANewerOne`
+(`tests/test_ui.py:6911-6912/6962`). 548/548 tests green locally (Linux/Xvfb; the segfault itself
+can't reproduce there). Filed the underlying race as its own backlog item below (G#61/GH#108) rather
+than fixing it inline — out of scope for G#60 (import/export). Pushed, new CI run pending.
+
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
 usual `feature/ac-N/...` convention) from a separate, concurrently-running session:
@@ -558,6 +574,18 @@ Housekeeping:
       without Segoe UI installed, not a real render. 44% headroom and a shorter new string make a
       clip unlikely but unconfirmed. Needs Windows hardware or a CI screenshot, not actionable from
       this sandbox.
+- [ ] G#61 / GH#108 — github: true — Follow-up from G#60's PR #107 review round 2 (macOS CI
+      segfault): `_poll_games()` (`afk_clicker.py:5186-5192`) spawns a background thread that shells
+      out via `subprocess` (`afk_clicker.py:2032`, `_window_titles`) on every periodic 5000ms poll and
+      on every `_build_ui()` rebuild tail call (`afk_clicker.py:3540`). Forking a subprocess from a
+      background thread while the main thread is inside Cocoa's/Tk's real event loop is a known macOS
+      crash class (Apple's Objective-C runtime isn't fork-safe across threads) — confirmed via
+      `PYTHONFAULTHANDLER=1`'s dump in CI run 37947940301/job 113879182323. Worked around for the one
+      test it was hitting (`RailCollapse.test_add_current_game_button_survives_collapse`, stubbed
+      `_poll_games` to a no-op), but the race itself is a real production hazard during normal app use
+      too — `_poll_games()` reschedules itself every 5000ms while the user is constantly triggering Tk
+      event processing. Needs its own scoped fix (e.g. moving the subprocess call off the periodic-poll
+      thread, or serializing it against the main thread's event loop).
 - [x] **Done 2026-09-28, PR #92.** G#49 / GH#90 — github: true — Follow-up from PR #89's cycle review (G#38): the Auto UI-scale
       clamp's regression test doesn't actually exercise out-of-range factors — every back-solved
       test value already sits inside `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]`. Sabotage-verified: removing
