@@ -17,8 +17,23 @@ option (connection reuse, not a full event-driven rearchitecture, which would de
 manager cooperation Xvfb can't provide and would likely be untestable in this project's own CI).
 Gitea (https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/62) and GitHub
 (https://github.com/LeTe0301/afk-clicker/issues/109) tickets created and cross-linked. Branch:
-`feature/ac-62/reuse-xlib-connection-detect-running`. product-manager → developer → reviewer cycle
-starting now (no ux-designer — backend-only, no UI surface).
+`feature/ac-62/reuse-xlib-connection-detect-running`.
+
+Full product-manager → developer → reviewer cycle complete (no ux-designer — backend-only, no UI
+surface), **cycle review: APPROVE after two fix rounds.** One persistent module-level Xlib
+connection (`_x11_display` + `_x11_display_lock`) replaces opening and closing a fresh one on every
+5s poll. Crux design decision: the connection *open* happens deliberately outside the lock — only
+installing it and walking the tree are lock-protected — since `Display()` stalling unboundedly is a
+documented pre-existing hazard (G#39's own saga) and locking the open itself would let one stuck
+open freeze every concurrent scan, reintroducing the exact regression G#39's no-join-on-superseded-
+scan design exists to prevent (two `scan()` threads can legitimately be alive concurrently by
+design). Two real defects found across review rounds, same class each time — a `Display()`-adjacent
+call in the fallback rescue path escaping `_window_titles()` unguarded on a correlated failure (X
+server restart/socket reset): the fallback's own `Display()` open (round 1), then its `.screen()`
+and `.close()` calls (round 2), both reproduced directly and sabotage-verified by two independent
+reviewer passes, not just trusted from the developer. `on_close()` closes the shared connection,
+mirroring the existing mouse/keyboard cleanup. win32/darwin branches untouched throughout. 557/557
+tests green. Full account: `docs/history/ac-62-*.md`. Committed (`cb391c0`). Next: push, open PR.
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
