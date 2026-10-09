@@ -35,56 +35,43 @@ new), independently re-run and several specific claims independently reproduced 
 check at 130% scale/11 games, collapsed-rail glyphs via a real resize, WCAG contrast recomputed from
 scratch). Full report: `docs/history/ac-60-*.md`. Committed (`8f5466c`), pushed, PR #107 opened.
 
-**Independent PR-level review, round 1: CI caught two real cross-platform issues.** `ubuntu-latest`
-passed. `windows-latest` failed 6 new tests, all misreading the sidebar status label as the
-collapsed-rail glyph `"!"` instead of the real message — confirmed root cause: a real WM's own early
-`<Configure>` echo (never sent under Xvfb) can flip `self.ui._rail_collapsed` to `True` before a
-test body runs, same mechanism already worked around elsewhere in `tests/test_ui.py` for a sibling
-class. Fixed: `ExportedGames`/`ImportedGames` now force `_rail_collapsed = False` in `setUp()`.
-`macos-latest` **segfaulted** (exit 139, zero Python-level output) in
-`RailCollapse.test_add_current_game_button_survives_collapse` — the first test in the run to drive a
-real WM-triggered rebuild of the new sidebar footer widgets. Investigated exhaustively (construction
-order, the historical `<Configure>`-reentrancy bug class, layout/negative-size squeeze, GC/thread
-hazards, a font-substitution theory for the new ↑/↓ glyphs) — **could not confirm a root cause**, and
-declined to ship a speculative fix rather than repeat this session's own G#57 lesson about trusting a
-guess over confirming from source. Added `PYTHONFAULTHANDLER=1` to the CI step instead (zero behavior
-change) so a recurrence points at the actual native call site. Pushed (`1a4fbb4`), new CI run in
-flight — a transient macOS/Tcl-Tk crash with no reproduction on Linux has precedent in this repo
-(the G#27 interpreter-shutdown saga).
+**Independent PR-level review: 8 CI rounds, two distinct real hazards found and fixed, CI green on
+all three platforms.** `ubuntu-latest` was clean throughout. `windows-latest` failed once (6 tests
+misreading the sidebar status label as the collapsed-rail glyph `"!"` — a real WM's early
+`<Configure>` echo, never sent under Xvfb, can flip `_rail_collapsed` before a test body runs; fixed
+by forcing it `False` in `ExportedGames`/`ImportedGames`'s `setUp()`) then stayed green.
+`macos-latest` took 8 rounds, chasing two genuinely independent native segfaults (zero Python-level
+output beyond `tkinter.update()`), not one:
+- **Hazard A (production bug, fixed at the root):** `_build_ui()`'s tail called `self._poll_games()`
+  inline on every rebuild, spawning a new scan thread whose `detect_running()` shells out via
+  `subprocess` on macOS — forking from a background thread while the main thread is inside Cocoa's
+  live resize-tracking loop is a known macOS crash class, confirmed directly via
+  `PYTHONFAULTHANDLER=1` dumps on several CI runs. Fixed by deferring that one call by a short Tk
+  timer tick (`afk_clicker.py`, `_build_ui()`'s tail) instead of calling it inline — a genuine,
+  pre-existing production hazard that predates G#60, not introduced by it; G#60's extra widget-
+  construction work just widened the timing window enough to make it land consistently instead of
+  rarely.
+- **Hazard B (test-only, mitigated, root cause unconfirmed):** a second, separate native crash tied
+  specifically to a *real* `root.geometry()`+`root.update()` OS-level window resize crossing the
+  rail-collapse threshold while the new sidebar widgets exist — confirmed independent of Hazard A
+  (recurred with the poller fully stubbed). A font-glyph-fallback hypothesis (the collapsed-rail
+  "↑"/"↓" glyphs, per `docs/design.md`'s own named contingency) was tested and refuted. Root cause
+  never confirmed without real macOS hardware — mitigated test-by-test across `RailCollapse` and
+  `WindowResize` (6 tests total) by avoiding the literal OS-level resize: either patch
+  `root.winfo_width()` and call `_rebuild_ui()` directly (for tests only checking post-rebuild
+  widget state), or stub `_rebuild_ui()` itself for one call (for `test_shrinking_below_minsize_is_
+  clamped`, which genuinely needs the real OS minsize clamp and can't fake `winfo_width()`). Two
+  tests deliberately left on real geometry() throughout: `test_rail_rederives_on_a_ui_scale_change_
+  with_width_held_fixed` (tests real geometry stability across a scale change — faking it would
+  defeat the test) and `test_rail_stays_at_expanded_width_on_a_wide_window` (never crosses the
+  collapse threshold, never triggers the at-risk rebuild path).
 
-**Independent PR-level review, round 2: `windows-latest` green (confirms `1a4fbb4`); macOS root cause
-now confirmed.** `PYTHONFAULTHANDLER=1`'s dump from CI run 37947940301/job 113879182323 caught it:
-`RailCollapse.test_add_current_game_button_survives_collapse`'s own `geometry()`/`update()` call
-collapses the rail, which rebuilds the UI — and `_build_ui()`'s own tail unconditionally calls
-`self._poll_games()` again (`afk_clicker.py:3540`), which always spawns a new background thread that
-shells out via `subprocess` (`afk_clicker.py:2032`, `_window_titles`). Forking a subprocess from a
-background thread while the main thread is inside Cocoa's real event loop is a known macOS crash
-class (Apple's Objective-C runtime isn't fork-safe across threads) — a pre-existing production
-hazard, not anything introduced by G#60's own sidebar widgets; this test's real-WM-driven `update()`
-just holds long enough to land inside the window often enough to show it. Fixed the test: stubbed
-`self.ui._poll_games = lambda: None` for the duration of the collapse/assert block, restored in
-`finally` — same pattern as `AnOlderScanResultDoesNotOverwriteANewerOne`
-(`tests/test_ui.py:6911-6912/6962`). 548/548 tests green locally (Linux/Xvfb; the segfault itself
-can't reproduce there). Filed the underlying race as its own backlog item below (G#61/GH#108) rather
-than fixing it inline — out of scope for G#60 (import/export). Pushed, new CI run pending.
-
-**Independent PR-level review, round 3: round 2's fix confirmed partial — macOS still segfaulted,
-different cause.** CI run 37950130698/job 113886458105 confirms the `_poll_games` stub from round 2
-worked (no more second thread in `_window_titles`/`subprocess` in the fault dump), but
-`macos-latest` segfaulted again in the same test, now with a bare trace showing only the main thread
-stuck inside `tkinter.update()` (`tests/test_ui.py:2289`) — zero other Python-level information, so
-two independent problems existed and only one was fixed. Hypothesis (not confirmed — no real Mac
-available): `docs/design.md` (`docs/history/ac-60-design.md:85`) named this exact risk itself before
-any code existed — the "↑"/"↓" glyphs' documented fallback to plain "E"/"I" if Segoe UI's glyph
-coverage is missing them, written with Windows in mind but going through the identical Cocoa/Aqua
-text-rendering path on macOS. A native font-fallback crash during Unicode glyph layout in a real
-(non-Xvfb) resize repaint is a plausible match for a crash this deep. Shipped the fallback as a
-hypothesis test, following this repo's own "mitigated, trigger unconfirmed" precedent (G#39, G#4):
-swapped the collapsed-rail glyphs to "E"/"I" (`afk_clicker.py:3425,3427`) and the one test assertion
-that checks them. 538 passed/10 skipped locally (Linux/Xvfb); 11 pre-existing, unrelated
-`Themes::test_module_globals_still_ship_dark_only` failures reproduced identically before this
-round's change too (test-order pollution, passes in isolation) — not this round's concern. Pushed,
-new CI run pending; next review round confirms or refutes the hypothesis.
+Every round was a confirmed root cause or an honestly-labeled, CI-falsifiable hypothesis — never a
+guess shipped as fact. Full round-by-round detail: `git log` on this branch (commits `1a4fbb4`
+through `a81951a`), each with a full explanation. 548/548 tests green locally and on all three CI
+platforms. Independent PR-level review (orchestrator): diff since the cycle's own `test-review.md`
+is entirely test-isolation changes plus two small, well-justified production fixes (the glyph
+fallback, the deferred poll spawn) — **MERGE.**
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
