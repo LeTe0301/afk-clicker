@@ -2205,6 +2205,36 @@ class RailCollapse(UITestCase):
     # debounce (which UIScaleAuto below tests directly).
     INITIAL_UI_SCALE = "100"
 
+    def setUp(self):
+        super().setUp()
+        # G#60 PR #107 review, CI rounds 1-4: several tests in this class
+        # drive a genuinely real root.geometry() + root.update() resize
+        # (not Xvfb-synthetic) to force a collapse. _build_ui()'s own tail
+        # unconditionally restarts self._poll_games() on every rebuild
+        # (afk_clicker.py:3540) to keep the running-games indicator alive,
+        # and that spawns a new scan thread whose detect_running() ->
+        # _window_titles() (afk_clicker.py:2032) shells out via subprocess
+        # -- forking from a background thread while the main thread is
+        # inside Cocoa's real event loop is a known macOS crash class.
+        # Confirmed this isn't specific to any one test: fixing the first
+        # real-geometry test to crash (test_add_current_game_button_
+        # survives_collapse, by avoiding any real resize at all) just moved
+        # the identical crash to the next real-geometry test in this class
+        # (test_collapsed_items_still_navigate_by_click) on the very next
+        # CI run, with the exact same subprocess/Popen stack. G#60 itself
+        # didn't introduce this race -- it's pre-existing -- but its extra
+        # widget construction work widens the rebuild's timing window
+        # enough to make it land consistently rather than rarely. Stubbed
+        # once here, class-wide, rather than per-test, since every test
+        # that forces a real collapse/expand needs this and a future one
+        # would silently reinherit the hazard otherwise.
+        self._original_poll_games = self.ui._poll_games
+        self.ui._poll_games = lambda: None
+
+    def tearDown(self):
+        self.ui._poll_games = self._original_poll_games
+        super().tearDown()
+
     def test_rail_starts_expanded_at_default_launch(self):
         # The single most important regression this feature exists to
         # prevent: the app must not launch pre-collapsed.
@@ -2270,8 +2300,9 @@ class RailCollapse(UITestCase):
         s = self.ui.s
         target_w = int((app.RAIL_COLLAPSE_THRESHOLD * s) - 50)
         # macOS CI segfault (PR #107 review, 3 rounds): fixed one confirmed
-        # cause (see the _poll_games stub below) but a second, deterministic
-        # native crash (zero Python frames, stuck inside tkinter.update(),
+        # cause (see setUp()'s own _poll_games stub above, class-wide) but
+        # a second, deterministic native crash (zero Python frames, stuck
+        # inside tkinter.update(),
         # same line every run -- CI 37947940301/37950130698/37951889250)
         # persisted even after eliminating that race and after ruling out a
         # Unicode-glyph-fallback hypothesis (switching "↑"/"↓" to "E"/"I"
@@ -2292,9 +2323,7 @@ class RailCollapse(UITestCase):
         # real rebuild directly. This exercises the identical production
         # construction code with zero real OS-level window resize, which is
         # what every crash round traced back to.
-        original_poll_games = self.ui._poll_games
         original_winfo_width = self.root.winfo_width
-        self.ui._poll_games = lambda: None
         self.root.winfo_width = lambda: target_w
         try:
             self.ui._rebuild_ui()
@@ -2309,7 +2338,7 @@ class RailCollapse(UITestCase):
             texts = [b.itemcget(b.label, "text") for b in buttons]
             self.assertEqual(texts, ["+", "E", "I"])
         finally:
-            self.ui._poll_games = original_poll_games
+            self.root.winfo_width = original_winfo_width
             self.root.winfo_width = original_winfo_width
 
     def test_rail_rederives_on_a_ui_scale_change_with_width_held_fixed(self):
