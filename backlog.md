@@ -11,6 +11,13 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
+**G#57 — github: true — sync pending: GitHub — Per-game hotkeys**, picked from `docs/ROADMAP.md`'s
+"Later" list on Leo's direction 2026-10-09. Gitea ticket created
+(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/57); the GitHub mirror failed twice —
+`gh issue create --repo LeTe0301/afk-clicker ...` → `GraphQL: Resource not accessible by personal
+access token (createIssue)`, same write-scope gap as G#47/GH#86. Branch: `feature/ac-57/per-game-hotkeys`.
+product-manager → ux-designer → developer → reviewer cycle starting now.
+
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
 usual `feature/ac-N/...` convention) from a separate, concurrently-running session:
