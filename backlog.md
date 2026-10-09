@@ -11,6 +11,33 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
+**Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
+today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
+usual `feature/ac-N/...` convention) from a separate, concurrently-running session:
+- **PR #99** (`d266928`→...→merged 11:57 UTC): closed out G#51/GH#93, G#53/GH#95, G#54/GH#96, G#55/GH#97,
+  G#56/GH#98 — see their entries below for what shipped. Also bumped `SETTINGS_VERSION` to 2 and
+  `WINDOW_MIN_H` to 740.
+- **PR #100** (`de89182`, merged 13:11 UTC): a visible click counter + session timer in the header.
+  **No ticket** — picked directly from `docs/ROADMAP.md`'s "Later" list at Leo's direction once the open
+  queue emptied out.
+- **`v0.8.0` and `v0.9.0` both published today** (2026-09-29T14:06 UTC, seconds apart) — 0.8.0's
+  long-parked deployment-gate approval finally went through. **Neither release branch has been merged
+  back into `main` yet**, breaking this project's own convention (`release/0.7.0` was; see the pattern
+  above). `release/0.8.0` (`70e5751`) is now 43 commits behind `main` and `release/0.9.0` (`945fcea`) is
+  `main` + one version-bump commit. **Needs Leo's call** on merging both back.
+- **A second tracker-drift sweep found 18 Gitea issues** (G#25, G#27–32, G#40–45, G#48–50, plus the six
+  from this session's own G#51–56) closed on GitHub but still open on Gitea — all now closed to match,
+  each with an evidence comment (commit/PR) on Gitea. **One exception, left open deliberately: G#39/GH#69**
+  — GitHub shows it closed with no comment and no commit reference; see its entry below, this needs Leo's
+  judgment before either tracker is touched further.
+- **Gitea's own git remote (`origin`, `/srv/git/repos/afk-clicker.git`) has not received a code push in a
+  long time** — its `main` sits at `85dd1e6` ("Archive feature ac-28..."), far behind GitHub's `main`
+  (`de89182`). Only the `github` remote is getting real pushes/PRs; Gitea is issue-tracking only in
+  practice. Flagging in case that's not intentional.
+- **The 20-branch merged-branch cleanup from earlier this session is still pending** — sandbox policy
+  blocks `git push --delete` from this session regardless of confirmation; see Housekeeping's G#46/GH#85.
+  `release/0.8.0` and `release/0.9.0` should join that list once merged back into `main`.
+
 **0.7.0 released 2026-09-15** (`v0.7.0` from `d008ad5`, run 34995512574): the update-log
 prompt (PR #72), top-aligned panes (PR #68), the macOS Accessibility-permission fixes
 (PR #73), saved-hotkey vocabulary validation (PR #74), the G#39 flake mitigation (PR #70).
@@ -184,7 +211,13 @@ Bugs and residue:
       Verified on the real macOS CI leg (pulled the job log directly), not just the
       local `_dpi_s` simulation. One in-depth cycle review + one independent critical
       PR review, both MERGE, CI green on all three platforms.
-- [ ] G#39 / GH#69 — github: true — **RECURRED 2026-09-14** on PR #65's macOS leg (run 34906199873, commit
+- [ ] G#39 / GH#69 — github: true — **DISCREPANCY found 2026-09-29: GH#69 was closed on GitHub
+      2026-09-15T09:14:47Z with no closing comment and no commit reference in its timeline** (checked via
+      the GitHub API — `closed`, `commit_id: null`, zero comments). No evidence this was actually fixed;
+      the investigation below is still real and still open. Left `[ ]`/open here and on Gitea #39
+      deliberately, not force-closed to match GitHub — **needs Leo's judgment**: was GH#69 closed
+      intentionally (accepted as good-enough) or by mistake? If the latter, reopen it.
+      **RECURRED 2026-09-14** on PR #65's macOS leg (run 34906199873, commit
       `9aa7e81`, a diff touching only `tests/test_updater.py` and docs), same
       assertion: `'minecraft'` missing after a rebuild. So the `_poll_games` stub
       below does not close every path; something else still races the queued
@@ -433,6 +466,26 @@ Two follow-ups from its review are below.
       later hardening pass (sealed `.b64` answer keys, `GRADING.md`,
       `results-run1.json`'s 78% first run). `run.py --list` reproduces the
       README's own totals (54 defects, 20 traps) on this tree.
+- [x] **Done, PR #99 (merged 2026-09-29T11:57:07Z).** G#54 / GH#96 — github: true — No way to delete a
+      custom game profile (Leo, 2026-09-29). Delete affordance added to `GameItem`'s sidebar row for
+      custom profiles only, removing it from `self.profiles`/`self.by_id`/the store, with fallback
+      selection.
+- [x] **Done, PR #99 (merged 2026-09-29T11:57:07Z).** G#55 / GH#97 — github: true — Clicking is one
+      global button choice, not individually configurable per mouse button (Leo, 2026-09-29). Left and
+      right mouse buttons are now independently enabled and click **concurrently**, each with its own
+      interval/jitter; middle click stays a separate exclusive mode using the original shared fields.
+      `SETTINGS_VERSION` bumped to 2 with a migration from the old single `"button"` field. The right
+      loop skips a tick whenever Eating holds the right button down, so it doesn't fight Eating for it.
+      `WINDOW_MIN_H` moved 620 → 740 for the five new Clicking-pane rows.
+- [x] **Done, PR #99 (merged 2026-09-29T11:57:07Z).** G#56 / GH#98 — github: true — Recognized/detected
+      macros should be trackable with a configurable interval (Leo, 2026-09-29). Macros can now have an
+      optional auto-repeat interval alongside their hotkey trigger, armed/disarmed through the same
+      per-game lifecycle as macro hotkey watchers.
+- [x] **Done, PR #100 (merged 2026-09-29T13:11:51Z).** No ticket — picked directly from
+      `docs/ROADMAP.md`'s "Later" list at Leo's direction once the open queue emptied out. **A visible
+      click counter and session timer** in the header, not the Clicking pane (no `WINDOW_MIN_H` impact).
+      Counts only the click loop's own clicks (left/right/middle), never a macro's; resets on each
+      `start()`, frozen (not reset) on every exit path via `loop()`'s own `finally`.
 
 Housekeeping:
 - [x] **Done 2026-09-28, PR #92.** G#49 / GH#90 — github: true — Follow-up from PR #89's cycle review (G#38): the Auto UI-scale
@@ -461,6 +514,12 @@ Housekeeping:
       `docs/spec.md §2` / "The debounce decision" citations at the new archive path.
       `design.md`/`implementation.md`/`test-review.md` for G#38 remain lost; only the file GH#93
       was about got reconstructed. https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/51
+      **Correction, 2026-10-09: not actually lost.** The real originals (all four files) turned up
+      uncommitted in a later session's own checkout of this repo — the 2026-09-18 session's working
+      tree was never reclaimed, just a different local clone than the one that merged PR #89. Archived
+      verbatim as `docs/history/ac-38-{spec,design,implementation,test-review}.md`, replacing the
+      2026-09-29 reconstruction; the real original confirms GH#93's report exactly (see
+      `docs/history/README.md`'s ac-38 row).
 - [x] **Done 2026-09-29, PR #92.** G#52 — github: true — Follow-up from PR #89's round-4 independent
       review (G#38): `UIScaleAuto.test_the_settle_timer_resets_on_each_new_event_not_just_the_first`
       (tests/test_ui.py:4243-4267) uses a brittle fixed-duration `pump()` chain instead of
