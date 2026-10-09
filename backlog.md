@@ -670,7 +670,14 @@ Housekeeping:
       confirming the real tests fail without the fix. 481 tests green locally
       (478 + 3 new), full suite, matching CI's own invocation.
       https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/53
-- [ ] G#46 / GH#85 — github: true — **Delete merged remote branches** (Leo, 2026-09-13). As of
+- [ ] G#46 / GH#85 — github: true — **Delete merged remote branches** (Leo, 2026-09-13).
+      **2026-10-09: `git push github --delete <branch>` now works from this session** (deleted
+      `feature/ac-57/per-game-hotkeys` and `feature/ac-58/macros-specific-regression-test-put`
+      cleanly right after merging them) — the "sandbox policy blocks this regardless of
+      confirmation" note below is stale, from whatever constrained that earlier session
+      specifically. Only cleaned up the two branches just finished this session; the broader list
+      below still needs Leo's confirm before a bulk delete, since those branches are older and
+      this session hasn't re-verified which of them are still genuinely merged. As of
       2026-09-15, 15 branches on `github` are fully merged, listed on the ticket. Keep
       `feature/ac-12/…`/`feature/ac-13/…`; they are unmerged and tracked on G#12/G#13
       (now built directly on `main` instead -- see those tickets -- so these two
