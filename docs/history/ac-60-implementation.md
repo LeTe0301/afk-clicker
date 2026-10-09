@@ -300,4 +300,49 @@ DISPLAY=:99 PYTHONFAULTHANDLER=1 python -m unittest discover -s tests -t .
 Ran 548 tests in 113.288s
 OK (skipped=10)
 ```
+
+## CI fix round 3 (PR #107 review, macOS still segfaulting after round 2)
+
+Round 2's `_poll_games` stub (commit a30fbd2) confirmed its own fix worked:
+the new CI run's `PYTHONFAULTHANDLER` dump (run 37950130698, job
+113886458105) no longer shows a second background thread in
+`_window_titles`/`subprocess`. But `macos-latest` still segfaulted in the
+*same* test, now with a bare trace showing only the main thread stuck inside
+`tkinter.update()` (`tests/test_ui.py:2289`) — zero other Python-level
+information. Two independent problems existed; round 2 fixed one.
+
+**Hypothesis, not confirmed root cause** (no real Mac available to attach a
+native debugger): `docs/design.md` (`docs/history/ac-60-design.md:85`) named
+this exact risk before any code existed — "Export '↑' (U+2191), Import '↓'
+(U+2193)... Both are in the Segoe UI glyph set (verify on Windows at the
+first render; if either is missing it renders as a box, so fall back to
+plain 'E' / 'I' in that case, not a new icon font)." That was written with
+Windows in mind, but the same glyphs go through Tk's Cocoa/Aqua text backend
+on macOS via the identical code path. A native font-fallback crash during
+Unicode glyph layout, triggered specifically during a real (not Xvfb
+synthetic) window-resize repaint, is a plausible match for a crash this deep
+(zero Python frames, pure native segfault) that survived eliminating the one
+other confirmed cause.
+
+**Fix (hypothesis test, not a confirmed fix)**: swapped the collapsed-rail
+glyphs from "↑"/"↓" to design.md's own named ASCII fallback, "E"/"I"
+(`afk_clicker.py:3425,3427`), and updated the one test assertion that checks
+them (`tests/test_ui.py:2296`, now `["+", "E", "I"]`). This is a mitigation
+for an unconfirmed trigger, following the same "mitigated, trigger
+unconfirmed" precedent already in this repo's own history for G#39 and G#4
+— shipped and let the next CI run confirm or refute it, rather than guessing
+further without a real Mac to test on.
+
+Verified locally (Linux/Xvfb — same caveat as round 2: the crash itself is
+macOS-only and can't reproduce here, so this round can only confirm "no
+regression," not "hypothesis correct"):
+```
+DISPLAY=:99 python -m pytest
+538 passed, 10 skipped, 11 failed (pre-existing, unrelated — see below)
+```
+The 11 failures are all `Themes::test_module_globals_still_ship_dark_only`
+subtests, reproduced identically on the pre-round-3 commit (`a30fbd2`) with
+this round's changes stashed out — a pre-existing test-order pollution flake
+(passes cleanly in isolation: `pytest tests/test_ui.py::Themes`), not caused
+by this round's glyph change and out of scope to fix here.
 Same 548/10-skip result as round 1 — no regression, stubbed test passes.

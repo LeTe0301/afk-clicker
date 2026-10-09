@@ -68,6 +68,24 @@ just holds long enough to land inside the window often enough to show it. Fixed 
 can't reproduce there). Filed the underlying race as its own backlog item below (G#61/GH#108) rather
 than fixing it inline — out of scope for G#60 (import/export). Pushed, new CI run pending.
 
+**Independent PR-level review, round 3: round 2's fix confirmed partial — macOS still segfaulted,
+different cause.** CI run 37950130698/job 113886458105 confirms the `_poll_games` stub from round 2
+worked (no more second thread in `_window_titles`/`subprocess` in the fault dump), but
+`macos-latest` segfaulted again in the same test, now with a bare trace showing only the main thread
+stuck inside `tkinter.update()` (`tests/test_ui.py:2289`) — zero other Python-level information, so
+two independent problems existed and only one was fixed. Hypothesis (not confirmed — no real Mac
+available): `docs/design.md` (`docs/history/ac-60-design.md:85`) named this exact risk itself before
+any code existed — the "↑"/"↓" glyphs' documented fallback to plain "E"/"I" if Segoe UI's glyph
+coverage is missing them, written with Windows in mind but going through the identical Cocoa/Aqua
+text-rendering path on macOS. A native font-fallback crash during Unicode glyph layout in a real
+(non-Xvfb) resize repaint is a plausible match for a crash this deep. Shipped the fallback as a
+hypothesis test, following this repo's own "mitigated, trigger unconfirmed" precedent (G#39, G#4):
+swapped the collapsed-rail glyphs to "E"/"I" (`afk_clicker.py:3425,3427`) and the one test assertion
+that checks them. 538 passed/10 skipped locally (Linux/Xvfb); 11 pre-existing, unrelated
+`Themes::test_module_globals_still_ship_dark_only` failures reproduced identically before this
+round's change too (test-order pollution, passes in isolation) — not this round's concern. Pushed,
+new CI run pending; next review round confirms or refutes the hypothesis.
+
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
 usual `feature/ac-N/...` convention) from a separate, concurrently-running session:

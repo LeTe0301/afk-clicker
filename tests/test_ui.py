@@ -2289,11 +2289,13 @@ class RailCollapse(UITestCase):
             self.root.update()
             self.assertTrue(self.ui._rail_collapsed)
             # G#60: Export/Import collapse to their own stacked icon-only
-            # buttons ("↑"/"↓"), direct children of the rail like "+" --
-            # mirroring how Add already collapses (docs/design.md).
+            # buttons ("E"/"I"), direct children of the rail like "+" --
+            # mirroring how Add already collapses (docs/design.md). "E"/"I"
+            # not the original "↑"/"↓": see afk_clicker.py's comment at this
+            # same button construction site for why.
             buttons = [w for w in self.ui.side.winfo_children() if isinstance(w, app.Button)]
             texts = [b.itemcget(b.label, "text") for b in buttons]
-            self.assertEqual(texts, ["+", "↑", "↓"])
+            self.assertEqual(texts, ["+", "E", "I"])
         finally:
             self.ui._poll_games = original_poll_games
 

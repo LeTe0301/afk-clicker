@@ -3421,10 +3421,18 @@ class AfkAutoclicker:
         # mirrors how Add already collapses to "+" (docs/design.md): two
         # stacked icon-only buttons instead of a side-by-side pair, since
         # two 87px buttons would be ~16px each at SIDEBAR_RAIL_W.
+        # "E"/"I" not "↑"/"↓": docs/history/ac-60-design.md's own named
+        # fallback ("if either glyph is missing it renders as a box, fall
+        # back to plain 'E'/'I', not a new icon font"). Switched after
+        # macos-latest CI segfaulted with zero Python frames, stuck inside
+        # tkinter.update() during the real WM-driven collapse repaint in
+        # this exact test (run 37950130698, job 113886458105) -- a plausible
+        # Cocoa/Aqua Unicode glyph-fallback crash, not confirmed on a real
+        # Mac. Hypothesis the next CI run will confirm or refute.
         if self._rail_collapsed:
-            Button(side, "↑", self.export_current_game, s,
+            Button(side, "E", self.export_current_game, s,
                    width=36).pack(pady=(0, int(4 * s)))
-            Button(side, "↓", self.import_game, s,
+            Button(side, "I", self.import_game, s,
                    width=36).pack(pady=(0, int(4 * s)))
         else:
             export_import_row = tk.Frame(side, bg=BG)
