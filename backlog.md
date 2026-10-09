@@ -537,18 +537,26 @@ Housekeeping:
       without Segoe UI installed, not a real render. 44% headroom and a shorter new string make a
       clip unlikely but unconfirmed. Needs Windows hardware or a CI screenshot, not actionable from
       this sandbox.
-- [ ] G#61 / GH#108 — github: true — Follow-up from G#60's PR #107 review round 2 (macOS CI
-      segfault): `_poll_games()` (`afk_clicker.py:5186-5192`) spawns a background thread that shells
-      out via `subprocess` (`afk_clicker.py:2032`, `_window_titles`) on every periodic 5000ms poll and
-      on every `_build_ui()` rebuild tail call (`afk_clicker.py:3540`). Forking a subprocess from a
-      background thread while the main thread is inside Cocoa's/Tk's real event loop is a known macOS
-      crash class (Apple's Objective-C runtime isn't fork-safe across threads) — confirmed via
-      `PYTHONFAULTHANDLER=1`'s dump in CI run 37947940301/job 113879182323. Worked around for the one
-      test it was hitting (`RailCollapse.test_add_current_game_button_survives_collapse`, stubbed
-      `_poll_games` to a no-op), but the race itself is a real production hazard during normal app use
-      too — `_poll_games()` reschedules itself every 5000ms while the user is constantly triggering Tk
-      event processing. Needs its own scoped fix (e.g. moving the subprocess call off the periodic-poll
-      thread, or serializing it against the main thread's event loop).
+- [x] **Done, PR #107 (merged 2026-10-09, `026dc36`).** G#61 / GH#108 — github: true — Follow-up from
+      G#60's PR #107 review round 2 (macOS CI segfault): `_poll_games()` spawns a background thread
+      that shells out via `subprocess` (`afk_clicker.py:2032`, `_window_titles`). Forking a subprocess
+      from a background thread while the main thread is inside Cocoa's/Tk's real event loop is a known
+      macOS crash class (Apple's Objective-C runtime isn't fork-safe across threads) — confirmed via
+      `PYTHONFAULTHANDLER=1`'s dump in CI run 37947940301/job 113879182323. Fixed at the root, not just
+      worked around in tests: `_build_ui()`'s tail used to call `self._poll_games()` inline, with zero
+      delay, on every rebuild — including one mid real-WM-driven resize, which is what actually raced
+      Cocoa's live event loop. Now deferred one Tk tick (`self.root.after(50, self._poll_games)`,
+      `afk_clicker.py:3568`), giving any live native resize context room to unwind first. The other
+      call site this ticket originally named, `_poll_games()`'s own periodic 5000ms reschedule
+      (`afk_clicker.py:5230`), was re-examined and found to have never actually been at risk: it was
+      already a genuinely deferred `self.root.after(5000, ...)` callback, which Tk always dispatches as
+      a fresh top-level mainloop iteration, never nested inside whatever call stack scheduled it five
+      seconds earlier — only the inline, zero-delay rebuild-tail call could land nested inside a live
+      Cocoa resize-tracking loop. Confirmed across 8 CI rounds during G#60's own fix cycle: the
+      subprocess race never recurred after this fix (a second, unrelated native crash did, mitigated
+      separately per-test — see G#60's own backlog entry above). No real Mac available to confirm
+      beyond CI evidence, same standard this repo already applies to other macOS-only findings (G#39,
+      G#4).
 - Lesson (not a backlog item): **This repo has two remotes — `origin` (a Gitea mirror at
       `/srv/git/repos`) and `github` (the real `LeTe0301/afk-clicker` GitHub repo) — and a `git push`
       with no remote named defaults to whichever `git push.default`/upstream resolves to, which is not
