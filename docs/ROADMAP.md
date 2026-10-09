@@ -63,7 +63,21 @@ Until both are settled, the version stays in `0.x`.
 
 ## Later
 
-- [ ] Per-game hotkeys, once one global hotkey proves too coarse.
+- [x] **Per-game hotkeys** (G#57). The one global toggle hotkey became an
+      optional, per-game value, stored on each game's own settings entry
+      (`Store.game(id)["hotkey"]`) and re-armed on every real game switch
+      (`_arm_toggle_hotkey()`, mirroring macros' own `_arm_macro_hotkeys()`)
+      -- never falling back across games, and deliberately not torn down
+      and rebuilt on a same-game theme/scale rebuild replay (the
+      `_toggle_armed_for` guard; see `HotkeyListenerSurvivesRebuild`). An
+      existing single top-level hotkey is carried into every already-
+      configured game by the `SETTINGS_VERSION` 2 -> 3 migration, not just
+      the one selected at the time. No cross-game collision validation --
+      two games can share a chord, since only the selected one is ever
+      armed. A capture still in flight when the user switches games is
+      dropped by a generation counter (`_capture_gen`), and Record on the
+      newly-selected game works immediately rather than waiting on the old
+      capture thread.
 - [x] **A visible click counter and session timer.** Shown in the header
       (`self.session_stats_label`), not the Clicking pane, so it costs no
       extra pane height. Counts only the click loop's own clicks (left/

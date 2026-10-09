@@ -12,11 +12,75 @@ GitHub number. Shown below as **G#** / **GH#**.
 ## In progress
 
 **G#57 — github: true — sync pending: GitHub — Per-game hotkeys**, picked from `docs/ROADMAP.md`'s
-"Later" list on Leo's direction 2026-10-09. Gitea ticket created
-(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/57); the GitHub mirror failed twice —
-`gh issue create --repo LeTe0301/afk-clicker ...` → `GraphQL: Resource not accessible by personal
-access token (createIssue)`, same write-scope gap as G#47/GH#86. Branch: `feature/ac-57/per-game-hotkeys`.
-product-manager → ux-designer → developer → reviewer cycle starting now.
+"Later" list on Leo's direction 2026-10-09. Gitea ticket
+(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/57); the GitHub mirror failed —
+`GraphQL: Resource not accessible by personal access token (createIssue)`, same write-scope gap as
+G#47/GH#86. Branch: `feature/ac-57/per-game-hotkeys`.
+
+Full product-manager → ux-designer → developer → reviewer cycle complete, **cycle review: APPROVE,
+WITH FOLLOW-UPS (non-blocking)**. Storage moved per-game; a `SETTINGS_VERSION` 2→3 migration carries
+the old global chord into every already-configured game; `_arm_toggle_hotkey()`/`_disarm_toggle_hotkey()`
+reuse macros' rebuild-on-switch lifecycle with a `_toggle_armed_for` same-game-rebuild guard (keeps
+`HotkeyListenerSurvivesRebuild` green); no collision rejection (only the selected game's watcher is ever
+armed, same as macros). ux-designer found and fixed two race conditions in the spec's own guard
+description (a capture-generation counter replacing a game-id guard that missed stale A→B→A results and
+a worker-thread write; `register_hotkey()` now blocks only same-generation captures instead of silently
+no-opping Record on a game switch) plus an honest arm-failure state. The developer found and fixed a
+real pre-existing production bug along the way, outside this ticket's own scope but load-bearing for it:
+`Store.put_game()` (`afk_clicker.py:1799`) wholesale-replaced a game's settings dict on every persist
+instead of merging, silently wiping `"macros"` and the new `"hotkey"` key on the very next save —
+reproduced directly (Record → Apply → close the app lost the hotkey), fixed by merging instead. Also
+silently fixes an existing G#13 macros bug as a side effect. 404/404 `test_ui.py` tests green (391
+pre-existing + 13 new), 526/526 full-suite discover green (matches CI's own invocation) — all
+independently re-run by the reviewer, who also independently reproduced the `put_game()` bug by
+reverting the fix. Full report: `docs/test-review.md`.
+
+Two non-blocking follow-ups filed: **G#58** (no macros-specific regression test for the `put_game()`
+merge fix — https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/58) and **G#59** (verify the
+new Hotkey-tab subtitle string on a real Windows render, not just a Linux metric estimate —
+https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/59). Both `github: true`, GitHub mirrors
+not yet attempted — same token gap as above, will hit it too.
+
+Committed (`b49db61`) and pushed to `feature/ac-57/per-game-hotkeys`. **PR creation blocked**:
+`gh pr create` → `GraphQL: Resource not accessible by personal access token (createPullRequest)` — the
+same write-scope gap as G#47/GH#86, now confirmed to block PRs too, not just issues/comments. The branch
+is pushed and ready; needs Leo to either open the PR by hand
+(https://github.com/LeTe0301/afk-clicker/pull/new/feature/ac-57/per-game-hotkeys) or grant the token
+Pull-requests: write so this can be done from here. **sync pending: GitHub (PR)**.
+**Retried 2026-10-09 after Leo said the token should now have create+merge access** — both
+`gh pr create` and `gh issue reopen 69` (GH#69, same session) still fail with the identical
+`Resource not accessible by personal access token` error, so whatever permission change was made
+hasn't taken effect yet from here, or this repo isn't in the token's selected-repository list (common
+fine-grained-PAT gotcha: permissions can be granted account-wide but the repo itself still needs adding
+to "selected repositories"). Not retrying again without new information — needs Leo to confirm the
+change actually reached this repo.
+
+**`pull_requests: write` confirmed working after Leo's follow-up fix** — PR #101 opened. `issues: write`
+is still missing (`issues=write` in `x-accepted-github-permissions` on a direct probe), so GH#69 and
+every GitHub issue mirror for G#57/G#58/G#59 remain `sync pending: GitHub`. `pull_requests` *update*
+(close/reopen) is also still inconsistent — worked for create, failed for close with the identical
+error moments later — likely still-propagating, not retried further.
+
+**Independent PR-level review, round 1: CI caught a real defect Xvfb-only local testing couldn't.**
+`ubuntu-latest` passed; `macos-latest` SIGTRAPped (`Trace/BPT trap: 5`, exit 133) in
+`PerGameHotkeys.test_a_game_with_no_hotkey_shows_not_set_after_switching_from_one_that_has` — every
+sibling test in that class that calls `apply_hotkey()` has `@needs_input_permission`, this one test
+was the sole oversight, matching this repo's own documented gotcha (a real listener on macOS CI always
+SIGTRAPs). `windows-latest` failed on `test_jitter_widens_the_spread` — an environmental timing flake
+unrelated to this diff (0.031s vs a 0.04s threshold; the identical test failed with nearly identical
+numbers on G#58's unrelated PR the same run). Developer fix-round: added the missing decorator
+(`9e5d3fa`), full suite re-verified locally (one pre-existing, order-dependent `Themes` test failure
+confirmed unrelated via `git stash` A/B and isolated-run checks — not touched, flagged for later).
+Pushed, new CI run in flight.
+
+**Round 2: `windows-latest` now green (flake didn't recur), but `macos-latest` SIGTRAPped again** —
+a *second* test in the same class, `test_arm_failure_on_switch_shows_help_text_and_enables_apply_for_retry`,
+also calls `apply_hotkey()` and was also missing `@needs_input_permission`. The orchestrator's own
+round-1 dispatch had incorrectly claimed this test already had the decorator (misread of the original
+diff) — the developer trusted that and only fixed the one named. Audited the whole `PerGameHotkeys`
+class this time (every test, checked for `apply_hotkey()`/real-arming calls against decorator
+presence) before fixing directly: exactly one gap, now closed (`74c688c`). 526/526 full suite green
+locally. New CI run in flight.
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
