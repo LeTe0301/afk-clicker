@@ -6043,6 +6043,7 @@ class PerGameHotkeys(UITestCase):
                           "a candidate recorded for the previous game must not survive a switch")
         self.assertFalse(self.ui.apply_button._enabled)
 
+    @needs_input_permission
     def test_arm_failure_on_switch_shows_help_text_and_enables_apply_for_retry(self):
         # docs/design.md deviation #3: a saved-but-unarmed chord must not
         # silently read "Not set" -- same honest-failure copy apply_hotkey()
