@@ -41,8 +41,12 @@ new Hotkey-tab subtitle string on a real Windows render, not just a Linux metric
 https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/59). Both `github: true`, GitHub mirrors
 not yet attempted — same token gap as above, will hit it too.
 
-Next: commit, push, open PR — then an independent critical PR review once CI reports back on all
-three platforms (this cycle's own review ran Linux-only, same Xvfb constraint every cycle here has).
+Committed (`b49db61`) and pushed to `feature/ac-57/per-game-hotkeys`. **PR creation blocked**:
+`gh pr create` → `GraphQL: Resource not accessible by personal access token (createPullRequest)` — the
+same write-scope gap as G#47/GH#86, now confirmed to block PRs too, not just issues/comments. The branch
+is pushed and ready; needs Leo to either open the PR by hand
+(https://github.com/LeTe0301/afk-clicker/pull/new/feature/ac-57/per-game-hotkeys) or grant the token
+Pull-requests: write so this can be done from here. **sync pending: GitHub (PR)**.
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
