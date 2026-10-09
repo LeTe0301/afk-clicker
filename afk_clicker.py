@@ -1757,7 +1757,7 @@ class Store:
         return self.data["games"].setdefault(game_id, {})
 
     def put_game(self, game_id, values):
-        self.data["games"][game_id] = values
+        self.data["games"].setdefault(game_id, {}).update(values)
         return self.save()
 
     def delete_game(self, game_id):
