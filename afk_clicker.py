@@ -37,6 +37,7 @@ import time
 import tkinter as tk
 import uuid
 import weakref
+from tkinter import filedialog
 from tkinter import font as tkfont
 
 from pynput import keyboard as kb
@@ -1688,6 +1689,36 @@ def _run_settings_migrations(data):
     return data
 
 
+# G#60: the export envelope's own "kind"/"profile_version" -- versioned
+# independently of SETTINGS_VERSION above, since a profile file is a
+# different artifact with its own evolution, not a settings.json fragment.
+PROFILE_EXPORT_KIND = "afk-clicker-game-profile"
+PROFILE_FORMAT_VERSION = 1
+
+
+def _sanitize_game_entry(game):
+    """Reject-not-coerce filtering for one per-game dict's "macros"
+    (G#47/GH#15) and "hotkey" (G#57) fields -- the same two checks
+    Store.__init__ used to run inline over every loaded game, now shared
+    with import_game() (G#60) so both the normal settings load and an
+    imported profile apply the exact same validation instead of two
+    copies of it. Mutates and returns `game`."""
+    macros = game.get("macros")
+    if isinstance(macros, list):
+        game["macros"] = [m for m in (_validate_macro(raw) for raw in macros)
+                          if m is not None]
+    elif "macros" in game:
+        del game["macros"]   # garbage type -- drop it, not coerce to []
+    hotkey_blob = game.get("hotkey")
+    if hotkey_blob is not None:
+        validated = Hotkey.from_json(hotkey_blob)
+        if validated is not None:
+            game["hotkey"] = validated.to_json()
+        else:
+            del game["hotkey"]   # garbage -- drop it, not coerce to None
+    return game
+
+
 class Store:
     """Load once, save on change. A corrupt file is replaced, never fatal."""
 
@@ -1721,34 +1752,18 @@ class Store:
         self.data["games"] = {gid: g for gid, g in games.items()
                                if isinstance(g, dict)}
 
-        # Same contract, one more level down (G#47/GH#15): each per-game
-        # entry may now carry a "macros" list. A missing key defaults to []
-        # lazily at read time, the same convention every other per-game
-        # default already uses -- this only filters a *present* one down to
-        # the macros that are actually well-formed, via _validate_macro()'s
-        # own reject-not-coerce contract (a malformed macro feeds
-        # MacroRunner real input, same reasoning as Hotkey.from_json()).
+        # Same contract, two more levels down: each per-game entry may now
+        # carry a "macros" list (G#47/GH#15) and its own "hotkey" blob
+        # (G#57, same Hotkey.to_json() shape the old top-level field used).
+        # A missing key defaults lazily at read time, the same convention
+        # every other per-game default already uses -- this only filters a
+        # *present* one through _sanitize_game_entry()'s reject-not-coerce
+        # contract (a malformed macro feeds MacroRunner real input, same
+        # reasoning as Hotkey.from_json()). G#60 extracted this into a
+        # shared helper so import_game() runs the exact same validation,
+        # not a second copy of it.
         for game in self.data["games"].values():
-            macros = game.get("macros")
-            if isinstance(macros, list):
-                game["macros"] = [m for m in (_validate_macro(raw) for raw in macros)
-                                  if m is not None]
-            elif "macros" in game:
-                del game["macros"]   # garbage type -- drop it, not coerce to []
-
-        # Same contract, one more key (G#57): each per-game entry may now
-        # carry its own "hotkey" blob (same Hotkey.to_json() shape the old
-        # top-level field used) -- validated through Hotkey.from_json()'s
-        # own reject-not-coerce contract, same reasoning as the macros
-        # filter just above.
-        for game in self.data["games"].values():
-            hotkey_blob = game.get("hotkey")
-            if hotkey_blob is not None:
-                validated = Hotkey.from_json(hotkey_blob)
-                if validated is not None:
-                    game["hotkey"] = validated.to_json()
-                else:
-                    del game["hotkey"]   # garbage -- drop it, not coerce to None
+            _sanitize_game_entry(game)
 
         # Same contract, one key: a garbage on-disk "appearance" (wrong type,
         # a typo, an old story.md-draft "theme"-style value, null) is as
@@ -2897,6 +2912,19 @@ class AfkAutoclicker:
         self._save_failed = False      # last self.store.save()/put_game()
                                         # outcome seen by _note_save() -- see
                                         # there
+        self._profile_io_status = None     # G#60: (message, ok) or None --
+                                            # export_current_game()/
+                                            # import_game()'s last outcome,
+                                            # painted by
+                                            # _paint_profile_io_status() from
+                                            # the sidebar footer -- a plain
+                                            # attribute, not a Tk object, so
+                                            # it survives _rebuild_ui()
+                                            # untouched, same precedent as
+                                            # self._save_failed above. Sticky
+                                            # until the next Export/Import
+                                            # attempt (design.md's override
+                                            # of the spec's game_state flash).
         self._sweep_hint_pending = None    # (text, colour) or None -- the
                                         # jitter row's warning-band state as
                                         # last computed by
@@ -3386,6 +3414,39 @@ class AfkAutoclicker:
         add_label = "+" if self._rail_collapsed else "Add current game"
         Button(side, add_label, self.add_current_game, s,
                width=rail_w - 28).pack(pady=(int(12 * s), int(4 * s)))
+        # G#60: Export/Import, directly below "Add current game" -- export
+        # acts on self.current, which is only naturally in scope here, at
+        # the sidebar footer (Settings has no notion of "the current
+        # game"); import is scope-free, same row as Add. Collapsed rail
+        # mirrors how Add already collapses to "+" (docs/design.md): two
+        # stacked icon-only buttons instead of a side-by-side pair, since
+        # two 87px buttons would be ~16px each at SIDEBAR_RAIL_W.
+        if self._rail_collapsed:
+            Button(side, "↑", self.export_current_game, s,
+                   width=36).pack(pady=(0, int(4 * s)))
+            Button(side, "↓", self.import_game, s,
+                   width=36).pack(pady=(0, int(4 * s)))
+        else:
+            export_import_row = tk.Frame(side, bg=BG)
+            export_import_row.pack(pady=(0, int(4 * s)))
+            pair_w = (rail_w - 28 - 6) // 2
+            Button(export_import_row, "Export", self.export_current_game, s,
+                  width=pair_w).pack(side="left")
+            Button(export_import_row, "Import", self.import_game, s,
+                  width=pair_w).pack(side="left", padx=(int(6 * s), 0))
+        # Sticky status strip (docs/design.md's override of the spec's
+        # game_state flash -- _mark_running() rewrites game_state every 5s
+        # and it isn't even a live widget while Settings is open). Recorded
+        # on self._profile_io_status, which survives this rebuild, so it is
+        # repainted here on every build, not shown/hidden by a timer.
+        # bg=CARD, not BG: the WCAG arithmetic in docs/design.md found BG
+        # fails 4.5:1 for both OK/BAD text in the light theme.
+        self.profile_io_label = tk.Label(
+            side, bg=CARD, font=("Segoe UI", fs(9, s)), justify="left",
+            anchor="center" if self._rail_collapsed else "w",
+            wraplength=int(36 * s) if self._rail_collapsed else int((rail_w - 28) * s),
+            padx=int(8 * s), pady=int(6 * s))
+        self._paint_profile_io_status()
         # A thin divider separates the action button above from the Settings
         # entry below -- without it the two rows read as one stack of
         # similar pill buttons instead of "an action" vs. "a navigation
@@ -4486,6 +4547,124 @@ class AfkAutoclicker:
             self._select("global")
         else:
             self._select(self.current, persist=False)
+
+    def export_current_game(self):
+        """G#60: write the selected game's complete stored settings
+        (clicking fields, macros, hotkey) to a standalone JSON file the
+        user picks, so it can be shared or restored later via
+        import_game(). Acts on self.current, which is always set --
+        built-in and custom games are both exportable, read-only, no
+        risk."""
+        profile = self.by_id[self.current]
+        name = profile["name"]
+        slug = name.lower().replace(" ", "-")
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("Clickwork game profile", "*.json")],
+            initialdir=os.path.dirname(config_path()),
+            initialfile=f"{slug}.json")
+        if not path:
+            self._note_profile_io(None)   # cancelled -- silent no-op, clears any earlier status
+            return
+        game = {k: v for k, v in self.store.game(self.current).items()
+                if k != "_profile"}   # source-game bookkeeping; the importer mints its own
+        # A game that never had a macro/hotkey saved has neither key in
+        # storage at all (put_game()'s own merge never adds either) --
+        # written plainly here so the envelope always carries both
+        # (docs/spec.md's "Export of a game with no macros and no hotkey").
+        game.setdefault("macros", [])
+        game.setdefault("hotkey", None)
+        envelope = {"kind": PROFILE_EXPORT_KIND, "profile_version": PROFILE_FORMAT_VERSION,
+                    "app_version": __version__, "name": name, "game": game}
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(envelope, fh, indent=2)
+            os.replace(tmp, path)   # atomic, same pattern as Store.save()
+        except OSError:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            self._note_profile_io("Export failed: couldn't write the file", False)
+            return
+        self._note_profile_io(f'Exported "{name}"', True)
+
+    def import_game(self):
+        """G#60: read a file written by export_current_game() (or any file
+        matching the same envelope) and create a brand-new custom game
+        from it -- never overwrites an existing game, same contract as
+        _add_game()."""
+        path = filedialog.askopenfilename(
+            filetypes=[("Clickwork game profile", "*.json")],
+            initialdir=os.path.dirname(config_path()))
+        if not path:
+            self._note_profile_io(None)   # cancelled -- nothing changes
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                blob = json.load(fh)
+        except (OSError, ValueError):
+            blob = None
+        if (not isinstance(blob, dict)
+                or blob.get("kind") != PROFILE_EXPORT_KIND
+                or blob.get("profile_version") != PROFILE_FORMAT_VERSION
+                or not isinstance(blob.get("name"), str) or not blob["name"].strip()
+                or not isinstance(blob.get("game"), dict)):
+            self._note_profile_io("Import failed: not a valid game profile file", False)
+            return
+        # Disambiguate against every existing display name, same contract
+        # as _add_game()'s own "already exists" check -- import is always
+        # additive, never an overwrite.
+        name = blob["name"].strip()[:28]
+        candidate, n = name, 1
+        while ("custom:" + candidate.lower()) in self.by_id:
+            n += 1
+            candidate = f"{name} ({n})"
+        game_id = "custom:" + candidate.lower()
+        profile = make_profile(game_id, candidate, candidate)
+        self.profiles.append(profile)
+        self.by_id[game_id] = profile
+        # Pre-seed the store entry, sanitized through the same
+        # reject-not-coerce contract as a normal settings load, *before*
+        # selecting -- _select()'s own merge-from-defaults + widget-fill +
+        # _persist() tail then coerces every scalar field and writes it
+        # back, exactly as it already does for "Add current game". No new
+        # scalar validation needed (docs/spec.md "Background").
+        self.store.game(game_id).update(_sanitize_game_entry(dict(blob["game"])))
+        self._rebuild_list()
+        self._select(game_id)
+        # After _select(), so the selection repaint doesn't overwrite it
+        # (docs/design.md States: Success).
+        self._note_profile_io(f'Imported as "{candidate}"', True)
+
+    def _note_profile_io(self, message, ok=None):
+        """Record export_current_game()/import_game()'s last outcome and
+        repaint the sidebar status strip immediately. message=None (a
+        cancelled dialog) clears it -- docs/design.md States: Cancelled.
+        Sticky otherwise: no auto-hide timer, no change-only guard like
+        _note_save()'s -- every Export/Import attempt, even a repeat of
+        the same outcome, replaces whatever is currently shown."""
+        self._profile_io_status = None if message is None else (message, ok)
+        self._paint_profile_io_status()
+
+    def _paint_profile_io_status(self):
+        """The one place that shows or hides the sidebar status strip,
+        from whatever self._profile_io_status last recorded -- called from
+        the sidebar build block (so a rebuild repaints it, docs/design.md)
+        and directly by _note_profile_io() otherwise. self.profile_io_label
+        always exists once the sidebar is built (unlike save_failed_label,
+        which only exists while the Appearance pane is), so no
+        self._rebuilding guard is needed here."""
+        status = self._profile_io_status
+        if status is None:
+            self.profile_io_label.pack_forget()
+            return
+        message, ok = status
+        colour = OK if ok else BAD
+        text = ("OK" if ok else "!") if self._rail_collapsed else message
+        self.profile_io_label.config(text=text, fg=colour)
+        self.profile_io_label.pack(fill="x", pady=(0, int(6 * self.s)))
 
     # ---------- updates ----------
 

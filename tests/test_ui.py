@@ -436,6 +436,247 @@ class DeletedGames(UITestCase):
                          "deleted, instead of only deleting it")
 
 
+class ExportedGames(UITestCase):
+    """G#60: export_current_game() writes the selected game's stored
+    settings to a standalone JSON file. filedialog.asksaveasfilename is
+    patched directly (this repo's monkeypatch-and-restore style, no
+    unittest.mock -- see SaveFailureNotice/DetectOsTheme) rather than
+    driving a real file-picker widget under Xvfb."""
+
+    def setUp(self):
+        super().setUp()
+        self._export_dir = tempfile.mkdtemp()
+        self._asksaveasfilename = app.filedialog.asksaveasfilename
+
+    def tearDown(self):
+        app.filedialog.asksaveasfilename = self._asksaveasfilename
+        super().tearDown()
+
+    def _patch_save_dialog(self, path):
+        app.filedialog.asksaveasfilename = lambda **kw: path
+
+    def _export_path(self, filename="out.json"):
+        return os.path.join(self._export_dir, filename)
+
+    def test_export_writes_the_envelope_for_the_selected_game(self):
+        self.ui._select("minecraft")
+        path = self._export_path()
+        self._patch_save_dialog(path)
+        self.ui.export_current_game()
+        with open(path, encoding="utf-8") as fh:
+            envelope = json.load(fh)
+        self.assertEqual(envelope["kind"], "afk-clicker-game-profile")
+        self.assertEqual(envelope["profile_version"], 1)
+        self.assertEqual(envelope["app_version"], app.__version__)
+        self.assertEqual(envelope["name"], "Minecraft")
+        self.assertEqual(envelope["game"]["click_ms"], 650)
+        self.assertEqual(envelope["game"]["macros"], [])
+        self.assertIsNone(envelope["game"]["hotkey"])
+
+    def test_export_strips_profile_bookkeeping_for_a_custom_game(self):
+        self.ui._add_game("Some Other Game")
+        self.pump(0.2)
+        path = self._export_path()
+        self._patch_save_dialog(path)
+        self.ui.export_current_game()
+        with open(path, encoding="utf-8") as fh:
+            envelope = json.load(fh)
+        self.assertNotIn("_profile", envelope["game"],
+                         "source-game bookkeeping must not leak into the export")
+
+    def test_export_shows_a_success_status_naming_the_game(self):
+        self.ui._select("minecraft")
+        self._patch_save_dialog(self._export_path())
+        self.ui.export_current_game()
+        self.root.update()
+        self.assertEqual(self.ui.profile_io_label.cget("text"), 'Exported "Minecraft"')
+        self.assertEqual(self.ui.profile_io_label.cget("fg"), app.OK)
+        self.assertTrue(self.ui.profile_io_label.winfo_ismapped())
+
+    def test_cancelled_export_writes_no_file_and_shows_no_status(self):
+        path = self._export_path()
+        self._patch_save_dialog("")   # tkinter returns "" on Cancel
+        self.ui.export_current_game()
+        self.root.update()
+        self.assertFalse(os.path.exists(path))
+        self.assertFalse(self.ui.profile_io_label.winfo_ismapped())
+
+    def test_cancelling_a_second_export_clears_a_previous_status(self):
+        self._patch_save_dialog(self._export_path())
+        self.ui.export_current_game()
+        self.root.update()
+        self.assertTrue(self.ui.profile_io_label.winfo_ismapped())
+        self._patch_save_dialog("")
+        self.ui.export_current_game()
+        self.root.update()
+        self.assertFalse(self.ui.profile_io_label.winfo_ismapped())
+
+    def test_export_write_failure_leaves_no_partial_file_and_shows_failure(self):
+        path = self._export_path()
+        self._patch_save_dialog(path)
+        original_replace = app.os.replace
+        def raising_replace(*a, **kw):
+            raise OSError("disk full")
+        app.os.replace = raising_replace
+        try:
+            self.ui.export_current_game()
+        finally:
+            app.os.replace = original_replace
+        self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(path + ".tmp"))
+        self.assertEqual(self.ui.profile_io_label.cget("text"),
+                         "Export failed: couldn't write the file")
+        self.assertEqual(self.ui.profile_io_label.cget("fg"), app.BAD)
+
+
+class ImportedGames(UITestCase):
+    """G#60: import_game() reads a file matching export_current_game()'s
+    own envelope and always creates a brand-new custom game -- never
+    overwrites an existing one. filedialog.askopenfilename is patched
+    directly, same style as ExportedGames above."""
+
+    needs_input_permission = unittest.skipIf(
+        app is not None and app.sys.platform == "darwin",
+        "starting a listener aborts the process on macOS -- see issue #7")
+
+    def setUp(self):
+        super().setUp()
+        self._import_dir = tempfile.mkdtemp()
+        self._askopenfilename = app.filedialog.askopenfilename
+
+    def tearDown(self):
+        app.filedialog.askopenfilename = self._askopenfilename
+        super().tearDown()
+
+    def _patch_open_dialog(self, path):
+        app.filedialog.askopenfilename = lambda **kw: path
+
+    def _write(self, filename, blob):
+        path = os.path.join(self._import_dir, filename)
+        with open(path, "w", encoding="utf-8") as fh:
+            if isinstance(blob, str):
+                fh.write(blob)
+            else:
+                json.dump(blob, fh)
+        return path
+
+    def _envelope(self, name="Imported Game", game=None, **overrides):
+        blob = {"kind": "afk-clicker-game-profile", "profile_version": 1,
+                "app_version": "0.9.0", "name": name,
+                "game": game if game is not None else {"click_ms": 444}}
+        blob.update(overrides)
+        return blob
+
+    def test_import_creates_a_new_selected_custom_game_matching_the_file(self):
+        path = self._write("game.json", self._envelope(
+            game={"click_ms": 444, "jitter_ms": 5, "macros": [], "hotkey": None}))
+        self._patch_open_dialog(path)
+        self.ui.import_game()
+        self.assertIn("custom:imported game", self.ui.items)
+        self.assertEqual(self.ui.current, "custom:imported game")
+        self.assertEqual(self.ui.click_ms.var.get(), "444")
+        self.assertEqual(self.ui.jitter_ms.var.get(), "5")
+        self.assertEqual(self.ui.profile_io_label.cget("text"), 'Imported as "Imported Game"')
+        self.assertEqual(self.ui.profile_io_label.cget("fg"), app.OK)
+
+    def test_import_disambiguates_a_colliding_display_name(self):
+        self.ui._add_game("Imported Game")   # occupies custom:imported game
+        path = self._write("game.json", self._envelope())
+        self._patch_open_dialog(path)
+        self.ui.import_game()
+        self.assertIn("custom:imported game (2)", self.ui.items)
+        self.assertIn("custom:imported game", self.ui.items,
+                      "the existing game must not be touched or merged with")
+        self.assertEqual(self.ui.current, "custom:imported game (2)")
+        self.assertEqual(self.ui.profile_io_label.cget("text"),
+                         'Imported as "Imported Game (2)"')
+
+    def test_a_malformed_macro_is_dropped_the_rest_still_imports(self):
+        path = self._write("game.json", self._envelope(game={
+            "click_ms": 444,
+            "macros": [{"id": "abc", "name": "Good", "hotkey": None,
+                        "steps": [{"type": "wait", "ms": 10}]},
+                       {"name": "Bad -- no steps at all"}]}))
+        self._patch_open_dialog(path)
+        self.ui.import_game()
+        game_id = "custom:imported game"
+        macros = self.ui.store.game(game_id)["macros"]
+        self.assertEqual([m["name"] for m in macros], ["Good"])
+        self.assertEqual(self.ui.profile_io_label.cget("fg"), app.OK)
+
+    def test_a_malformed_hotkey_is_dropped_the_rest_still_imports(self):
+        path = self._write("game.json", self._envelope(
+            game={"click_ms": 444, "hotkey": {"keys": "garbage"}}))
+        self._patch_open_dialog(path)
+        self.ui.import_game()   # dropped hotkey -> no real listener armed
+        game_id = "custom:imported game"
+        self.assertNotIn("hotkey", self.ui.store.game(game_id))
+        self.assertEqual(self.ui.hotkey_label.cget("text"), "Not set")
+
+    @needs_input_permission
+    def test_a_well_formed_hotkey_round_trips(self):
+        hotkey_blob = {"mods": ["ctrl"], "keys": [["f6", None, None]]}
+        path = self._write("game.json", self._envelope(
+            game={"click_ms": 444, "hotkey": hotkey_blob}))
+        self._patch_open_dialog(path)
+        self.ui.import_game()
+        game_id = "custom:imported game"
+        self.assertEqual(self.ui.store.game(game_id)["hotkey"], hotkey_blob)
+
+    def test_not_valid_json_is_rejected(self):
+        path = self._write("game.json", "not even json")
+        self._patch_open_dialog(path)
+        self.ui.import_game()
+        self.assertEqual(len(self.ui.profiles), 2, "no game should have been created")
+        self.assertEqual(self.ui.profile_io_label.cget("text"),
+                         "Import failed: not a valid game profile file")
+        self.assertEqual(self.ui.profile_io_label.cget("fg"), app.BAD)
+
+    def test_wrong_kind_is_rejected(self):
+        path = self._write("game.json", self._envelope(kind="some-other-app-profile"))
+        self._patch_open_dialog(path)
+        self.ui.import_game()
+        self.assertEqual(len(self.ui.profiles), 2)
+        self.assertEqual(self.ui.profile_io_label.cget("text"),
+                         "Import failed: not a valid game profile file")
+
+    def test_wrong_profile_version_is_rejected(self):
+        path = self._write("game.json", self._envelope(profile_version=2))
+        self._patch_open_dialog(path)
+        self.ui.import_game()
+        self.assertEqual(len(self.ui.profiles), 2)
+
+    def test_cancelled_import_changes_nothing(self):
+        self._patch_open_dialog("")
+        before = self.ui.current
+        self.ui.import_game()
+        self.assertEqual(self.ui.current, before)
+        self.assertEqual(len(self.ui.profiles), 2)
+        self.assertFalse(self.ui.profile_io_label.winfo_ismapped())
+
+    def test_imported_from_minecraft_does_not_show_the_eating_panel(self):
+        path = self._write("game.json", self._envelope(
+            name="Minecraft", game={"click_ms": 650, "eat_mode": "pause",
+                                    "eat_every": 75, "eat_hold": 2.0}))
+        self._patch_open_dialog(path)
+        self.ui.import_game()
+        game_id = "custom:minecraft"
+        self.assertEqual(self.ui.current, game_id)
+        self.assertEqual(self.ui.eat_card.winfo_manager(), "",
+                         "an imported game is always custom, never 'eating'")
+        # _select()'s own eat_mode fill (":4279") forces the widget to "off"
+        # for any non-eating profile, and _persist()'s tail then writes
+        # that back -- eat_mode itself does not survive as "pause", but the
+        # numeric eat_every/eat_hold fields are ordinary widget-backed
+        # fields and do (docs/spec.md "the raw values still ride along in
+        # storage harmlessly" -- verified directly against the real app,
+        # not assumed).
+        stored = self.ui.store.game(game_id)
+        self.assertEqual(stored["eat_mode"], "off")
+        self.assertEqual(stored["eat_every"], 75)
+        self.assertEqual(stored["eat_hold"], 2.0)
+
+
 class PollGamesScanDoesNotHoldSelfWhileBlocked(unittest.TestCase):
     def test_scan_only_holds_profiles_not_self_during_detect_running(self):
         # _poll_games()'s scan() thread used to close over self directly.
@@ -884,6 +1125,48 @@ class StoreMacroFiltering(UITestCase):
         self._write({"games": {"minecraft": {"click_ms": 700}}})
         store = app.Store(self.config)
         self.assertEqual(store.data["games"]["minecraft"].get("macros", []), [])
+
+
+class SanitizeGameEntry(unittest.TestCase):
+    """G#60: _sanitize_game_entry() is the macros/hotkey filtering
+    Store.__init__ used to run inline (StoreMacroFiltering above, and
+    SettingsSchemaVersion's own hotkey tests), extracted so import_game()
+    can share the exact same reject-not-coerce contract. No display/Tk
+    needed -- a plain function over dicts."""
+
+    def test_well_formed_macros_and_hotkey_survive(self):
+        game = {"macros": [{"id": "abc", "name": "Restock", "hotkey": None,
+                            "steps": [{"type": "wait", "ms": 10}]}],
+                "hotkey": {"mods": ["ctrl"], "keys": [["f6", None, None]]}}
+        result = app._sanitize_game_entry(game)
+        self.assertIs(result, game)
+        self.assertEqual([m["name"] for m in game["macros"]], ["Restock"])
+        self.assertEqual(game["hotkey"], {"mods": ["ctrl"], "keys": [["f6", None, None]]})
+
+    def test_a_malformed_macro_is_dropped_the_rest_survives(self):
+        game = {"macros": [
+            {"id": "abc", "name": "Good", "hotkey": None,
+             "steps": [{"type": "wait", "ms": 10}]},
+            {"name": "Bad -- no steps at all"},
+        ]}
+        app._sanitize_game_entry(game)
+        self.assertEqual([m["name"] for m in game["macros"]], ["Good"])
+
+    def test_a_non_list_macros_value_is_dropped_not_coerced(self):
+        game = {"macros": "oops"}
+        app._sanitize_game_entry(game)
+        self.assertNotIn("macros", game)
+
+    def test_a_corrupt_hotkey_is_dropped(self):
+        game = {"hotkey": {"keys": "garbage"}}
+        app._sanitize_game_entry(game)
+        self.assertNotIn("hotkey", game)
+
+    def test_a_missing_hotkey_key_is_left_absent(self):
+        game = {"click_ms": 700}
+        app._sanitize_game_entry(game)
+        self.assertNotIn("hotkey", game)
+        self.assertEqual(game["click_ms"], 700)
 
 
 class ClickLoop(UITestCase):
@@ -1974,9 +2257,12 @@ class RailCollapse(UITestCase):
         self.root.geometry(f"{target_w}x{int(700 * s)}")
         self.root.update()
         self.assertTrue(self.ui._rail_collapsed)
+        # G#60: Export/Import collapse to their own stacked icon-only
+        # buttons ("↑"/"↓"), direct children of the rail like "+" --
+        # mirroring how Add already collapses (docs/design.md).
         buttons = [w for w in self.ui.side.winfo_children() if isinstance(w, app.Button)]
-        self.assertEqual(len(buttons), 1)
-        self.assertEqual(buttons[0].itemcget(buttons[0].label, "text"), "+")
+        texts = [b.itemcget(b.label, "text") for b in buttons]
+        self.assertEqual(texts, ["+", "↑", "↓"])
 
     def test_rail_rederives_on_a_ui_scale_change_with_width_held_fixed(self):
         # docs/spec.md's own "Edge cases": a UI-scale change moves the
@@ -5265,13 +5551,16 @@ class SettingsNavigation(UITestCase):
     def test_sidebar_no_longer_holds_the_update_widgets(self):
         # Feature 3b: "Check for updates"/the version label moved into the
         # Settings page's own Updates section -- the sidebar footer is now
-        # games -> Add current game -> divider -> Settings only.
+        # games -> Add current game -> Export/Import -> status strip ->
+        # divider -> Settings (G#60 added the Export/Import row and the
+        # status strip; neither is an update widget).
         self.assertIsInstance(self.ui.settings_item, app.SettingsItem)
         buttons = [w for w in self.ui.side.winfo_children() if isinstance(w, app.Button)]
         self.assertEqual(len(buttons), 1,
-                         "only 'Add current game' should remain a sidebar Button")
+                         "only 'Add current game' should remain a direct sidebar "
+                         "Button -- Export/Import live inside their own row Frame")
         labels = [w for w in self.ui.side.winfo_children() if isinstance(w, tk.Label)]
-        self.assertEqual(labels, [self.ui.count_label],
+        self.assertEqual(labels, [self.ui.count_label, self.ui.profile_io_label],
                          "no version label should remain in the sidebar")
         self.assertFalse(hasattr(self.ui, "update_button"),
                          "update_button should not be built until Settings is opened")
