@@ -85,7 +85,16 @@ Until both are settled, the version stays in `0.x`.
       user-authored sequence. Resets on each `start()`; frozen, not reset,
       at `stop()` so the last session's totals stay visible until the next
       `start()`.
-- [ ] Import/export of a game profile, for sharing a known-good configuration.
+- [x] **Import/export of a game profile** (G#60). Export writes the selected
+      game's full stored dict (settings + macros + hotkey) to a JSON envelope
+      via a native file dialog, atomic tmp-then-replace write mirroring
+      `Store.save()`. Import always creates a new custom game via the
+      existing `make_profile()` path -- never overwrites -- with numeric-
+      suffixed name/id collisions, validated through a shared
+      `_sanitize_game_entry()` helper also used by the normal settings-load
+      path. Importing preserves `eat_mode` as a key but not its value (the
+      existing per-game `_select()`/`_persist()` coercion forces it to
+      `"off"` for any non-eating profile) -- deliberate, not a gap.
 - [ ] Linux Wayland: not solvable in-process. Would need a portal-based
       global-shortcut integration, and only on compositors that implement it.
 
