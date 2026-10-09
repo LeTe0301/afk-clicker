@@ -55,6 +55,24 @@ fine-grained-PAT gotcha: permissions can be granted account-wide but the repo it
 to "selected repositories"). Not retrying again without new information — needs Leo to confirm the
 change actually reached this repo.
 
+**`pull_requests: write` confirmed working after Leo's follow-up fix** — PR #101 opened. `issues: write`
+is still missing (`issues=write` in `x-accepted-github-permissions` on a direct probe), so GH#69 and
+every GitHub issue mirror for G#57/G#58/G#59 remain `sync pending: GitHub`. `pull_requests` *update*
+(close/reopen) is also still inconsistent — worked for create, failed for close with the identical
+error moments later — likely still-propagating, not retried further.
+
+**Independent PR-level review, round 1: CI caught a real defect Xvfb-only local testing couldn't.**
+`ubuntu-latest` passed; `macos-latest` SIGTRAPped (`Trace/BPT trap: 5`, exit 133) in
+`PerGameHotkeys.test_a_game_with_no_hotkey_shows_not_set_after_switching_from_one_that_has` — every
+sibling test in that class that calls `apply_hotkey()` has `@needs_input_permission`, this one test
+was the sole oversight, matching this repo's own documented gotcha (a real listener on macOS CI always
+SIGTRAPs). `windows-latest` failed on `test_jitter_widens_the_spread` — an environmental timing flake
+unrelated to this diff (0.031s vs a 0.04s threshold; the identical test failed with nearly identical
+numbers on G#58's unrelated PR the same run). Developer fix-round: added the missing decorator
+(`9e5d3fa`), full suite re-verified locally (one pre-existing, order-dependent `Themes` test failure
+confirmed unrelated via `git stash` A/B and isolated-run checks — not touched, flagged for later).
+Pushed, new CI run in flight.
+
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
 usual `feature/ac-N/...` convention) from a separate, concurrently-running session:
