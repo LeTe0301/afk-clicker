@@ -47,6 +47,13 @@ same write-scope gap as G#47/GH#86, now confirmed to block PRs too, not just iss
 is pushed and ready; needs Leo to either open the PR by hand
 (https://github.com/LeTe0301/afk-clicker/pull/new/feature/ac-57/per-game-hotkeys) or grant the token
 Pull-requests: write so this can be done from here. **sync pending: GitHub (PR)**.
+**Retried 2026-10-09 after Leo said the token should now have create+merge access** — both
+`gh pr create` and `gh issue reopen 69` (GH#69, same session) still fail with the identical
+`Resource not accessible by personal access token` error, so whatever permission change was made
+hasn't taken effect yet from here, or this repo isn't in the token's selected-repository list (common
+fine-grained-PAT gotcha: permissions can be granted account-wide but the repo itself still needs adding
+to "selected repositories"). Not retrying again without new information — needs Leo to confirm the
+change actually reached this repo.
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
