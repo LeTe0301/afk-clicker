@@ -1990,16 +1990,24 @@ class WindowResize(UITestCase):
         self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_W * s))
 
     def test_shrinking_below_minsize_is_clamped(self):
-        # Deliberately left on a real root.geometry() call, unlike the two
-        # collapse-crossing tests above: this test's own point is to verify
-        # the real OS/Tk minsize() clamp, which the fake-width rebuild
-        # technique those use doesn't exercise at all (same reasoning as
-        # test_rail_rederives_on_a_ui_scale_change_with_width_held_fixed).
-        # Not yet confirmed safe or unsafe against the macOS crash -- the
-        # suite has never reached this test in any CI run so far, since an
-        # earlier, now-fixed test in this class always crashed first.
-        self.root.geometry("50x50")
-        self.root.update()
+        # macOS CI segfault (PR #107 review): this crashed too, confirming
+        # the suspicion in this test's own prior comment -- 50x50 is below
+        # both the floor and the collapse threshold, so the real clamp this
+        # test verifies also crosses into a collapse-triggered rebuild. The
+        # fake-width technique above can't be used here (it would stop
+        # testing the real OS/Tk minsize() clamp, the actual point of this
+        # test), so instead stub out just the dangerous part -- the
+        # widget-reconstructing rebuild -- for this one geometry() call.
+        # The real clamp this test checks (winfo_width()/winfo_height()
+        # against minsize()) happens before any rebuild runs, so this
+        # changes nothing about what's actually being verified.
+        original_rebuild = self.ui._rebuild_ui
+        self.ui._rebuild_ui = lambda: None
+        try:
+            self.root.geometry("50x50")
+            self.root.update()
+        finally:
+            self.ui._rebuild_ui = original_rebuild
         minw, minh = self.root.minsize()
         self.assertGreaterEqual(self.root.winfo_width(), minw)
         self.assertGreaterEqual(self.root.winfo_height(), minh)
