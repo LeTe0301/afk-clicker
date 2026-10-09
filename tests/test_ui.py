@@ -5950,6 +5950,7 @@ class PerGameHotkeys(UITestCase):
         self.ui._select("global")
         self.assertEqual(self.ui.registered_hotkey.label(), "Ctrl + F7")
 
+    @needs_input_permission
     def test_a_game_with_no_hotkey_shows_not_set_after_switching_from_one_that_has(self):
         self.ui._select("minecraft")
         self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
