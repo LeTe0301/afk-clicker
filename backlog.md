@@ -604,6 +604,15 @@ Housekeeping:
       too — `_poll_games()` reschedules itself every 5000ms while the user is constantly triggering Tk
       event processing. Needs its own scoped fix (e.g. moving the subprocess call off the periodic-poll
       thread, or serializing it against the main thread's event loop).
+- Lesson (not a backlog item): **This repo has two remotes — `origin` (a Gitea mirror at
+      `/srv/git/repos`) and `github` (the real `LeTe0301/afk-clicker` GitHub repo) — and a `git push`
+      with no remote named defaults to whichever `git push.default`/upstream resolves to, which is not
+      guaranteed to be `github`.** Cost a full CI-round delay during G#60's fix cycle: a developer
+      subagent committed and pushed a real fix, reported it pushed to both remotes, but it only reached
+      `origin` — the orchestrator kept watching a stale CI run on the old commit until checking
+      `git log github/<branch>` directly caught the mismatch. Always push explicitly with `git push
+      github <branch>` when the goal is "make CI/the PR see this," and verify with `git log --oneline
+      github/<branch> -1` after any subagent reports a push, rather than trusting the report.
 - [x] **Done 2026-09-28, PR #92.** G#49 / GH#90 — github: true — Follow-up from PR #89's cycle review (G#38): the Auto UI-scale
       clamp's regression test doesn't actually exercise out-of-range factors — every back-solved
       test value already sits inside `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]`. Sabotage-verified: removing
