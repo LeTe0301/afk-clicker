@@ -73,6 +73,15 @@ numbers on G#58's unrelated PR the same run). Developer fix-round: added the mis
 confirmed unrelated via `git stash` A/B and isolated-run checks — not touched, flagged for later).
 Pushed, new CI run in flight.
 
+**Round 2: `windows-latest` now green (flake didn't recur), but `macos-latest` SIGTRAPped again** —
+a *second* test in the same class, `test_arm_failure_on_switch_shows_help_text_and_enables_apply_for_retry`,
+also calls `apply_hotkey()` and was also missing `@needs_input_permission`. The orchestrator's own
+round-1 dispatch had incorrectly claimed this test already had the decorator (misread of the original
+diff) — the developer trusted that and only fixed the one named. Audited the whole `PerGameHotkeys`
+class this time (every test, checked for `apply_hotkey()`/real-arming calls against decorator
+presence) before fixing directly: exactly one gap, now closed (`74c688c`). 526/526 full suite green
+locally. New CI run in flight.
+
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
 usual `feature/ac-N/...` convention) from a separate, concurrently-running session:
