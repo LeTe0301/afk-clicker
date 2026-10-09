@@ -2001,6 +2001,20 @@ def detect_os_theme():
     return "dark"
 
 
+# G#62: the X11 branch of _window_titles() below shares one lazily-(re)
+# connected connection across calls instead of opening+closing one every
+# call. Module-level, not instance-level: _window_titles() and its two
+# callers (detect_running(), foreground_title()) are free functions with no
+# AfkAutoclicker reference threaded through any of them. _x11_display_lock
+# only ever guards installing a newly-opened connection and an actual tree
+# walk -- never the open itself (xdisplay.Display() is the one call known to
+# stall unboundedly, see _poll_games()'s own comment; locking the open would
+# let one stuck open freeze every other concurrently-running scan too, which
+# is exactly what G#39's no-join-on-supersede design exists to avoid).
+_x11_display = None
+_x11_display_lock = threading.Lock()
+
+
 def _window_titles():
     """
     Every visible window title, which is how the game gets recognised.
@@ -2037,9 +2051,25 @@ def _window_titles():
         return [t.strip() for t in out.stdout.split(",") if t.strip()]
 
     # X11. python-xlib is already installed as a pynput dependency, so this
-    # costs nothing extra.
+    # costs nothing extra. G#62: reuses the shared module-level connection
+    # when there is one; see the comment above _x11_display for why opening
+    # a new one never happens under _x11_display_lock.
     from Xlib import display as xdisplay
-    disp = xdisplay.Display()
+    global _x11_display
+    disp = _x11_display
+    if disp is None:
+        disp = xdisplay.Display()  # the one call known to stall -- stays outside the lock
+        with _x11_display_lock:
+            if _x11_display is None:
+                _x11_display = disp
+            else:
+                # Another thread's open won the race; use it, drop ours.
+                try:
+                    disp.close()
+                except Exception:
+                    pass
+                disp = _x11_display
+
     titles = []
 
     def walk(window, depth=0):
@@ -2054,9 +2084,45 @@ def _window_titles():
         except Exception:
             pass
 
-    walk(disp.screen().root)
-    disp.close()
-    return titles
+    try:
+        with _x11_display_lock:
+            walk(disp.screen().root)
+        return titles
+    except Exception:
+        # Shared connection is bad -- discard it so the next call reconnects
+        # fresh, and fall back for this one call only to a brand-new
+        # throwaway connection (this is exactly the pre-G#62 behaviour).
+        with _x11_display_lock:
+            if _x11_display is disp:
+                _x11_display = None
+        try:
+            disp.close()
+        except Exception:
+            pass
+        try:
+            fallback = xdisplay.Display()
+        except Exception:
+            # Retry also failed (e.g. X server still restarting) -- degrade
+            # the same way detect_running()/foreground_title()'s own outer
+            # except Exception already does, instead of propagating.
+            return []
+        titles = []
+        try:
+            walk(fallback.screen().root)
+        except Exception:
+            # Fallback's own screen()/walk() also broke (same correlated-
+            # failure window as the Display() open above) -- degrade
+            # instead of propagating.
+            try:
+                fallback.close()
+            except Exception:
+                pass
+            return []
+        try:
+            fallback.close()
+        except Exception:
+            pass
+        return titles
 
 
 def detect_running(profiles):
@@ -6270,6 +6336,20 @@ class AfkAutoclicker:
         self._macro_runners = {}
         self.mouse = None
         self.keyboard = None
+        # G#62: same spirit as the mouse/keyboard drop just above -- the
+        # shared Xlib connection _window_titles() now reuses across scans
+        # would otherwise just be reused by the next AfkAutoclicker in this
+        # process (fine, same as any other module-level resource), but an
+        # explicit, immediate close here is cheap insurance against Xvfb's
+        # already-marginal max-clients ceiling (G#53) in a test suite
+        # sharing one process across ~150+ UI-building test classes.
+        global _x11_display
+        if _x11_display is not None:
+            try:
+                _x11_display.close()
+            except Exception:
+                pass
+            _x11_display = None
         # G#27/ac-27 round 2 (PR #47): this used to also release bind_all()'s
         # funcid (unbind_all()+deletecommand()) and sweep every Variable's
         # traces (self._forget_traces()) here, right after cancelling the
