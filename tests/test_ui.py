@@ -445,6 +445,18 @@ class ExportedGames(UITestCase):
 
     def setUp(self):
         super().setUp()
+        # Windows CI (PR #107): a real window manager's own early
+        # <Configure> echo (never sent under Xvfb) can flip
+        # self._rail_collapsed before this test ever gets to run,
+        # independent of anything this test itself does -- the exact
+        # mechanism GameList's own sibling tests already document at their
+        # own call sites. Every test below reads profile_io_label's text
+        # through _paint_profile_io_status()'s `if self._rail_collapsed`
+        # branch, which only shows "OK"/"!" while collapsed -- so an
+        # unlucky WM echo made six of these fail on Windows with the
+        # collapsed glyph instead of the real message. Forced here, once,
+        # since every test in this class depends on it, not per-test.
+        self.ui._rail_collapsed = False
         self._export_dir = tempfile.mkdtemp()
         self._asksaveasfilename = app.filedialog.asksaveasfilename
 
@@ -541,6 +553,9 @@ class ImportedGames(UITestCase):
 
     def setUp(self):
         super().setUp()
+        # Windows CI (PR #107): see ExportedGames.setUp()'s own comment --
+        # same mechanism, same per-class fix.
+        self.ui._rail_collapsed = False
         self._import_dir = tempfile.mkdtemp()
         self._askopenfilename = app.filedialog.askopenfilename
 

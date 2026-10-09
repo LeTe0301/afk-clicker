@@ -84,4 +84,15 @@ jobs:
         if: runner.os != 'Linux'
         env:
           CI: "true"
+          # PR #107: macos-latest segfaulted (exit 139) with zero Python-level
+          # output -- RailCollapse.test_add_current_game_button_survives_collapse,
+          # a real-WM-driven geometry()+update() that rebuilds the sidebar
+          # footer, the kind of native Tcl/Tk crash faulthandler exists for.
+          # This does not fix that crash (its cause sits below anything this
+          # repo's Python code controls -- see docs/history/ac-60-implementation.md's
+          # own Xvfb-only collapsed-rail check, which already shows the same
+          # rebuild producing the correct ['+', '↑', '↓'] result with no
+          # issue there); it only ensures a recurrence prints which Python
+          # line was running at the moment of the signal instead of nothing.
+          PYTHONFAULTHANDLER: "1"
         run: python -m unittest discover -s tests -t . -v
