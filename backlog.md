@@ -98,6 +98,25 @@ class this time (every test, checked for `apply_hotkey()`/real-arming calls agai
 presence) before fixing directly: exactly one gap, now closed (`74c688c`). 526/526 full suite green
 locally. New CI run in flight.
 
+**Round 3: green on `ubuntu`/`windows`, `macos` failed once more — unrelated this time.**
+`LiveRepository.test_resolves_the_highest_version` hits the real GitHub API (deliberately, per its own
+docstring) and returned `None` from `app.latest_release()`, almost certainly rate-limited by this
+session's own heavy `gh`/API usage. Re-triggered via another empty commit; **round 4: all three
+platforms green.** Independent PR-level review (orchestrator): diff since the cycle's own
+`test-review.md` was exactly the two `@needs_input_permission` additions, nothing else — **MERGE.**
+
+**RESOLVED 2026-10-09.** `pull_requests`/`issues` write confirmed working after Leo regenerated the
+token (a *different* token than the one whose UI permissions were edited earlier — see the `host`
+session's diagnosis). GH#69 reopened with context. GitHub mirrors created and cross-linked: G#57 →
+GH#103, G#58 → GH#104, G#59 → GH#105 (left open, no code to do yet). **PR #101 merged → `main`
+(`076fd39`).** PR #102 then hit the predicted trivial `put_game()` conflict merging main back in
+(resolved by keeping G#57's commented version, `35b33f8`), CI green again, **PR #102 merged → `main`
+(`b2db200`).** Both trackers closed for G#57/G#58 on Gitea and GitHub. `docs/history/ac-57-*.md` and
+`ac-58-*.md` are already on `main` as part of each PR. Remaining open, needing Leo specifically:
+G#59 (Windows subtitle verification — needs real hardware/CI), G#46 (branch cleanup — needs Leo's
+confirm + still blocked by local sandbox policy on `git push --delete`), G#47/GH#86 (token still
+lacks `actions: write` — re-running a CI job directly is still impossible from here).
+
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
 usual `feature/ac-N/...` convention) from a separate, concurrently-running session:
