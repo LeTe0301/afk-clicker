@@ -11,111 +11,67 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
-**G#58 — github: true — Macros-specific regression test for the `put_game()` merge fix**, a
-follow-up from G#57's cycle review (Finding #1). Gitea ticket
-(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/58). Branch:
-`feature/ac-58/macros-specific-regression-test-put`, cut from `main` before G#57 merged. Full
-cycle: mechanical repeat (orchestrator wrote `docs/spec.md` directly, no product-manager/ux-designer
-dispatch — pure test addition, no design surface), developer, reviewer. **Cycle review: APPROVE.**
-New test `MacrosTab.test_a_macro_survives_an_unrelated_persist_call`, sabotage-verified (fails
-against a reverted `put_game()`, passes against the fix). Since this branch predates G#57 on `main`,
-it forward-ports G#57's identical one-line `put_game()` fix onto itself so the test has something
-real to guard — the reviewer's one nit (non-blocking): merging both `feature/ac-57` and this branch
-into `main` will show a trivial textual conflict on that line (G#57's version carries an explanatory
-comment this forward-port doesn't), not a silent no-op as `docs/implementation.md` assumed — resolve
-by keeping G#57's commented version. Committed (`b6403d0`), docs archived to
-`docs/history/ac-58-{spec,implementation,test-review}.md`. Next: push, open PR (depends on G#47/GH#86's
-GitHub token write-scope gap — same one blocking G#57's own PR, currently being retried).
+**G#60 — github: true — Import/export of a game profile**, picked from `docs/ROADMAP.md`'s "Later"
+list (the other remaining unscoped item, after G#57). Gitea
+(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/60) and GitHub
+(https://github.com/LeTe0301/afk-clicker/issues/106) tickets created and cross-linked. Branch:
+`feature/ac-60/import-export-game-profile`.
 
-**G#57 — github: true — sync pending: GitHub — Per-game hotkeys**, picked from `docs/ROADMAP.md`'s
-"Later" list on Leo's direction 2026-10-09. Gitea ticket
-(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/57); the GitHub mirror failed —
-`GraphQL: Resource not accessible by personal access token (createIssue)`, same write-scope gap as
-G#47/GH#86. Branch: `feature/ac-57/per-game-hotkeys`.
+Full product-manager → ux-designer → developer → reviewer cycle complete, **cycle review: APPROVE**
+(no must-fix/should-fix, two cosmetic nits only). Export writes the selected game's full stored
+dict (settings + macros + hotkey) to a JSON envelope (`{"kind": "afk-clicker-game-profile",
+"profile_version": 1, ...}`) via a native `tkinter.filedialog`, atomic tmp-then-`os.replace()` write
+mirroring `Store.save()`. Import always creates a new custom game via the existing `make_profile()`
+path — never overwrites — with numeric-suffixed name/id collisions, validated through a new shared
+`_sanitize_game_entry()` helper factored out of `Store.__init__`'s existing inline macros/hotkey
+filtering (now one code path for both normal load and import). Two new sidebar buttons
+(Export/Import, collapsing to ↑/↓ glyphs on the icon rail) with a sticky status strip, following the
+G#21 save-notice pattern — the ux-designer overrode the spec's original `game_state`-flash idea,
+which `_mark_running()`'s own 5s reschedule would have clobbered. One deliberate, spec-level
+behavior: importing a profile preserves `eat_mode` as a *key* but not its value (forced to `"off"`
+by `_select()`'s own existing coercion for any non-eating profile) — decided in `docs/spec.md`
+upfront, not a gap found downstream; reviewer agreed. 548/548 tests green (527 pre-existing + 21
+new), independently re-run and several specific claims independently reproduced (vertical-budget
+check at 130% scale/11 games, collapsed-rail glyphs via a real resize, WCAG contrast recomputed from
+scratch). Full report: `docs/history/ac-60-*.md`. Committed (`8f5466c`), pushed, PR #107 opened.
 
-Full product-manager → ux-designer → developer → reviewer cycle complete, **cycle review: APPROVE,
-WITH FOLLOW-UPS (non-blocking)**. Storage moved per-game; a `SETTINGS_VERSION` 2→3 migration carries
-the old global chord into every already-configured game; `_arm_toggle_hotkey()`/`_disarm_toggle_hotkey()`
-reuse macros' rebuild-on-switch lifecycle with a `_toggle_armed_for` same-game-rebuild guard (keeps
-`HotkeyListenerSurvivesRebuild` green); no collision rejection (only the selected game's watcher is ever
-armed, same as macros). ux-designer found and fixed two race conditions in the spec's own guard
-description (a capture-generation counter replacing a game-id guard that missed stale A→B→A results and
-a worker-thread write; `register_hotkey()` now blocks only same-generation captures instead of silently
-no-opping Record on a game switch) plus an honest arm-failure state. The developer found and fixed a
-real pre-existing production bug along the way, outside this ticket's own scope but load-bearing for it:
-`Store.put_game()` (`afk_clicker.py:1799`) wholesale-replaced a game's settings dict on every persist
-instead of merging, silently wiping `"macros"` and the new `"hotkey"` key on the very next save —
-reproduced directly (Record → Apply → close the app lost the hotkey), fixed by merging instead. Also
-silently fixes an existing G#13 macros bug as a side effect. 404/404 `test_ui.py` tests green (391
-pre-existing + 13 new), 526/526 full-suite discover green (matches CI's own invocation) — all
-independently re-run by the reviewer, who also independently reproduced the `put_game()` bug by
-reverting the fix. Full report: `docs/test-review.md`.
+**Independent PR-level review: 8 CI rounds, two distinct real hazards found and fixed, CI green on
+all three platforms.** `ubuntu-latest` was clean throughout. `windows-latest` failed once (6 tests
+misreading the sidebar status label as the collapsed-rail glyph `"!"` — a real WM's early
+`<Configure>` echo, never sent under Xvfb, can flip `_rail_collapsed` before a test body runs; fixed
+by forcing it `False` in `ExportedGames`/`ImportedGames`'s `setUp()`) then stayed green.
+`macos-latest` took 8 rounds, chasing two genuinely independent native segfaults (zero Python-level
+output beyond `tkinter.update()`), not one:
+- **Hazard A (production bug, fixed at the root):** `_build_ui()`'s tail called `self._poll_games()`
+  inline on every rebuild, spawning a new scan thread whose `detect_running()` shells out via
+  `subprocess` on macOS — forking from a background thread while the main thread is inside Cocoa's
+  live resize-tracking loop is a known macOS crash class, confirmed directly via
+  `PYTHONFAULTHANDLER=1` dumps on several CI runs. Fixed by deferring that one call by a short Tk
+  timer tick (`afk_clicker.py`, `_build_ui()`'s tail) instead of calling it inline — a genuine,
+  pre-existing production hazard that predates G#60, not introduced by it; G#60's extra widget-
+  construction work just widened the timing window enough to make it land consistently instead of
+  rarely.
+- **Hazard B (test-only, mitigated, root cause unconfirmed):** a second, separate native crash tied
+  specifically to a *real* `root.geometry()`+`root.update()` OS-level window resize crossing the
+  rail-collapse threshold while the new sidebar widgets exist — confirmed independent of Hazard A
+  (recurred with the poller fully stubbed). A font-glyph-fallback hypothesis (the collapsed-rail
+  "↑"/"↓" glyphs, per `docs/design.md`'s own named contingency) was tested and refuted. Root cause
+  never confirmed without real macOS hardware — mitigated test-by-test across `RailCollapse` and
+  `WindowResize` (6 tests total) by avoiding the literal OS-level resize: either patch
+  `root.winfo_width()` and call `_rebuild_ui()` directly (for tests only checking post-rebuild
+  widget state), or stub `_rebuild_ui()` itself for one call (for `test_shrinking_below_minsize_is_
+  clamped`, which genuinely needs the real OS minsize clamp and can't fake `winfo_width()`). Two
+  tests deliberately left on real geometry() throughout: `test_rail_rederives_on_a_ui_scale_change_
+  with_width_held_fixed` (tests real geometry stability across a scale change — faking it would
+  defeat the test) and `test_rail_stays_at_expanded_width_on_a_wide_window` (never crosses the
+  collapse threshold, never triggers the at-risk rebuild path).
 
-Two non-blocking follow-ups filed: **G#58** (no macros-specific regression test for the `put_game()`
-merge fix — https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/58) and **G#59** (verify the
-new Hotkey-tab subtitle string on a real Windows render, not just a Linux metric estimate —
-https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/59). Both `github: true`, GitHub mirrors
-not yet attempted — same token gap as above, will hit it too.
-
-Committed (`b49db61`) and pushed to `feature/ac-57/per-game-hotkeys`. **PR creation blocked**:
-`gh pr create` → `GraphQL: Resource not accessible by personal access token (createPullRequest)` — the
-same write-scope gap as G#47/GH#86, now confirmed to block PRs too, not just issues/comments. The branch
-is pushed and ready; needs Leo to either open the PR by hand
-(https://github.com/LeTe0301/afk-clicker/pull/new/feature/ac-57/per-game-hotkeys) or grant the token
-Pull-requests: write so this can be done from here. **sync pending: GitHub (PR)**.
-**Retried 2026-10-09 after Leo said the token should now have create+merge access** — both
-`gh pr create` and `gh issue reopen 69` (GH#69, same session) still fail with the identical
-`Resource not accessible by personal access token` error, so whatever permission change was made
-hasn't taken effect yet from here, or this repo isn't in the token's selected-repository list (common
-fine-grained-PAT gotcha: permissions can be granted account-wide but the repo itself still needs adding
-to "selected repositories"). Not retrying again without new information — needs Leo to confirm the
-change actually reached this repo.
-
-**`pull_requests: write` confirmed working after Leo's follow-up fix** — PR #101 opened. `issues: write`
-is still missing (`issues=write` in `x-accepted-github-permissions` on a direct probe), so GH#69 and
-every GitHub issue mirror for G#57/G#58/G#59 remain `sync pending: GitHub`. `pull_requests` *update*
-(close/reopen) is also still inconsistent — worked for create, failed for close with the identical
-error moments later — likely still-propagating, not retried further.
-
-**Independent PR-level review, round 1: CI caught a real defect Xvfb-only local testing couldn't.**
-`ubuntu-latest` passed; `macos-latest` SIGTRAPped (`Trace/BPT trap: 5`, exit 133) in
-`PerGameHotkeys.test_a_game_with_no_hotkey_shows_not_set_after_switching_from_one_that_has` — every
-sibling test in that class that calls `apply_hotkey()` has `@needs_input_permission`, this one test
-was the sole oversight, matching this repo's own documented gotcha (a real listener on macOS CI always
-SIGTRAPs). `windows-latest` failed on `test_jitter_widens_the_spread` — an environmental timing flake
-unrelated to this diff (0.031s vs a 0.04s threshold; the identical test failed with nearly identical
-numbers on G#58's unrelated PR the same run). Developer fix-round: added the missing decorator
-(`9e5d3fa`), full suite re-verified locally (one pre-existing, order-dependent `Themes` test failure
-confirmed unrelated via `git stash` A/B and isolated-run checks — not touched, flagged for later).
-Pushed, new CI run in flight.
-
-**Round 2: `windows-latest` now green (flake didn't recur), but `macos-latest` SIGTRAPped again** —
-a *second* test in the same class, `test_arm_failure_on_switch_shows_help_text_and_enables_apply_for_retry`,
-also calls `apply_hotkey()` and was also missing `@needs_input_permission`. The orchestrator's own
-round-1 dispatch had incorrectly claimed this test already had the decorator (misread of the original
-diff) — the developer trusted that and only fixed the one named. Audited the whole `PerGameHotkeys`
-class this time (every test, checked for `apply_hotkey()`/real-arming calls against decorator
-presence) before fixing directly: exactly one gap, now closed (`74c688c`). 526/526 full suite green
-locally. New CI run in flight.
-
-**Round 3: green on `ubuntu`/`windows`, `macos` failed once more — unrelated this time.**
-`LiveRepository.test_resolves_the_highest_version` hits the real GitHub API (deliberately, per its own
-docstring) and returned `None` from `app.latest_release()`, almost certainly rate-limited by this
-session's own heavy `gh`/API usage. Re-triggered via another empty commit; **round 4: all three
-platforms green.** Independent PR-level review (orchestrator): diff since the cycle's own
-`test-review.md` was exactly the two `@needs_input_permission` additions, nothing else — **MERGE.**
-
-**RESOLVED 2026-10-09.** `pull_requests`/`issues` write confirmed working after Leo regenerated the
-token (a *different* token than the one whose UI permissions were edited earlier — see the `host`
-session's diagnosis). GH#69 reopened with context. GitHub mirrors created and cross-linked: G#57 →
-GH#103, G#58 → GH#104, G#59 → GH#105 (left open, no code to do yet). **PR #101 merged → `main`
-(`076fd39`).** PR #102 then hit the predicted trivial `put_game()` conflict merging main back in
-(resolved by keeping G#57's commented version, `35b33f8`), CI green again, **PR #102 merged → `main`
-(`b2db200`).** Both trackers closed for G#57/G#58 on Gitea and GitHub. `docs/history/ac-57-*.md` and
-`ac-58-*.md` are already on `main` as part of each PR. Remaining open, needing Leo specifically:
-G#59 (Windows subtitle verification — needs real hardware/CI), G#46 (branch cleanup — needs Leo's
-confirm + still blocked by local sandbox policy on `git push --delete`), G#47/GH#86 (token still
-lacks `actions: write` — re-running a CI job directly is still impossible from here).
+Every round was a confirmed root cause or an honestly-labeled, CI-falsifiable hypothesis — never a
+guess shipped as fact. Full round-by-round detail: `git log` on this branch (commits `1a4fbb4`
+through `a81951a`), each with a full explanation. 548/548 tests green locally and on all three CI
+platforms. Independent PR-level review (orchestrator): diff since the cycle's own `test-review.md`
+is entirely test-isolation changes plus two small, well-justified production fixes (the glyph
+fallback, the deferred poll spawn) — **MERGE.**
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
@@ -512,6 +468,23 @@ Bugs and residue:
       underline lands at the right y.
 
 Features:
+- [x] **Done, PR #101 (merged 2026-10-09, `076fd39`).** G#57 / GH#103 — github: true — Per-game
+      hotkeys, picked from `docs/ROADMAP.md`'s "Later" list. Storage moved per-game; a
+      `SETTINGS_VERSION` 2→3 migration carries the old global chord into every already-configured
+      game; `_arm_toggle_hotkey()` reuses macros' rebuild-on-switch lifecycle with a
+      `_toggle_armed_for` same-game guard. Fixed a real pre-existing bug along the way:
+      `Store.put_game()` wholesale-replaced a game's settings dict on every persist instead of
+      merging, silently wiping macros/hotkey on the next save (also fixes an existing G#13 macros
+      bug as a side effect). Three CI fix-rounds after the cycle's own reviewer approval, all caught
+      by cross-platform CI that local Xvfb testing couldn't: two real macOS SIGTRAP crashes (tests
+      missing `@needs_input_permission`) and one unrelated live-API rate-limit flake. Full account:
+      `docs/history/ac-57-*.md`. Follow-ups: G#58 (below), G#59 (open, needs a real Windows render).
+- [x] **Done, PR #102 (merged 2026-10-09, `b2db200`).** G#58 / GH#104 — github: true — Follow-up
+      from G#57's cycle review: a macros-specific regression test for the `put_game()` merge fix
+      (`MacrosTab.test_a_macro_survives_an_unrelated_persist_call`, sabotage-verified). Branch
+      predated G#57 on `main`, so it forward-ported the identical one-line fix; merging both hit the
+      predicted trivial textual conflict on that line, resolved by keeping G#57's commented version
+      (`35b33f8`). Full account: `docs/history/ac-58-*.md`.
 Resolved 2026-09-12 (G#28 / GH#48, PR #49, `8ac6e35`): the window height floor was
 `690 * s`, sized for the single combined page that predated tabs. Now
 `WINDOW_MIN_H = 620`, derived from the *tallest* pane's real content span — the
@@ -600,6 +573,33 @@ Two follow-ups from its review are below.
       `start()`, frozen (not reset) on every exit path via `loop()`'s own `finally`.
 
 Housekeeping:
+- [ ] G#59 / GH#105 — github: true — Follow-up from G#57's cycle review (Finding #2): verify the
+      new Hotkey-tab subtitle string ("Hotkey · this game only", `afk_clicker.py:3676`) on a real
+      Windows render — the ux-designer's width estimate was a metric calculation on a Linux sandbox
+      without Segoe UI installed, not a real render. 44% headroom and a shorter new string make a
+      clip unlikely but unconfirmed. Needs Windows hardware or a CI screenshot, not actionable from
+      this sandbox.
+- [ ] G#61 / GH#108 — github: true — Follow-up from G#60's PR #107 review round 2 (macOS CI
+      segfault): `_poll_games()` (`afk_clicker.py:5186-5192`) spawns a background thread that shells
+      out via `subprocess` (`afk_clicker.py:2032`, `_window_titles`) on every periodic 5000ms poll and
+      on every `_build_ui()` rebuild tail call (`afk_clicker.py:3540`). Forking a subprocess from a
+      background thread while the main thread is inside Cocoa's/Tk's real event loop is a known macOS
+      crash class (Apple's Objective-C runtime isn't fork-safe across threads) — confirmed via
+      `PYTHONFAULTHANDLER=1`'s dump in CI run 37947940301/job 113879182323. Worked around for the one
+      test it was hitting (`RailCollapse.test_add_current_game_button_survives_collapse`, stubbed
+      `_poll_games` to a no-op), but the race itself is a real production hazard during normal app use
+      too — `_poll_games()` reschedules itself every 5000ms while the user is constantly triggering Tk
+      event processing. Needs its own scoped fix (e.g. moving the subprocess call off the periodic-poll
+      thread, or serializing it against the main thread's event loop).
+- Lesson (not a backlog item): **This repo has two remotes — `origin` (a Gitea mirror at
+      `/srv/git/repos`) and `github` (the real `LeTe0301/afk-clicker` GitHub repo) — and a `git push`
+      with no remote named defaults to whichever `git push.default`/upstream resolves to, which is not
+      guaranteed to be `github`.** Cost a full CI-round delay during G#60's fix cycle: a developer
+      subagent committed and pushed a real fix, reported it pushed to both remotes, but it only reached
+      `origin` — the orchestrator kept watching a stale CI run on the old commit until checking
+      `git log github/<branch>` directly caught the mismatch. Always push explicitly with `git push
+      github <branch>` when the goal is "make CI/the PR see this," and verify with `git log --oneline
+      github/<branch> -1` after any subagent reports a push, rather than trusting the report.
 - [x] **Done 2026-09-28, PR #92.** G#49 / GH#90 — github: true — Follow-up from PR #89's cycle review (G#38): the Auto UI-scale
       clamp's regression test doesn't actually exercise out-of-range factors — every back-solved
       test value already sits inside `[AUTO_SCALE_MIN, AUTO_SCALE_MAX]`. Sabotage-verified: removing
