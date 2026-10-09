@@ -20,23 +20,25 @@ usual `feature/ac-N/...` convention) from a separate, concurrently-running sessi
 - **PR #100** (`de89182`, merged 13:11 UTC): a visible click counter + session timer in the header.
   **No ticket** — picked directly from `docs/ROADMAP.md`'s "Later" list at Leo's direction once the open
   queue emptied out.
-- **`v0.8.0` and `v0.9.0` both published today** (2026-09-29T14:06 UTC, seconds apart) — 0.8.0's
-  long-parked deployment-gate approval finally went through. **Neither release branch has been merged
-  back into `main` yet**, breaking this project's own convention (`release/0.7.0` was; see the pattern
-  above). `release/0.8.0` (`70e5751`) is now 43 commits behind `main` and `release/0.9.0` (`945fcea`) is
-  `main` + one version-bump commit. **Needs Leo's call** on merging both back.
+- **`v0.8.0` and `v0.9.0` both published 2026-09-29** (2026-09-29T14:06 UTC, seconds apart) — 0.8.0's
+  long-parked deployment-gate approval finally went through. **2026-10-09: merged both back into `main`**
+  on Leo's call, same pattern as `release/0.7.0` — `Merge release/0.8.0 back into main` (`7097057`), then
+  `Merge release/0.9.0 back into main` (`48e3c2c`, one conflict: `__version__`, resolved to `"0.9.0"`).
+  `main`'s `__version__` is now `0.9.0`. Both release branches should join the merged-branch cleanup list
+  below.
 - **A second tracker-drift sweep found 18 Gitea issues** (G#25, G#27–32, G#40–45, G#48–50, plus the six
   from this session's own G#51–56) closed on GitHub but still open on Gitea — all now closed to match,
-  each with an evidence comment (commit/PR) on Gitea. **One exception, left open deliberately: G#39/GH#69**
-  — GitHub shows it closed with no comment and no commit reference; see its entry below, this needs Leo's
-  judgment before either tracker is touched further.
+  each with an evidence comment (commit/PR) on Gitea. **One exception: G#39/GH#69** — GitHub shows it
+  closed with no comment and no commit reference. **2026-10-09: Leo's call was to reopen GH#69** to match
+  Gitea (treated as an accidental closure, not intentional) — blocked on the same token write-scope gap
+  as G#47/GH#86, see its entry below for the exact error. `sync pending: GitHub`.
 - **Gitea's own git remote (`origin`, `/srv/git/repos/afk-clicker.git`) has not received a code push in a
   long time** — its `main` sits at `85dd1e6` ("Archive feature ac-28..."), far behind GitHub's `main`
-  (`de89182`). Only the `github` remote is getting real pushes/PRs; Gitea is issue-tracking only in
+  (`48e3c2c`). Only the `github` remote is getting real pushes/PRs; Gitea is issue-tracking only in
   practice. Flagging in case that's not intentional.
 - **The 20-branch merged-branch cleanup from earlier this session is still pending** — sandbox policy
   blocks `git push --delete` from this session regardless of confirmation; see Housekeeping's G#46/GH#85.
-  `release/0.8.0` and `release/0.9.0` should join that list once merged back into `main`.
+  `release/0.8.0` and `release/0.9.0` now join that list, both merged back into `main` as of 2026-10-09.
 
 **0.7.0 released 2026-09-15** (`v0.7.0` from `d008ad5`, run 34995512574): the update-log
 prompt (PR #72), top-aligned panes (PR #68), the macOS Accessibility-permission fixes
@@ -217,6 +219,10 @@ Bugs and residue:
       the investigation below is still real and still open. Left `[ ]`/open here and on Gitea #39
       deliberately, not force-closed to match GitHub — **needs Leo's judgment**: was GH#69 closed
       intentionally (accepted as good-enough) or by mistake? If the latter, reopen it.
+      **2026-10-09: Leo's call was "reopen GH#69 to match Gitea" (accidental closure).** `gh issue
+      reopen 69 --repo LeTe0301/afk-clicker` failed: `GraphQL: Resource not accessible by personal
+      access token (reopenIssue)` — same write-scope gap as G#47/GH#86. **sync pending: GitHub** —
+      GH#69 is still closed; reopen once the token has Issues write.
       **RECURRED 2026-09-14** on PR #65's macOS leg (run 34906199873, commit
       `9aa7e81`, a diff touching only `tests/test_updater.py` and docs), same
       assertion: `'minecraft'` missing after a rebuild. So the `_poll_games` stub
