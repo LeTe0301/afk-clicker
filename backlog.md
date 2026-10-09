@@ -12,11 +12,37 @@ GitHub number. Shown below as **G#** / **GH#**.
 ## In progress
 
 **G#57 — github: true — sync pending: GitHub — Per-game hotkeys**, picked from `docs/ROADMAP.md`'s
-"Later" list on Leo's direction 2026-10-09. Gitea ticket created
-(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/57); the GitHub mirror failed twice —
-`gh issue create --repo LeTe0301/afk-clicker ...` → `GraphQL: Resource not accessible by personal
-access token (createIssue)`, same write-scope gap as G#47/GH#86. Branch: `feature/ac-57/per-game-hotkeys`.
-product-manager → ux-designer → developer → reviewer cycle starting now.
+"Later" list on Leo's direction 2026-10-09. Gitea ticket
+(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/57); the GitHub mirror failed —
+`GraphQL: Resource not accessible by personal access token (createIssue)`, same write-scope gap as
+G#47/GH#86. Branch: `feature/ac-57/per-game-hotkeys`.
+
+Full product-manager → ux-designer → developer → reviewer cycle complete, **cycle review: APPROVE,
+WITH FOLLOW-UPS (non-blocking)**. Storage moved per-game; a `SETTINGS_VERSION` 2→3 migration carries
+the old global chord into every already-configured game; `_arm_toggle_hotkey()`/`_disarm_toggle_hotkey()`
+reuse macros' rebuild-on-switch lifecycle with a `_toggle_armed_for` same-game-rebuild guard (keeps
+`HotkeyListenerSurvivesRebuild` green); no collision rejection (only the selected game's watcher is ever
+armed, same as macros). ux-designer found and fixed two race conditions in the spec's own guard
+description (a capture-generation counter replacing a game-id guard that missed stale A→B→A results and
+a worker-thread write; `register_hotkey()` now blocks only same-generation captures instead of silently
+no-opping Record on a game switch) plus an honest arm-failure state. The developer found and fixed a
+real pre-existing production bug along the way, outside this ticket's own scope but load-bearing for it:
+`Store.put_game()` (`afk_clicker.py:1799`) wholesale-replaced a game's settings dict on every persist
+instead of merging, silently wiping `"macros"` and the new `"hotkey"` key on the very next save —
+reproduced directly (Record → Apply → close the app lost the hotkey), fixed by merging instead. Also
+silently fixes an existing G#13 macros bug as a side effect. 404/404 `test_ui.py` tests green (391
+pre-existing + 13 new), 526/526 full-suite discover green (matches CI's own invocation) — all
+independently re-run by the reviewer, who also independently reproduced the `put_game()` bug by
+reverting the fix. Full report: `docs/test-review.md`.
+
+Two non-blocking follow-ups filed: **G#58** (no macros-specific regression test for the `put_game()`
+merge fix — https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/58) and **G#59** (verify the
+new Hotkey-tab subtitle string on a real Windows render, not just a Linux metric estimate —
+https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/59). Both `github: true`, GitHub mirrors
+not yet attempted — same token gap as above, will hit it too.
+
+Next: commit, push, open PR — then an independent critical PR review once CI reports back on all
+three platforms (this cycle's own review ran Linux-only, same Xvfb constraint every cycle here has).
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
