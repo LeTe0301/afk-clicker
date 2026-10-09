@@ -2254,8 +2254,25 @@ class RailCollapse(UITestCase):
     def test_collapsed_items_still_navigate_by_click(self):
         s = self.ui.s
         target_w = int((app.RAIL_COLLAPSE_THRESHOLD * s) - 50)
-        self.root.geometry(f"{target_w}x{int(700 * s)}")
-        self.root.update()
+        # macOS CI segfault (PR #107 review, round 5): a real root.geometry()
+        # + root.update() resize crashes natively here too (zero Python
+        # frames beyond tkinter.update() itself), the same symptom
+        # test_add_current_game_button_survives_collapse had -- confirmed
+        # independent of the _poll_games race this class's setUp() already
+        # stubs, since that stub was already active when this crashed. This
+        # test only needs _rail_collapsed=True and the collapsed item
+        # widgets to exist; it doesn't need the real OS window to actually
+        # be narrow (the clicks below are at fixed local coordinates on the
+        # widgets themselves). Same fix as that test: patch what
+        # _build_ui() reads (root.winfo_width()) and rebuild directly,
+        # zero real window resize.
+        original_winfo_width = self.root.winfo_width
+        self.root.winfo_width = lambda: target_w
+        try:
+            self.ui._rebuild_ui()
+            self.root.update()
+        finally:
+            self.root.winfo_width = original_winfo_width
         self.assertTrue(self.ui._rail_collapsed)
 
         item = self.ui.items["minecraft"]
@@ -2407,8 +2424,19 @@ class RailCollapse(UITestCase):
         # from "not showing", not just confirm the dot item exists.
         s = self.ui.s
         target_w = int((app.RAIL_COLLAPSE_THRESHOLD * s) - 50)
-        self.root.geometry(f"{target_w}x{int(700 * s)}")
-        self.root.update()
+        # macOS CI segfault (PR #107 review): same real-geometry crash class
+        # as test_add_current_game_button_survives_collapse and
+        # test_collapsed_items_still_navigate_by_click above -- this test
+        # only needs _rail_collapsed=True and the collapsed item's own
+        # paint state, not a literally narrow OS window. Same fix: patch
+        # root.winfo_width() and rebuild directly.
+        original_winfo_width = self.root.winfo_width
+        self.root.winfo_width = lambda: target_w
+        try:
+            self.ui._rebuild_ui()
+            self.root.update()
+        finally:
+            self.root.winfo_width = original_winfo_width
         self.assertTrue(self.ui._rail_collapsed)
 
         item = self.ui.settings_item
