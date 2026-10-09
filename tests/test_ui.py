@@ -1927,6 +1927,25 @@ class WindowResize(UITestCase):
     # already put in flight, on macOS/Windows CI.
     INITIAL_UI_SCALE = "100"
 
+    def _rebuild_with_fake_width(self, width):
+        # macOS CI segfault (G#60, PR #107 review): a real root.geometry()
+        # call that crosses RAIL_COLLAPSE_THRESHOLD and triggers a rebuild
+        # crashes natively here (zero Python frames beyond tkinter.update())
+        # -- confirmed independent of the _poll_games subprocess race (a
+        # separate, already-fixed production hazard), since this recurred
+        # even after that fix. Root cause unconfirmed without a real Mac
+        # debugger; same mitigation already proven across several tests in
+        # RailCollapse above: patch what _build_ui() actually reads
+        # (root.winfo_width()) and call the real rebuild directly, with
+        # zero real OS-level window resize.
+        original_winfo_width = self.root.winfo_width
+        self.root.winfo_width = lambda: width
+        try:
+            self.ui._rebuild_ui()
+            self.root.update()
+        finally:
+            self.root.winfo_width = original_winfo_width
+
     def test_both_axes_are_resizable(self):
         self.assertEqual(self.root.resizable(), (1, 1))
 
@@ -1955,8 +1974,7 @@ class WindowResize(UITestCase):
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
         target_w = (threshold + floor) // 2
-        self.root.geometry(f"{target_w}x{int(700 * s)}")
-        self.root.update()
+        self._rebuild_with_fake_width(target_w)
         self.assertTrue(self.ui._rail_collapsed)
         self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_RAIL_W * s))
 
@@ -1965,15 +1983,21 @@ class WindowResize(UITestCase):
         threshold = int(app.RAIL_COLLAPSE_THRESHOLD * s)
         floor = int((app.SIDEBAR_RAIL_W + 1 + app.CONTENT_W) * s)
         target_w = (threshold + floor) // 2
-        self.root.geometry(f"{target_w}x{int(700 * s)}")
-        self.root.update()
+        self._rebuild_with_fake_width(target_w)
         self.assertTrue(self.ui._rail_collapsed)
-        self.root.geometry(f"{threshold + 200}x{int(700 * s)}")
-        self.root.update()
+        self._rebuild_with_fake_width(threshold + 200)
         self.assertFalse(self.ui._rail_collapsed)
         self.assertEqual(self.ui.side.winfo_width(), int(app.SIDEBAR_W * s))
 
     def test_shrinking_below_minsize_is_clamped(self):
+        # Deliberately left on a real root.geometry() call, unlike the two
+        # collapse-crossing tests above: this test's own point is to verify
+        # the real OS/Tk minsize() clamp, which the fake-width rebuild
+        # technique those use doesn't exercise at all (same reasoning as
+        # test_rail_rederives_on_a_ui_scale_change_with_width_held_fixed).
+        # Not yet confirmed safe or unsafe against the macOS crash -- the
+        # suite has never reached this test in any CI run so far, since an
+        # earlier, now-fixed test in this class always crashed first.
         self.root.geometry("50x50")
         self.root.update()
         minw, minh = self.root.minsize()
