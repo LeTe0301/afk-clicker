@@ -33,8 +33,15 @@ Until both are settled, the version stays in `0.x`.
 - [ ] **Game catalogue.** Minecraft is the only profile with grounded tuning.
       Others should come from measurement or from the user via "Add current
       game" — not from plausible-sounding guesses.
-- [ ] **Detection cost.** The X11 path walks the window tree every five
-      seconds. Fine on a desktop, wasteful on a laptop battery.
+- [ ] **Detection cost.** The X11 path still walks the window tree every
+      five seconds -- fine on a desktop, wasteful on a laptop battery.
+      **Partially addressed (G#62):** the connection-setup cost (opening
+      and closing a fresh Xlib connection on every single poll) is gone --
+      one connection is now reused across calls. The walk itself, and its
+      5s cadence, are unchanged; a full fix (event-driven detection instead
+      of polling) was considered and deliberately deferred, since it would
+      depend on window-manager cooperation Xvfb doesn't provide and would
+      likely be untestable in this project's own CI.
 - [x] **A Macros tab, configurable per game** (#15). A third tab beside
       Hotkey/Clicking, holding an ordered list of steps -- key down, key up,
       click, wait -- stored per game exactly as the clicker settings are
