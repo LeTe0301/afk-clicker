@@ -1568,9 +1568,11 @@ def config_path():
     return os.path.join(base, "afk-farm-clicker", "settings.json")
 
 
-SETTINGS_VERSION = 2   # G#55/GH#97 bumped this from 1: a single "button"
-                        # choice became independent left/right configs. See
-                        # _migrate_settings_v1_to_v2.
+SETTINGS_VERSION = 3   # G#57 bumped this from 2: the single top-level
+                        # "hotkey" became a per-game value. See
+                        # _migrate_settings_v2_to_v3. (G#55/GH#97 bumped this
+                        # from 1: a single "button" choice became independent
+                        # left/right configs. See _migrate_settings_v1_to_v2.)
 
 def _migrate_settings_v0_to_v1(data):
     """The one rewrite Store.__init__ already did unconditionally, promoted
@@ -1632,13 +1634,37 @@ def _migrate_settings_v1_to_v2(data):
     return data
 
 
+def _migrate_settings_v2_to_v3(data):
+    """G#57: the single top-level "hotkey" becomes a per-game value. The
+    old chord toggled the clicker identically no matter which game was
+    selected, so the least-disruptive carry-forward is to copy it into
+    EVERY already-configured game -- not just the one selected at
+    migration time -- so every existing game keeps working exactly as
+    it did before, with no re-recording. A duplicate chord across games
+    is harmless (see docs/spec.md "Collision policy"): only the
+    selected game's watcher is ever armed. No games configured yet ->
+    nothing to carry forward; a game created after this migration
+    starts with no hotkey, same as a freshly created game's macros
+    start empty today. Runs on the raw loaded dict, same reasoning as
+    every migration above it -- validation of the copied value happens
+    afterward, in the per-game shape filter below, same as any other
+    per-game field."""
+    old_hotkey = data.get("hotkey")
+    games = data.get("games")
+    if old_hotkey is not None and isinstance(games, dict):
+        for game in games.values():
+            if isinstance(game, dict):
+                game["hotkey"] = old_hotkey
+    return data
+
+
 # Keyed by the version a file is coming FROM; _run_settings_migrations()
-# below applies them in order until the data reaches SETTINGS_VERSION. Only
-# one step exists today because only one versioned format change has ever
-# happened -- a future one adds its own function and one more entry here,
-# never rewrites an existing step (each step must keep migrating an old file
-# exactly the way it always did, even after a later version exists).
-_SETTINGS_MIGRATIONS = {0: _migrate_settings_v0_to_v1, 1: _migrate_settings_v1_to_v2}
+# below applies them in order until the data reaches SETTINGS_VERSION. A
+# future one adds its own function and one more entry here, never rewrites
+# an existing step (each step must keep migrating an old file exactly the
+# way it always did, even after a later version exists).
+_SETTINGS_MIGRATIONS = {0: _migrate_settings_v0_to_v1, 1: _migrate_settings_v1_to_v2,
+                        2: _migrate_settings_v2_to_v3}
 
 
 def _run_settings_migrations(data):
@@ -1667,7 +1693,7 @@ class Store:
 
     def __init__(self, path=None):
         self.path = path or config_path()
-        self.data = {"games": {}, "hotkey": None, "selected": None,
+        self.data = {"games": {}, "selected": None,
                      "appearance": "system", "ui_scale": UI_SCALE_DEFAULT,
                      "version": SETTINGS_VERSION}
         try:
@@ -1709,6 +1735,20 @@ class Store:
                                   if m is not None]
             elif "macros" in game:
                 del game["macros"]   # garbage type -- drop it, not coerce to []
+
+        # Same contract, one more key (G#57): each per-game entry may now
+        # carry its own "hotkey" blob (same Hotkey.to_json() shape the old
+        # top-level field used) -- validated through Hotkey.from_json()'s
+        # own reject-not-coerce contract, same reasoning as the macros
+        # filter just above.
+        for game in self.data["games"].values():
+            hotkey_blob = game.get("hotkey")
+            if hotkey_blob is not None:
+                validated = Hotkey.from_json(hotkey_blob)
+                if validated is not None:
+                    game["hotkey"] = validated.to_json()
+                else:
+                    del game["hotkey"]   # garbage -- drop it, not coerce to None
 
         # Same contract, one key: a garbage on-disk "appearance" (wrong type,
         # a typo, an old story.md-draft "theme"-style value, null) is as
@@ -1757,6 +1797,19 @@ class Store:
         return self.data["games"].setdefault(game_id, {})
 
     def put_game(self, game_id, values):
+        # G#57: merge, never replace outright. _persist() (this method's
+        # only caller) only ever builds `values` out of the Clicking tab's
+        # own fields -- it has never known about "macros" (G#47/GH#15) or
+        # the now-per-game "hotkey" (G#57). A wholesale replace silently
+        # dropped both of those on the very next _persist() after they were
+        # set (every _select() call's own unconditional tail call, and
+        # on_close()'s own) -- confirmed directly: saving a macro, then
+        # closing the app with no other edit, wiped it from disk. Per-game
+        # keys this method doesn't itself manage (macros, hotkey, any
+        # future one) must survive a click-settings save untouched, the
+        # same "zero new surface" contract as everywhere else a per-game
+        # field is read back with .get(key, default) rather than assumed
+        # present in `values`.
         self.data["games"].setdefault(game_id, {}).update(values)
         return self.save()
 
@@ -2778,9 +2831,28 @@ class AfkAutoclicker:
         self.hotkey = None
         self.registered_hotkey = None
         self.hk_listener = None
+        self._toggle_armed_for = None   # G#57: which game id self.hk_listener
+                                        # is currently armed for, or None if
+                                        # nothing is armed -- the guard
+                                        # _arm_toggle_hotkey() uses to skip a
+                                        # same-game rebuild replay (see
+                                        # HotkeyListenerSurvivesRebuild).
         self.running = False
         self.worker = None
         self.capture_thread = None
+        self._capture_gen = 0          # G#57/docs/design.md: bumped on every
+                                        # real game switch (_arm_toggle_hotkey())
+                                        # and every new Record click
+                                        # (register_hotkey()) -- a capture
+                                        # thread's result is only applied if
+                                        # the generation it carries still
+                                        # matches when it reaches the UI
+                                        # thread, so a capture started for a
+                                        # game the user has since switched
+                                        # away from is dropped rather than
+                                        # applied to whatever is now selected.
+        self._capture_thread_gen = None   # the generation self.capture_thread
+                                        # was started for, if any.
         self._macro_hotkey_watchers = []   # HotkeyWatcher per armed macro
                                             # hotkey, for the CURRENTLY
                                             # selected game only -- rebuilt
@@ -3004,23 +3076,13 @@ class AfkAutoclicker:
             # _rebuild_ui()'s docstring: it only wraps its own body, not
             # this first, direct call from here).
 
-        # Registers an OS-level global hotkey listener -- runs once, after
-        # the first _build_ui() call, never inside _build_ui()/_rebuild_ui()
-        # itself: re-running it on every rebuild would try to register a
-        # second listener while self.hk_listener is still running.
-        #
-        # _build_ui(s) above is a plain synchronous call, so by the time
-        # execution reaches here its tail (self._timers/_sync_settings()/
-        # _drain_ui()/_poll_games(), defined inside _build_ui() itself) has
-        # already run and populated self.settings. A restored hotkey press
-        # can therefore never reach loop() against an empty settings
-        # snapshot; there is no ordering gap to close. (This became true
-        # only when commit 54a3b65 pulled those four lines into _build_ui()'s
-        # tail -- an unrelated refactor that closed the gap as a side effect.)
-        saved = Hotkey.from_json(self.store.data.get("hotkey") or {})
-        if saved is not None:
-            self.hotkey = saved
-            self.apply_hotkey()
+        # G#57: the toggle hotkey is now per-game, armed by
+        # _arm_toggle_hotkey() from the same place macro hotkeys already
+        # are -- _build_ui(s) above already ran _build_content()'s own
+        # bootstrap _select(self.current, persist=False) call, which has
+        # already armed the initially-selected game's hotkey by the time
+        # execution reaches here. There is no separate "restore once at
+        # startup" step any more, the same way macros never needed one.
 
         # G#36/GH#64: checks the *previous* in-app update attempt's log, if
         # any -- runs once, from __init__ only, never from _build_ui()/
@@ -3611,7 +3673,7 @@ class AfkAutoclicker:
             # empirically (Xvfb probe, not committed).
         hotkey_top = tk.Frame(self.hotkey_pane, bg=BG, height=0)
         hotkey_top.pack(fill="x")
-        section(self.hotkey_pane, "Hotkey  ·  shared by every game", s, top=0)
+        section(self.hotkey_pane, "Hotkey  ·  this game only", s, top=0)
         hk = card(self.hotkey_pane, s)
         row = Row(hk, "Toggle", s)
         row.pack(fill="x")
@@ -4247,6 +4309,12 @@ class AfkAutoclicker:
         # own tail for why.
         if self._content_tab == "clicking":
             self._request_pane_fill("clicking")
+
+        # G#57: the toggle hotkey is per-game too, so it follows every game
+        # switch the same way -- but (unlike the macro hotkeys just below)
+        # not unconditionally: see _arm_toggle_hotkey()'s own docstring for
+        # why a same-game rebuild replay must leave self.hk_listener alone.
+        self._arm_toggle_hotkey()
 
         # G#47/GH#15: macros are per-game, so both the visible list and the
         # set of armed macro hotkeys must follow every game switch, exactly
@@ -5105,37 +5173,67 @@ class AfkAutoclicker:
     # ---------- hotkey ----------
 
     def register_hotkey(self):
-        if self.capture_thread and self.capture_thread.is_alive():
+        # G#57/docs/design.md "Interactive: switching games while a capture
+        # is in flight": a same-game double-click on Record while a capture
+        # is still alive stays blocked (the `and` clause below), but a
+        # Record click for a DIFFERENT game -- recognisable because
+        # _arm_toggle_hotkey() already bumped _capture_gen on the switch --
+        # must go ahead immediately rather than silently no-op until the
+        # old thread's listener finally sees a key. The old thread keeps
+        # running to completion on its own; its result is discarded by
+        # capture_hotkey()'s own generation check below, exactly like a
+        # cancelled capture already is today.
+        if (self.capture_thread and self.capture_thread.is_alive()
+                and self._capture_thread_gen == self._capture_gen):
             return
+        self._capture_gen += 1
+        self._capture_thread_gen = self._capture_gen
         self.hotkey_label.config(text="Press up to 3 keys, then let go…", fg=ACCENT)
         self.hotkey = None
-        self.capture_thread = threading.Thread(target=self.capture_hotkey, daemon=True)
+        self.capture_thread = threading.Thread(
+            target=self.capture_hotkey, args=(self._capture_thread_gen,), daemon=True)
         self.capture_thread.start()
 
-    def capture_hotkey(self):
+    def capture_hotkey(self, gen):
         if not macos_input_permitted():
-            self._ui(self._hotkey_error, "Accessibility permission not granted")
+            self._ui(self._capture_ui, gen,
+                     lambda: self._hotkey_error("Accessibility permission not granted"))
             return
         rec = HotkeyRecorder()
         try:
             with kb.Listener(on_press=rec.press, on_release=rec.release) as listener:
                 listener.join()
         except Exception as exc:                   # no X11, or macOS denied access
-            self._ui(self._hotkey_error, str(exc))
+            self._ui(self._capture_ui, gen, lambda: self._hotkey_error(str(exc)))
             return
 
         hotkey = rec.result()
         if hotkey is not None:
-            self.hotkey = hotkey
-            self._ui(self._hotkey_captured)
+            self._ui(self._capture_ui, gen, lambda: self._hotkey_captured(hotkey))
         else:
-            self._ui(self._show_hotkey, self.registered_hotkey)
+            self._ui(self._capture_ui, gen, lambda: self._show_hotkey(self.registered_hotkey))
+
+    def _capture_ui(self, gen, fn):
+        """Runs `fn()` on the UI thread only if `gen` is still the current
+        capture generation -- the one check every capture_hotkey() hand-off
+        routes through (docs/design.md deviation #1/#2). A capture started
+        for a game the user has since switched away from (_arm_toggle_hotkey()
+        bumps _capture_gen on every real switch) or superseded by a fresh
+        Record click on the same game (register_hotkey() bumps it too) is
+        silently dropped here -- it is never attributed to the wrong game,
+        including A -> B -> A, since the generation has moved twice."""
+        if gen == self._capture_gen:
+            fn()
 
     def _show_hotkey(self, active):
         self.hotkey_label.config(text=active.label() if active else "Not set",
                                  fg=INK if active else MUTED)
 
-    def _hotkey_captured(self):
+    def _hotkey_captured(self, hotkey):
+        # G#57/docs/design.md: the candidate is assigned here, on the UI
+        # thread, rather than by capture_hotkey() on the worker thread --
+        # the spec's own guard missed that write, which is why this moved.
+        self.hotkey = hotkey
         self.hotkey_label.config(text=f"{self.hotkey.label()}   · not applied",
                                  fg=ACCENT)
         self.apply_button.set_enabled(True)
@@ -5150,16 +5248,13 @@ class AfkAutoclicker:
     def apply_hotkey(self):
         if not self.hotkey:
             return
-        # Without this the old watcher stays live and both keys toggle the clicker.
-        if self.hk_listener is not None:
-            self.hk_listener.stop()
-            self.hk_listener = None
+        self._disarm_toggle_hotkey()
         if not macos_input_permitted():
             # Starting the listener here would trap, not raise. Keep the
             # recorded combination (self.hotkey) so applying it again after
             # the permission is granted works without re-recording -- but
             # registered_hotkey means a listener is running for this, and
-            # none is (the stop() above already cleared hk_listener even if
+            # none is (the disarm above already cleared hk_listener even if
             # an earlier Apply had one running), so it must be reset to None
             # explicitly here, not just left alone.
             self.registered_hotkey = None
@@ -5173,11 +5268,73 @@ class AfkAutoclicker:
             self._hotkey_error(exc)
             return
         self.registered_hotkey = self.hotkey
-        self.store.data["hotkey"] = self.hotkey.to_json()
+        self._toggle_armed_for = self.current   # G#57: Apply just armed the
+                                        # CURRENTLY selected game -- a later
+                                        # same-game rebuild must not redo it.
+        self.store.game(self.current)["hotkey"] = self.hotkey.to_json()
         self._note_save(self.store.save())
         self.hotkey_label.config(text=self.hotkey.label(), fg=INK)
         self.apply_button.set_enabled(False)
         self.status.set("OFF", BAD, f"{self.hotkey.label()} toggles")
+
+    def _arm_toggle_hotkey(self):
+        """(Re)arms the toggle HotkeyWatcher for the CURRENTLY SELECTED
+        game's own stored hotkey -- same rebuild-on-switch lifecycle as
+        _arm_macro_hotkeys(), called from the same places (_select(), and
+        _build_content()'s own bootstrap replay). Deliberately NOT
+        unconditional like _arm_macro_hotkeys(): a theme/scale rebuild
+        replays _select() with the SAME game_id, and
+        HotkeyListenerSurvivesRebuild.test_listener_object_identity_is_unchanged_across_a_rebuild
+        (tests/test_ui.py:5851) requires self.hk_listener to be the exact
+        same object across that replay. Skipping the rest of this method
+        when the selected game hasn't actually changed is what preserves
+        that -- a real game switch always has a different game_id and
+        always rearms.
+
+        docs/design.md deviation #3: when a chord IS stored but arming
+        fails (no input permission, or the listener itself fails to
+        start), this shows the same _hotkey_error() the Apply path already
+        does and leaves the candidate/Apply button in a state that makes
+        "...then press Apply again" literally true, instead of a silent
+        "Not set" that hides a saved-but-unarmed chord."""
+        game_id = self.current
+        if game_id == self._toggle_armed_for:
+            return
+        self._capture_gen += 1   # any capture still in flight for the
+                                 # PREVIOUS game is now stale -- see
+                                 # register_hotkey()/capture_hotkey().
+        self._disarm_toggle_hotkey()
+        self.hotkey = None                     # discard any pending, un-applied
+        self.apply_button.set_enabled(False)   # recording -- it belonged to
+                                                # whichever game was selected
+                                                # before, not this one.
+        stored = Hotkey.from_json(self.store.game(game_id).get("hotkey") or {})
+        self.registered_hotkey = None
+        self._toggle_armed_for = game_id
+        if stored is None:
+            self._show_hotkey(None)
+            return
+        if not macos_input_permitted():
+            self.hotkey = stored
+            self.apply_button.set_enabled(True)
+            self._hotkey_error("Accessibility permission not granted")
+            return
+        try:
+            self.hk_listener = HotkeyWatcher(stored, self.toggle)
+            self.hk_listener.start()
+        except Exception as exc:
+            self.hk_listener = None
+            self.hotkey = stored
+            self.apply_button.set_enabled(True)
+            self._hotkey_error(exc)
+            return
+        self.registered_hotkey = stored
+        self._show_hotkey(self.registered_hotkey)
+
+    def _disarm_toggle_hotkey(self):
+        if self.hk_listener is not None:
+            self.hk_listener.stop()
+            self.hk_listener = None
 
     # ---------- macros (story #15/G#47) ----------
 

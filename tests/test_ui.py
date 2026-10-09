@@ -792,6 +792,55 @@ class SettingsSchemaVersion(UITestCase):
         self.assertNotIn("click_mode", game)
         self.assertEqual(game["click_ms"], 444)
 
+    def test_v2_hotkey_is_carried_into_the_one_configured_game(self):
+        # G#57: the single top-level "hotkey" becomes a per-game value --
+        # carried into every already-configured game, not just whichever
+        # one happened to be selected at migration time.
+        old = {"mods": ["ctrl"], "keys": [["f6", None, None]]}
+        self._write({"version": 2, "hotkey": old,
+                    "games": {"minecraft": {"click_ms": 444}}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+        self.assertEqual(store.data["games"]["minecraft"]["hotkey"], old)
+        self.assertNotIn("hotkey", store.data)
+
+    def test_v2_hotkey_is_carried_into_every_configured_game(self):
+        old = {"mods": ["ctrl"], "keys": [["f6", None, None]]}
+        self._write({"version": 2, "hotkey": old, "games": {
+            "minecraft": {"click_ms": 444}, "global": {"click_ms": 250},
+            "custom:some other game": {"click_ms": 100},
+        }})
+        store = app.Store(self.config)
+        for game_id in ("minecraft", "global", "custom:some other game"):
+            self.assertEqual(store.data["games"][game_id]["hotkey"], old)
+
+    def test_v2_hotkey_with_no_games_configured_does_not_crash(self):
+        old = {"mods": ["ctrl"], "keys": [["f6", None, None]]}
+        self._write({"version": 2, "hotkey": old, "games": {}})
+        store = app.Store(self.config)
+        self.assertEqual(store.data["version"], app.SETTINGS_VERSION)
+        self.assertEqual(store.data["games"], {})
+
+    def test_v2_with_no_hotkey_ever_set_leaves_every_game_without_one(self):
+        self._write({"version": 2, "hotkey": None,
+                    "games": {"minecraft": {"click_ms": 444}}})
+        store = app.Store(self.config)
+        self.assertNotIn("hotkey", store.data["games"]["minecraft"])
+
+    def test_a_corrupt_hotkey_blob_is_dropped_for_that_game_only(self):
+        # Same "corrupt is as untrustworthy as missing" contract as every
+        # other per-game field (macros, click_mode...) -- confirmed one
+        # level down: Store.__init__'s own per-game hotkey filter, not the
+        # migration above.
+        self._write({"version": app.SETTINGS_VERSION, "games": {
+            "minecraft": {"hotkey": {"keys": "garbage"}},
+            "global": {"hotkey": {"mods": ["ctrl"], "keys": [["f6", None, None]]}},
+        }})
+        store = app.Store(self.config)
+        self.assertNotIn("hotkey", store.data["games"]["minecraft"])
+        self.assertEqual(store.data["games"]["global"]["hotkey"],
+                         {"mods": ["ctrl"], "keys": [["f6", None, None]]})
+
 
 class StoreMacroFiltering(UITestCase):
     """G#47/GH#15: a per-game "macros" list is filtered through
@@ -3052,12 +3101,15 @@ class HotkeyPersistence(UITestCase):
 
     @needs_input_permission
     def test_a_corrupt_hotkey_starts_clean(self):
+        # G#57: the blob now lives on the selected game's own entry, not a
+        # top-level key -- corrupt it there instead.
+        game_id = self.ui.current
         self.ui.hotkey = hotkey(set(), [kb.Key.f6])
         self.ui.apply_hotkey()
         self.ui.on_close()
         with open(self.config) as f:
             data = json.load(f)
-        data["hotkey"] = {"keys": "garbage"}
+        data["games"][game_id]["hotkey"] = {"keys": "garbage"}
         with open(self.config, "w") as f:
             json.dump(data, f)
         self.root = tk.Tk()
@@ -3066,9 +3118,11 @@ class HotkeyPersistence(UITestCase):
         self.assertIsNone(self.ui.registered_hotkey)
 
     def test_nothing_is_saved_when_no_hotkey_was_applied(self):
+        game_id = self.ui.current
         self.ui.on_close()
         with open(self.config) as f:
-            self.assertIsNone(json.load(f).get("hotkey"))
+            data = json.load(f)
+        self.assertIsNone(data["games"].get(game_id, {}).get("hotkey"))
 
     def test_no_listener_is_started_without_permission(self):
         # The guard, exercised directly rather than only on a Mac. Applying
@@ -3123,7 +3177,8 @@ class HotkeyPersistence(UITestCase):
         # guard an inline call hangs the whole suite instead of failing it.
         original = app.macos_input_permitted
         app.macos_input_permitted = lambda: False
-        worker = threading.Thread(target=self.ui.capture_hotkey, daemon=True)
+        worker = threading.Thread(target=self.ui.capture_hotkey,
+                                  args=(self.ui._capture_gen,), daemon=True)
         try:
             worker.start()
             worker.join(timeout=5)
@@ -5860,6 +5915,158 @@ class HotkeyListenerSurvivesRebuild(UITestCase):
 
         self.assertIs(self.ui.hk_listener, listener)
         self.assertTrue(self.ui.hk_listener.running)
+
+
+class PerGameHotkeys(UITestCase):
+    """G#57: the toggle hotkey moved from one top-level value to a per-game
+    one, re-armed on every real switch (_arm_toggle_hotkey(), mirroring
+    _arm_macro_hotkeys()) and never falling back across games."""
+
+    needs_input_permission = unittest.skipIf(
+        app is not None and app.sys.platform == "darwin",
+        "starting a listener aborts the process on macOS -- see issue #7")
+
+    def tearDown(self):
+        super().tearDown()
+        app.set_active_theme("dark")
+
+    @needs_input_permission
+    def test_each_games_own_hotkey_is_armed_only_while_selected(self):
+        self.ui._select("minecraft")
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
+        self.ui.apply_hotkey()
+        self.root.update()
+        self.assertEqual(self.ui.registered_hotkey.label(), "Ctrl + F6")
+
+        self.ui._select("global")
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f7])
+        self.ui.apply_hotkey()
+        self.root.update()
+        self.assertEqual(self.ui.registered_hotkey.label(), "Ctrl + F7")
+
+        self.ui._select("minecraft")
+        self.assertEqual(self.ui.registered_hotkey.label(), "Ctrl + F6",
+                         "switching back to minecraft must re-arm ITS OWN chord")
+        self.ui._select("global")
+        self.assertEqual(self.ui.registered_hotkey.label(), "Ctrl + F7")
+
+    @needs_input_permission
+    def test_a_game_with_no_hotkey_shows_not_set_after_switching_from_one_that_has(self):
+        self.ui._select("minecraft")
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
+        self.ui.apply_hotkey()
+        self.root.update()
+
+        self.ui._select("global")
+        self.assertIsNone(self.ui.registered_hotkey)
+        self.assertEqual(self.ui.hotkey_label.cget("text"), "Not set")
+
+    @needs_input_permission
+    def test_same_chord_on_two_games_is_accepted_without_error(self):
+        self.ui._select("minecraft")
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
+        self.ui.apply_hotkey()
+        self.root.update()
+        self.assertIsNotNone(self.ui.registered_hotkey)
+
+        self.ui._select("global")
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
+        self.ui.apply_hotkey()          # must not raise or reject
+        self.root.update()
+        self.assertEqual(self.ui.registered_hotkey.label(), "Ctrl + F6")
+
+    def test_a_stale_capture_result_is_dropped_after_a_real_game_switch(self):
+        # docs/design.md deviation #1/#2: the generation a capture carries
+        # is checked on the UI thread at dispatch time, not compared by
+        # game id -- exercised directly, the same technique as a real
+        # capture's own UI hand-off, without needing a live pynput Listener.
+        self.ui._select("minecraft")
+        gen = self.ui._capture_gen
+        self.ui._select("global")      # a real switch bumps _capture_gen
+        self.ui._capture_ui(gen, lambda: self.ui._hotkey_captured(
+            hotkey({"ctrl"}, [kb.Key.f6])))
+        self.assertIsNone(self.ui.hotkey,
+                          "a capture result from the game switched away from must be dropped")
+
+    def test_a_stale_capture_result_is_still_dropped_after_switching_back(self):
+        # A -> B -> A: the generation has moved twice, so A's own in-flight
+        # capture from before the FIRST switch must still not apply, even
+        # though A is selected again by the time it would land.
+        self.ui._select("minecraft")
+        gen = self.ui._capture_gen
+        self.ui._select("global")
+        self.ui._select("minecraft")
+        self.ui._capture_ui(gen, lambda: self.ui._hotkey_captured(
+            hotkey({"ctrl"}, [kb.Key.f6])))
+        self.assertIsNone(self.ui.hotkey)
+
+    def test_register_hotkey_on_a_new_game_is_not_blocked_by_the_old_games_capture(self):
+        # docs/design.md's own problem statement: register_hotkey() must not
+        # silently no-op on the newly-selected game just because the
+        # previous game's capture thread is still alive. Stubs
+        # capture_hotkey() with a blocking call instead of a real pynput
+        # Listener -- same "never inline, never a real listener" caution
+        # HotkeyPersistence.test_capture_refuses_without_permission already
+        # documents, applied to a thread this test controls instead.
+        hold = threading.Event()
+        original_capture = self.ui.capture_hotkey
+        self.ui.capture_hotkey = lambda gen: hold.wait(timeout=2.0)
+        try:
+            self.ui._select("minecraft")
+            self.ui.register_hotkey()
+            first_thread = self.ui.capture_thread
+            self.assertTrue(first_thread.is_alive())
+
+            self.ui.register_hotkey()   # same game, still alive -- blocked
+            self.assertIs(self.ui.capture_thread, first_thread)
+
+            self.ui._select("global")   # a real switch
+            self.ui.register_hotkey()
+            self.assertIsNot(self.ui.capture_thread, first_thread,
+                             "Record on the new game must work immediately")
+            self.assertTrue(self.ui.capture_thread.is_alive())
+        finally:
+            hold.set()
+            first_thread.join(timeout=2.0)
+            if self.ui.capture_thread is not first_thread:
+                self.ui.capture_thread.join(timeout=2.0)
+            self.ui.capture_hotkey = original_capture
+
+    def test_switching_games_discards_an_unapplied_recorded_candidate(self):
+        self.ui._select("minecraft")
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
+        self.ui._hotkey_captured(self.ui.hotkey)   # same UI hand-off a real capture uses
+        self.assertTrue(self.ui.apply_button._enabled)
+
+        self.ui._select("global")
+        self.assertIsNone(self.ui.hotkey,
+                          "a candidate recorded for the previous game must not survive a switch")
+        self.assertFalse(self.ui.apply_button._enabled)
+
+    @needs_input_permission
+    def test_arm_failure_on_switch_shows_help_text_and_enables_apply_for_retry(self):
+        # docs/design.md deviation #3: a saved-but-unarmed chord must not
+        # silently read "Not set" -- same honest-failure copy apply_hotkey()
+        # already shows, with the candidate restored so "...then press
+        # Apply again" is literally true.
+        self.ui._select("minecraft")
+        self.ui.hotkey = hotkey({"ctrl"}, [kb.Key.f6])
+        self.ui.apply_hotkey()
+        self.root.update()
+        self.assertIsNotNone(self.ui.registered_hotkey, "setup: Apply should have armed it")
+
+        self.ui._select("global")
+        original = app.macos_input_permitted
+        app.macos_input_permitted = lambda: False
+        try:
+            self.ui._select("minecraft")   # re-arming minecraft's stored chord now fails
+        finally:
+            app.macos_input_permitted = original
+        self.assertIsNone(self.ui.registered_hotkey)
+        self.assertEqual(self.ui.hotkey_label.cget("text"), app.HOTKEY_HELP)
+        self.assertTrue(self.ui.apply_button._enabled)
+        self.assertEqual(self.ui.hotkey.label(), "Ctrl + F6",
+                         "the stored candidate must survive so a later Apply needs no re-recording")
 
 
 class AfterJobsAreNotDuplicated(UITestCase):
