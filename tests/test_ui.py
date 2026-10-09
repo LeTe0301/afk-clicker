@@ -7778,6 +7778,28 @@ class MacrosTab(UITestCase):
         self.assertEqual(len(reloaded.data["games"]["minecraft"]["macros"]), 1)
 
     @needs_input_permission
+    def test_a_macro_survives_an_unrelated_persist_call(self):
+        # G#57: put_game() used to wholesale-replace a game's settings dict
+        # on every persist, silently wiping "macros". _save_macro() never
+        # goes through put_game(), so the bug only bites on the *next* call
+        # that does -- _persist(), which runs on every Clicking-pane field
+        # change and passes a values dict with no "macros" key at all.
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        steps = [{"type": "wait", "ms": 10}]
+        ok = self.ui._save_macro("minecraft", None, "Test macro", hotkey, steps)
+        self.assertTrue(ok)
+        self.ui._persist()
+        macros = self.ui.store.game("minecraft")["macros"]
+        self.assertEqual(len(macros), 1)
+        self.assertEqual(macros[0]["name"], "Test macro")
+        # Persisted to disk, not just in memory.
+        reloaded = app.Store(self.config)
+        reloaded_macros = reloaded.data["games"]["minecraft"]["macros"]
+        self.assertEqual(len(reloaded_macros), 1)
+        self.assertEqual(reloaded_macros[0]["name"], "Test macro")
+
+    @needs_input_permission
     def test_editing_a_macro_keeps_its_id_and_replaces_its_content(self):
         self.ui._select("minecraft")
         hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])

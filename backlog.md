@@ -11,6 +11,22 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
+**G#58 — github: true — Macros-specific regression test for the `put_game()` merge fix**, a
+follow-up from G#57's cycle review (Finding #1). Gitea ticket
+(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/58). Branch:
+`feature/ac-58/macros-specific-regression-test-put`, cut from `main` before G#57 merged. Full
+cycle: mechanical repeat (orchestrator wrote `docs/spec.md` directly, no product-manager/ux-designer
+dispatch — pure test addition, no design surface), developer, reviewer. **Cycle review: APPROVE.**
+New test `MacrosTab.test_a_macro_survives_an_unrelated_persist_call`, sabotage-verified (fails
+against a reverted `put_game()`, passes against the fix). Since this branch predates G#57 on `main`,
+it forward-ports G#57's identical one-line `put_game()` fix onto itself so the test has something
+real to guard — the reviewer's one nit (non-blocking): merging both `feature/ac-57` and this branch
+into `main` will show a trivial textual conflict on that line (G#57's version carries an explanatory
+comment this forward-port doesn't), not a silent no-op as `docs/implementation.md` assumed — resolve
+by keeping G#57's commented version. Committed (`b6403d0`), docs archived to
+`docs/history/ac-58-{spec,implementation,test-review}.md`. Next: push, open PR (depends on G#47/GH#86's
+GitHub token write-scope gap — same one blocking G#57's own PR, currently being retried).
+
 **G#57 — github: true — sync pending: GitHub — Per-game hotkeys**, picked from `docs/ROADMAP.md`'s
 "Later" list on Leo's direction 2026-10-09. Gitea ticket
 (https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/57); the GitHub mirror failed —
