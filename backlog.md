@@ -11,9 +11,14 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
-Nothing in flight. `docs/ROADMAP.md`'s two unscoped "Later" items (per-game hotkeys, import/export)
-are both done — see Features below for G#57/G#60. Remaining roadmap items (macOS verification, game
-catalogue, detection cost) all need real hardware/measurement, not code alone.
+**G#62 — github: true — Reuse the Xlib connection in `detect_running()`**, picked from
+`docs/ROADMAP.md`'s "Detection cost" item (Before 1.0) on Leo's direction 2026-10-09 — the low-risk
+option (connection reuse, not a full event-driven rearchitecture, which would depend on window-
+manager cooperation Xvfb can't provide and would likely be untestable in this project's own CI).
+Gitea (https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/62) and GitHub
+(https://github.com/LeTe0301/afk-clicker/issues/109) tickets created and cross-linked. Branch:
+`feature/ac-62/reuse-xlib-connection-detect-running`. product-manager → developer → reviewer cycle
+starting now (no ux-designer — backend-only, no UI surface).
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
