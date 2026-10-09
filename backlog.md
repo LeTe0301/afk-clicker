@@ -15,8 +15,25 @@ GitHub number. Shown below as **G#** / **GH#**.
 list (the other remaining unscoped item, after G#57). Gitea
 (https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/60) and GitHub
 (https://github.com/LeTe0301/afk-clicker/issues/106) tickets created and cross-linked. Branch:
-`feature/ac-60/import-export-game-profile`. product-manager → ux-designer → developer → reviewer
-cycle starting now.
+`feature/ac-60/import-export-game-profile`.
+
+Full product-manager → ux-designer → developer → reviewer cycle complete, **cycle review: APPROVE**
+(no must-fix/should-fix, two cosmetic nits only). Export writes the selected game's full stored
+dict (settings + macros + hotkey) to a JSON envelope (`{"kind": "afk-clicker-game-profile",
+"profile_version": 1, ...}`) via a native `tkinter.filedialog`, atomic tmp-then-`os.replace()` write
+mirroring `Store.save()`. Import always creates a new custom game via the existing `make_profile()`
+path — never overwrites — with numeric-suffixed name/id collisions, validated through a new shared
+`_sanitize_game_entry()` helper factored out of `Store.__init__`'s existing inline macros/hotkey
+filtering (now one code path for both normal load and import). Two new sidebar buttons
+(Export/Import, collapsing to ↑/↓ glyphs on the icon rail) with a sticky status strip, following the
+G#21 save-notice pattern — the ux-designer overrode the spec's original `game_state`-flash idea,
+which `_mark_running()`'s own 5s reschedule would have clobbered. One deliberate, spec-level
+behavior: importing a profile preserves `eat_mode` as a *key* but not its value (forced to `"off"`
+by `_select()`'s own existing coercion for any non-eating profile) — decided in `docs/spec.md`
+upfront, not a gap found downstream; reviewer agreed. 548/548 tests green (527 pre-existing + 21
+new), independently re-run and several specific claims independently reproduced (vertical-budget
+check at 130% scale/11 games, collapsed-rail glyphs via a real resize, WCAG contrast recomputed from
+scratch). Full report: `docs/history/ac-60-*.md`. Committed (`8f5466c`). Next: push, open PR.
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
