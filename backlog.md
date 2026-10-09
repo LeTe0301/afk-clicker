@@ -11,67 +11,9 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
-**G#60 — github: true — Import/export of a game profile**, picked from `docs/ROADMAP.md`'s "Later"
-list (the other remaining unscoped item, after G#57). Gitea
-(https://dev.tailbe22cd.ts.net/gitea/admin/afk-clicker/issues/60) and GitHub
-(https://github.com/LeTe0301/afk-clicker/issues/106) tickets created and cross-linked. Branch:
-`feature/ac-60/import-export-game-profile`.
-
-Full product-manager → ux-designer → developer → reviewer cycle complete, **cycle review: APPROVE**
-(no must-fix/should-fix, two cosmetic nits only). Export writes the selected game's full stored
-dict (settings + macros + hotkey) to a JSON envelope (`{"kind": "afk-clicker-game-profile",
-"profile_version": 1, ...}`) via a native `tkinter.filedialog`, atomic tmp-then-`os.replace()` write
-mirroring `Store.save()`. Import always creates a new custom game via the existing `make_profile()`
-path — never overwrites — with numeric-suffixed name/id collisions, validated through a new shared
-`_sanitize_game_entry()` helper factored out of `Store.__init__`'s existing inline macros/hotkey
-filtering (now one code path for both normal load and import). Two new sidebar buttons
-(Export/Import, collapsing to ↑/↓ glyphs on the icon rail) with a sticky status strip, following the
-G#21 save-notice pattern — the ux-designer overrode the spec's original `game_state`-flash idea,
-which `_mark_running()`'s own 5s reschedule would have clobbered. One deliberate, spec-level
-behavior: importing a profile preserves `eat_mode` as a *key* but not its value (forced to `"off"`
-by `_select()`'s own existing coercion for any non-eating profile) — decided in `docs/spec.md`
-upfront, not a gap found downstream; reviewer agreed. 548/548 tests green (527 pre-existing + 21
-new), independently re-run and several specific claims independently reproduced (vertical-budget
-check at 130% scale/11 games, collapsed-rail glyphs via a real resize, WCAG contrast recomputed from
-scratch). Full report: `docs/history/ac-60-*.md`. Committed (`8f5466c`), pushed, PR #107 opened.
-
-**Independent PR-level review: 8 CI rounds, two distinct real hazards found and fixed, CI green on
-all three platforms.** `ubuntu-latest` was clean throughout. `windows-latest` failed once (6 tests
-misreading the sidebar status label as the collapsed-rail glyph `"!"` — a real WM's early
-`<Configure>` echo, never sent under Xvfb, can flip `_rail_collapsed` before a test body runs; fixed
-by forcing it `False` in `ExportedGames`/`ImportedGames`'s `setUp()`) then stayed green.
-`macos-latest` took 8 rounds, chasing two genuinely independent native segfaults (zero Python-level
-output beyond `tkinter.update()`), not one:
-- **Hazard A (production bug, fixed at the root):** `_build_ui()`'s tail called `self._poll_games()`
-  inline on every rebuild, spawning a new scan thread whose `detect_running()` shells out via
-  `subprocess` on macOS — forking from a background thread while the main thread is inside Cocoa's
-  live resize-tracking loop is a known macOS crash class, confirmed directly via
-  `PYTHONFAULTHANDLER=1` dumps on several CI runs. Fixed by deferring that one call by a short Tk
-  timer tick (`afk_clicker.py`, `_build_ui()`'s tail) instead of calling it inline — a genuine,
-  pre-existing production hazard that predates G#60, not introduced by it; G#60's extra widget-
-  construction work just widened the timing window enough to make it land consistently instead of
-  rarely.
-- **Hazard B (test-only, mitigated, root cause unconfirmed):** a second, separate native crash tied
-  specifically to a *real* `root.geometry()`+`root.update()` OS-level window resize crossing the
-  rail-collapse threshold while the new sidebar widgets exist — confirmed independent of Hazard A
-  (recurred with the poller fully stubbed). A font-glyph-fallback hypothesis (the collapsed-rail
-  "↑"/"↓" glyphs, per `docs/design.md`'s own named contingency) was tested and refuted. Root cause
-  never confirmed without real macOS hardware — mitigated test-by-test across `RailCollapse` and
-  `WindowResize` (6 tests total) by avoiding the literal OS-level resize: either patch
-  `root.winfo_width()` and call `_rebuild_ui()` directly (for tests only checking post-rebuild
-  widget state), or stub `_rebuild_ui()` itself for one call (for `test_shrinking_below_minsize_is_
-  clamped`, which genuinely needs the real OS minsize clamp and can't fake `winfo_width()`). Two
-  tests deliberately left on real geometry() throughout: `test_rail_rederives_on_a_ui_scale_change_
-  with_width_held_fixed` (tests real geometry stability across a scale change — faking it would
-  defeat the test) and `test_rail_stays_at_expanded_width_on_a_wide_window` (never crosses the
-  collapse threshold, never triggers the at-risk rebuild path).
-
-Every round was a confirmed root cause or an honestly-labeled, CI-falsifiable hypothesis — never a
-guess shipped as fact. Full round-by-round detail: `git log` on this branch (commits `1a4fbb4`
-through `a81951a`), each with a full explanation. 548/548 tests green locally and on all three CI
-platforms. Independent PR-level review (orchestrator): diff since the cycle's own `test-review.md`
-is entirely test-isolation changes plus two small, well-justified production fixes (the glyph
-fallback, the deferred poll spawn) — **MERGE.**
+Nothing in flight. `docs/ROADMAP.md`'s two unscoped "Later" items (per-game hotkeys, import/export)
+are both done — see Features below for G#57/G#60. Remaining roadmap items (macOS verification, game
+catalogue, detection cost) all need real hardware/measurement, not code alone.
 
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
@@ -468,6 +410,22 @@ Bugs and residue:
       underline lands at the right y.
 
 Features:
+- [x] **Done, PR #107 (merged 2026-10-09, `026dc36`).** G#60 / GH#106 — github: true — Import/export
+      of a game profile, picked from `docs/ROADMAP.md`'s "Later" list. Export writes the selected
+      game's full stored dict (settings + macros + hotkey) to a JSON envelope via a native
+      `tkinter.filedialog`, atomic tmp-then-`os.replace()` write mirroring `Store.save()`. Import
+      always creates a new custom game via `make_profile()` — never overwrites — validated through a
+      new shared `_sanitize_game_entry()` helper factored out of `Store.__init__`'s existing inline
+      filtering. Two new sidebar buttons (Export/Import, ↑/↓ on the collapsed rail) with a sticky
+      status strip. Cycle review: APPROVE. **8 CI fix-rounds on macOS**, two genuinely independent
+      native segfaults found and resolved: a real, pre-existing production race (`_build_ui()`'s tail
+      spawning a subprocess-shelling scan thread while the main thread could be inside Cocoa's live
+      resize-tracking loop — fixed at the root by deferring that call one Tk tick) and a second,
+      deeper native crash tied to any real OS-level window resize crossing the rail-collapse
+      threshold with the new widgets present (root cause never confirmed without real Mac hardware;
+      mitigated test-by-test by avoiding literal OS-level resizes where the test doesn't need one).
+      Full account: `docs/history/ac-60-*.md` and this branch's own commit history (`1a4fbb4`
+      through `8095bcd`).
 - [x] **Done, PR #101 (merged 2026-10-09, `076fd39`).** G#57 / GH#103 — github: true — Per-game
       hotkeys, picked from `docs/ROADMAP.md`'s "Later" list. Storage moved per-game; a
       `SETTINGS_VERSION` 2→3 migration carries the old global chord into every already-configured
