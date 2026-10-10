@@ -40,20 +40,12 @@ session found and closed **Gitea #38** (UI scale, G#38/GH#67), which GitHub had 
 PR #89 merged but Gitea never synced — same drift class flagged in an earlier handoff for other
 tickets; worth a periodic sweep rather than assuming the two trackers stay in sync on their own.
 
-**Loose end, not resolved before handoff — needs attention:** after G#62 merged clean (all three
-platforms green in its own PR CI, twice), `main`'s own post-merge CI runs have been unusually
-flaky — five consecutive runs (`38001567646` → `38031041652`, all pushes of docs-only/empty
-commits, no code changes) each failed on a *different*, unrelated test: a Windows access violation
-inside `card()`'s `_redraw()` (`VerticalFill`), the known `LiveRepository` live-API flake (Windows),
-a classic timing-boundary flake in `SessionStats` (macOS), an `UNKNOWN STEP` `ERROR` in
-`UpdateLogPrompt` (macOS), and most recently another macOS failure on run `38031041652` whose exact
-test wasn't captured before this handoff was written (that run's `ubuntu-latest` leg was still
-`in_progress` when this was written — check `gh run view 38031041652` for the final state). None of
-these touch any file G#62's diff modified, and G#62's own code passed cleanly three separate times
-in its PR's own CI before and after its fix rounds, so this reads as transient runner strain (very
-plausibly from the sheer volume of CI runs this one session generated — dozens, across six cycles)
-rather than a real regression. **Not yet confirmed green on a fresh run — the next session (or Leo)
-should check `main`'s actual CI status before assuming it's clean, and retrigger again if needed.**
+**Loose end from the previous handoff — now resolved (2026-10-10).** The five-run flaky streak on
+`main` (`38001567646` → `38031041652`) never recurred: the very next run, `38038494438` (the
+`6d0be16` handoff commit itself), came back **success** on all three platforms
+(`ubuntu-latest`/`windows-latest`/`macos-latest`). Confirms the streak was transient runner strain,
+not a regression — no code change between the flaky runs and the green one. `main` is green,
+nothing further to retrigger.
 
 **What's left, all blocked on Leo or real hardware, nothing further to do autonomously:**
 - **G#39/GH#69** — the macOS poll-race flake's closed-with-no-evidence GitHub state was already
