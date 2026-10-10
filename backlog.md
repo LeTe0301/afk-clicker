@@ -14,17 +14,27 @@ GitHub number. Shown below as **G#** / **GH#**.
 Nothing in flight. All code-actionable backlog items are closed out; everything remaining needs
 Leo's decision or real hardware — see Housekeeping below (G#39, G#46, G#47) and Features (G#59).
 
-## Session handoff — 2026-10-10
+## Session handoff — 2026-10-10 (continued)
 
-**Where things stand:** `main` is at `157fc07`, working tree clean, nothing uncommitted. Five
-feature/fix cycles shipped and merged this session: **G#57** (per-game hotkeys, PR #101), **G#58**
-(its own follow-up regression test, PR #102), **G#60** (import/export of a game profile, PR #107,
-8 macOS CI rounds — found and fixed two real pre-existing hazards, not just test artifacts, see its
-own Features entry above), **G#61** (closed as a direct consequence of G#60's production fix, not
-separately shipped), **G#62** (reuse the Xlib connection in `detect_running()`, PR #110, 3 review
-rounds, two real defects found and fixed in the fallback rescue path). Both unscoped
-`docs/ROADMAP.md` "Later" items are done; "Detection cost" (Before 1.0) is partially addressed
-(connection-reuse cost cut, the 5s walk itself is unchanged, deliberately — see ROADMAP.md).
+**Where things stand:** `main` is at `0a2bd3d`'s successor (post-retrigger green run
+`38087722780`), working tree clean. **G#63/GH#111** (confirm before deleting a custom game
+profile or macro, PR #112) shipped this continuation — proposed by product-manager as an idle-
+iteration candidate (nothing else in the backlog was code-actionable), signed off by Leo, full
+pipeline (spec → design → developer → reviewer APPROVE → one Windows-only fix round → independent
+PR review MERGE). Found and fixed a real pre-existing Tk bug along the way: `GameItem`'s canvas
+`tag_bind(..., "break")` doesn't suppress the row's own widget-level `<Button-1>` bind, invisible
+before because the old synchronous delete destroyed the row first. Full account:
+`docs/history/ac-63-*.md`.
+
+Earlier the same day, five feature/fix cycles shipped and merged: **G#57** (per-game hotkeys, PR
+#101), **G#58** (its own follow-up regression test, PR #102), **G#60** (import/export of a game
+profile, PR #107, 8 macOS CI rounds — found and fixed two real pre-existing hazards, not just test
+artifacts, see its own Features entry above), **G#61** (closed as a direct consequence of G#60's
+production fix, not separately shipped), **G#62** (reuse the Xlib connection in
+`detect_running()`, PR #110, 3 review rounds, two real defects found and fixed in the fallback
+rescue path). Both unscoped `docs/ROADMAP.md` "Later" items are done; "Detection cost" (Before 1.0)
+is partially addressed (connection-reuse cost cut, the 5s walk itself is unchanged, deliberately —
+see ROADMAP.md).
 
 **Infrastructure fixed this session:** the GitHub token's write scope was the dominant blocker for
 the first half of the session (`gh pr create`/`gh issue create`/`gh issue reopen` all 403'd) — Leo
@@ -40,12 +50,19 @@ session found and closed **Gitea #38** (UI scale, G#38/GH#67), which GitHub had 
 PR #89 merged but Gitea never synced — same drift class flagged in an earlier handoff for other
 tickets; worth a periodic sweep rather than assuming the two trackers stay in sync on their own.
 
-**Loose end from the previous handoff — now resolved (2026-10-10).** The five-run flaky streak on
-`main` (`38001567646` → `38031041652`) never recurred: the very next run, `38038494438` (the
-`6d0be16` handoff commit itself), came back **success** on all three platforms
-(`ubuntu-latest`/`windows-latest`/`macos-latest`). Confirms the streak was transient runner strain,
-not a regression — no code change between the flaky runs and the green one. `main` is green,
-nothing further to retrigger.
+**Loose end from the previous handoff — resolved, then recurred, then resolved again
+(2026-10-10).** The five-run flaky streak on `main` (`38001567646` → `38031041652`) didn't recur
+right away: `38038494438` came back green on all three platforms. But the *same class* of
+transient runner strain hit again later the same day, right after G#63 merged — three more
+consecutive unrelated failures on docs-only/empty-commit pushes, each a different already-known
+flaky test (`ClickLoop` timing, `UpdateLogPrompt`, `LiveRepository` live-API) — before a fourth
+retrigger (`38087722780`) came back clean on all three platforms. None of these touched any file
+G#63's diff modified, and PR #112's own CI passed cleanly on all three platforms twice (before and
+after its one real Windows-only fix). Pattern now seen twice in two sessions: `main`'s CI is
+noticeably flakier right after a burst of same-day CI volume (this session alone: 6+ PR CI runs
+plus 4 main pushes). Worth remembering as a known pattern, not re-investigating as a regression
+each time — check `gh run list --branch main` and retrigger via an empty commit (no `actions:
+write` yet, G#47/GH#86) if the *same* commit keeps failing on *different* unrelated tests.
 
 **What's left, all blocked on Leo or real hardware, nothing further to do autonomously:**
 - **G#39/GH#69** — the macOS poll-race flake's closed-with-no-evidence GitHub state was already
