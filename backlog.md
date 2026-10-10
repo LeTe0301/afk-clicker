@@ -14,6 +14,68 @@ GitHub number. Shown below as **G#** / **GH#**.
 Nothing in flight. All code-actionable backlog items are closed out; everything remaining needs
 Leo's decision or real hardware — see Housekeeping below (G#39, G#46, G#47) and Features (G#59).
 
+## Session handoff — 2026-10-10
+
+**Where things stand:** `main` is at `157fc07`, working tree clean, nothing uncommitted. Five
+feature/fix cycles shipped and merged this session: **G#57** (per-game hotkeys, PR #101), **G#58**
+(its own follow-up regression test, PR #102), **G#60** (import/export of a game profile, PR #107,
+8 macOS CI rounds — found and fixed two real pre-existing hazards, not just test artifacts, see its
+own Features entry above), **G#61** (closed as a direct consequence of G#60's production fix, not
+separately shipped), **G#62** (reuse the Xlib connection in `detect_running()`, PR #110, 3 review
+rounds, two real defects found and fixed in the fallback rescue path). Both unscoped
+`docs/ROADMAP.md` "Later" items are done; "Detection cost" (Before 1.0) is partially addressed
+(connection-reuse cost cut, the 5s walk itself is unchanged, deliberately — see ROADMAP.md).
+
+**Infrastructure fixed this session:** the GitHub token's write scope was the dominant blocker for
+the first half of the session (`gh pr create`/`gh issue create`/`gh issue reopen` all 403'd) — Leo
+regenerated it partway through and PR/issue creation started working; `issues: write` specifically
+needed a second, separate grant later and now also works (confirmed: GH#69 reopened, G#60/G#62's
+issue mirrors created and closed cleanly). **Still missing: `actions: write`** (G#47/GH#86 stays
+open) — `gh run rerun`/`workflow_dispatch` both still fail, so retriggering CI this whole session
+has only ever been possible via an empty-commit push, never a direct re-run. `release/0.8.0` and
+`release/0.9.0` were merged back into `main` on Leo's call. Branch deletion (`git push --delete`)
+was confirmed working from this sandbox, contradicting an earlier session's note that it was
+blocked — that note was stale, corrected in G#46's own entry below. A tracker-drift sweep this
+session found and closed **Gitea #38** (UI scale, G#38/GH#67), which GitHub had shown closed since
+PR #89 merged but Gitea never synced — same drift class flagged in an earlier handoff for other
+tickets; worth a periodic sweep rather than assuming the two trackers stay in sync on their own.
+
+**Loose end, not resolved before handoff — needs attention:** after G#62 merged clean (all three
+platforms green in its own PR CI, twice), `main`'s own post-merge CI runs have been unusually
+flaky — five consecutive runs (`38001567646` → `38031041652`, all pushes of docs-only/empty
+commits, no code changes) each failed on a *different*, unrelated test: a Windows access violation
+inside `card()`'s `_redraw()` (`VerticalFill`), the known `LiveRepository` live-API flake (Windows),
+a classic timing-boundary flake in `SessionStats` (macOS), an `UNKNOWN STEP` `ERROR` in
+`UpdateLogPrompt` (macOS), and most recently another macOS failure on run `38031041652` whose exact
+test wasn't captured before this handoff was written (that run's `ubuntu-latest` leg was still
+`in_progress` when this was written — check `gh run view 38031041652` for the final state). None of
+these touch any file G#62's diff modified, and G#62's own code passed cleanly three separate times
+in its PR's own CI before and after its fix rounds, so this reads as transient runner strain (very
+plausibly from the sheer volume of CI runs this one session generated — dozens, across six cycles)
+rather than a real regression. **Not yet confirmed green on a fresh run — the next session (or Leo)
+should check `main`'s actual CI status before assuming it's clean, and retrigger again if needed.**
+
+**What's left, all blocked on Leo or real hardware, nothing further to do autonomously:**
+- **G#39/GH#69** — the macOS poll-race flake's closed-with-no-evidence GitHub state was already
+  reconciled (reopened to match Gitea) a session ago; the underlying investigation itself is
+  "mitigated, trigger unconfirmed" and needs a real Mac or fresh CI evidence to move further.
+- **G#46/GH#85** — delete ~15 old merged remote branches; branch deletion itself now confirmed
+  working from this sandbox, just needs Leo to confirm the list is still accurate before a bulk
+  delete (it was last reviewed in 2026-09-15, might be stale by now).
+- **G#47/GH#86** — the GitHub token still lacks `actions: write`; granting it would let CI jobs be
+  re-run directly instead of via empty-commit pushes, and would unblock a few other things noted on
+  the ticket itself.
+- **G#59/GH#105** — verify the per-game-hotkey subtitle string's layout on a real Windows render
+  (currently only a Linux-sandbox metric estimate); needs Windows hardware or a CI screenshot.
+
+**Standing workflow note, unchanged:** product-manager → ux-designer (skipped for backend-only
+cycles) → developer → reviewer, each reading the previous stage's `docs/*.md`; an approved cycle is
+committed, pushed, and PR'd without asking; the reviewer's own pass plus one independent PR-level
+review (by the orchestrator, once CI is green on all three platforms) gates merge; `docs/history/`
+archival happens once a cycle is fully done, not left for "later archive" (the lesson G#38's own
+docs-loss incident taught, re-learned the hard way again this session when G#57's uncommitted scratch
+docs sat in this same working directory risking the identical loss before being rescued and archived).
+
 **Session handoff — 2026-09-29.** GitHub `main` is at `de89182` (PR #100). Two more full-cycle PRs landed
 today beyond what this file tracked, both via a `claude/fervent-shannon-5wujce` branch (not this repo's
 usual `feature/ac-N/...` convention) from a separate, concurrently-running session:
