@@ -336,6 +336,37 @@ class AddedGames(UITestCase):
         self.assertEqual(self.ui.game_state.cget("text"), "no window found")
 
 
+def _find_button(root_widget, text):
+    """G#63/GH#111: walks a confirm dialog's widget tree for the app.Button
+    (a Canvas, not a real tk widget -- see Button's own docstring) whose
+    label reads `text`, the same recursive-walk shape as UITestCase's own
+    _appearance_segment(). Returns None if no such button exists."""
+    if isinstance(root_widget, app.Button):
+        try:
+            if root_widget.itemcget(root_widget.label, "text") == text:
+                return root_widget
+        except tk.TclError:
+            pass
+    for child in root_widget.winfo_children():
+        found = _find_button(child, text)
+        if found is not None:
+            return found
+    return None
+
+
+def _dialog_label_containing(root_widget, substring):
+    """Every tk.Label text anywhere under root_widget that contains
+    `substring` -- used to assert the confirm dialog's heading/body name
+    the right item without hard-coding which Label instance is the
+    heading."""
+    found = []
+    if isinstance(root_widget, tk.Label) and substring in root_widget.cget("text"):
+        found.append(root_widget.cget("text"))
+    for child in root_widget.winfo_children():
+        found.extend(_dialog_label_containing(child, substring))
+    return found
+
+
 class DeletedGames(UITestCase):
     """GH#96: deleting a custom game profile -- from self.profiles/by_id,
     from the sidebar, and from the persisted store, with the built-in
@@ -425,7 +456,12 @@ class DeletedGames(UITestCase):
         self.ui._add_game("Some Other Game")
         self.assertIsNotNone(self.ui.items["custom:some other game"].delete_glyph)
 
-    def test_clicking_the_delete_glyph_deletes_without_selecting_first(self):
+    def test_clicking_the_delete_glyph_opens_a_confirm_dialog_without_selecting_first(self):
+        # G#63/GH#111: the glyph no longer deletes on the first click -- it
+        # opens the confirm dialog instead (this test used to assert
+        # immediate deletion; see DeleteConfirmDialogs for the dialog's own
+        # naming/confirm/cancel coverage, and the "Delete" click below for
+        # the same no-premature-selection assertion this test always made).
         self.ui._rail_collapsed = False   # see the sibling test's own comment
         self.ui._add_game("Some Other Game")
         self.ui._select("global")
@@ -439,10 +475,200 @@ class DeletedGames(UITestCase):
         x1, y1, x2, y2 = item.bbox(item.delete_glyph)
         item.event_generate("<Button-1>", x=(x1 + x2) // 2, y=(y1 + y2) // 2)
         self.root.update()
+        self.assertIn("custom:some other game", self.ui.items,
+                      "the glyph click deleted immediately instead of "
+                      "opening a confirm dialog first")
+        self.assertIsNotNone(self.ui._confirm_dialog)
+        self.assertEqual(self.ui.current, "global",
+                         "the delete glyph's click selected the row before "
+                         "any confirmation")
+
+        _find_button(self.ui._confirm_dialog, "Delete").event_generate("<Button-1>")
+        self.root.update()
         self.assertNotIn("custom:some other game", self.ui.items)
         self.assertEqual(self.ui.current, "global",
                          "the delete glyph's click also selected the row it "
                          "deleted, instead of only deleting it")
+
+
+class DeleteConfirmDialogs(UITestCase):
+    """G#63/GH#111: the shared confirm dialog in front of _delete_game and
+    _delete_macro -- opens naming the item, Delete proceeds exactly as the
+    unguarded call did before this feature, Cancel/Escape/close box leave
+    everything untouched, and only one dialog is ever open at a time."""
+
+    def test_game_dialog_names_the_profile_and_does_not_delete_yet(self):
+        self.ui._add_game("Some Other Game")
+        self.ui._confirm_delete_game("custom:some other game")
+        dialog = self.ui._confirm_dialog
+        self.assertIsNotNone(dialog)
+        self.assertEqual(dialog.title(), "Delete game")
+        self.assertTrue(_dialog_label_containing(dialog, "Some Other Game"))
+        self.assertIn("custom:some other game", self.ui.items)
+        self.assertIn("custom:some other game", self.ui.by_id)
+
+    def test_game_dialog_confirm_deletes_exactly_like_delete_game(self):
+        self.ui._add_game("Some Other Game")   # _add_game() selects it
+        self.ui._confirm_delete_game("custom:some other game")
+        _find_button(self.ui._confirm_dialog, "Delete").event_generate("<Button-1>")
+        self.root.update()
+        self.assertNotIn("custom:some other game", self.ui.items)
+        self.assertNotIn("custom:some other game", self.ui.by_id)
+        self.assertNotIn("custom:some other game",
+                         [p["id"] for p in self.ui.profiles])
+        # Same fallback-to-global _delete_game always did when the deleted
+        # profile was current.
+        self.assertEqual(self.ui.current, "global")
+
+    def test_game_dialog_cancel_leaves_the_profile_untouched(self):
+        self.ui._add_game("Some Other Game")
+        self.ui._confirm_delete_game("custom:some other game")
+        _find_button(self.ui._confirm_dialog, "Cancel").event_generate("<Button-1>")
+        self.root.update()
+        self.assertIsNone(self.ui._confirm_dialog)
+        self.assertIn("custom:some other game", self.ui.items)
+        self.assertIn("custom:some other game", self.ui.by_id)
+
+    def test_game_dialog_escape_leaves_the_profile_untouched(self):
+        self.ui._add_game("Some Other Game")
+        self.ui._confirm_delete_game("custom:some other game")
+        dialog = self.ui._confirm_dialog
+        dialog.focus_force()
+        self.root.update()
+        dialog.event_generate("<Escape>")
+        self.root.update()
+        self.assertIsNone(self.ui._confirm_dialog)
+        self.assertIn("custom:some other game", self.ui.items)
+
+    def test_game_dialog_close_box_leaves_the_profile_untouched(self):
+        self.ui._add_game("Some Other Game")
+        self.ui._confirm_delete_game("custom:some other game")
+        dialog = self.ui._confirm_dialog
+        # Invokes the exact Tcl command WM_DELETE_WINDOW registers, the
+        # same thing a real window manager's close box triggers -- no WM
+        # is present under Xvfb to generate that click itself.
+        dialog.tk.call(dialog.protocol("WM_DELETE_WINDOW"))
+        self.root.update()
+        self.assertIsNone(self.ui._confirm_dialog)
+        self.assertIn("custom:some other game", self.ui.items)
+
+    def test_only_one_game_dialog_is_ever_open(self):
+        self.ui._add_game("First Extra")
+        self.ui._add_game("Second Extra")
+        self.ui._confirm_delete_game("custom:first extra")
+        first_dialog = self.ui._confirm_dialog
+        self.ui._confirm_delete_game("custom:second extra")
+        second_dialog = self.ui._confirm_dialog
+        self.assertIsNot(first_dialog, second_dialog)
+        self.assertFalse(first_dialog.winfo_exists(),
+                         "opening a second confirm dialog must close the first")
+        self.assertTrue(second_dialog.winfo_exists())
+
+    def test_a_double_click_on_the_delete_glyph_cannot_stack_two_dialogs(self):
+        self.ui._rail_collapsed = False
+        self.ui._add_game("Some Other Game")
+        item = self.ui.items["custom:some other game"]
+        self.root.update()
+        x1, y1, x2, y2 = item.bbox(item.delete_glyph)
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+        item.event_generate("<Button-1>", x=cx, y=cy)
+        first_dialog = self.ui._confirm_dialog
+        item.event_generate("<Button-1>", x=cx, y=cy)
+        second_dialog = self.ui._confirm_dialog
+        self.root.update()
+        self.assertIsNot(first_dialog, second_dialog)
+        self.assertFalse(first_dialog.winfo_exists())
+        self.assertTrue(second_dialog.winfo_exists())
+
+    def test_rebuild_ui_closes_an_open_confirm_dialog(self):
+        self.ui._add_game("Some Other Game")
+        self.ui._confirm_delete_game("custom:some other game")
+        dialog = self.ui._confirm_dialog
+        self.ui._rebuild_ui()
+        self.assertIsNone(self.ui._confirm_dialog)
+        self.assertFalse(dialog.winfo_exists())
+
+    def _put_macro(self, game_id="minecraft", name="Auto-sell loop"):
+        macro = {"id": "m1", "name": name, "hotkey": None,
+                 "steps": [{"type": "wait", "ms": 1}]}
+        self.ui._select(game_id)
+        self.ui.store.game(game_id)["macros"] = [macro]
+        return macro
+
+    def test_macro_dialog_names_the_macro_and_does_not_delete_yet(self):
+        macro = self._put_macro()
+        self.ui._confirm_delete_macro(macro)
+        dialog = self.ui._confirm_dialog
+        self.assertIsNotNone(dialog)
+        self.assertEqual(dialog.title(), "Delete macro")
+        self.assertTrue(_dialog_label_containing(dialog, "Auto-sell loop"))
+        self.assertEqual(self.ui.store.game("minecraft")["macros"], [macro])
+
+    def test_macro_dialog_confirm_deletes_exactly_like_delete_macro(self):
+        macro = self._put_macro()
+        self.ui._confirm_delete_macro(macro)
+        _find_button(self.ui._confirm_dialog, "Delete").event_generate("<Button-1>")
+        self.root.update()
+        self.assertEqual(self.ui.store.game("minecraft")["macros"], [])
+
+    def test_macro_dialog_cancel_leaves_the_macro_untouched(self):
+        macro = self._put_macro()
+        self.ui._confirm_delete_macro(macro)
+        _find_button(self.ui._confirm_dialog, "Cancel").event_generate("<Button-1>")
+        self.root.update()
+        self.assertIsNone(self.ui._confirm_dialog)
+        self.assertEqual(self.ui.store.game("minecraft")["macros"], [macro])
+
+    def test_macro_dialog_escape_leaves_the_macro_untouched(self):
+        macro = self._put_macro()
+        self.ui._confirm_delete_macro(macro)
+        dialog = self.ui._confirm_dialog
+        dialog.focus_force()
+        self.root.update()
+        dialog.event_generate("<Escape>")
+        self.root.update()
+        self.assertIsNone(self.ui._confirm_dialog)
+        self.assertEqual(self.ui.store.game("minecraft")["macros"], [macro])
+
+    def test_game_dialog_truncates_a_long_profile_name(self):
+        # docs/design.md "Copy rules": a name longer than 40 chars shows
+        # the first 39 plus an ellipsis, so the heading can't blow out the
+        # dialog's fixed wraplength.
+        long_name = "x" * 45
+        self.ui._add_game("Some Other Game")
+        profile = self.ui.by_id["custom:some other game"]
+        profile["name"] = long_name
+        self.ui._confirm_delete_game("custom:some other game")
+        dialog = self.ui._confirm_dialog
+        self.assertFalse(_dialog_label_containing(dialog, long_name),
+                         "the untruncated 45-char name must not appear verbatim")
+        self.assertTrue(_dialog_label_containing(dialog, "x" * 39 + "…"))
+
+    def test_game_dialog_falls_back_to_generic_heading_for_an_empty_name(self):
+        self.ui._add_game("Some Other Game")
+        profile = self.ui.by_id["custom:some other game"]
+        profile["name"] = ""
+        self.ui._confirm_delete_game("custom:some other game")
+        self.assertTrue(_dialog_label_containing(self.ui._confirm_dialog,
+                                                  "Delete this game?"))
+
+    def test_macro_dialog_falls_back_to_generic_heading_for_an_empty_name(self):
+        macro = self._put_macro(name="")
+        self.ui._confirm_delete_macro(macro)
+        self.assertTrue(_dialog_label_containing(self.ui._confirm_dialog,
+                                                  "Delete this macro?"))
+
+    def test_macro_dialog_confirm_is_a_no_op_if_the_current_game_changed(self):
+        # docs/design.md "Confirm" step 3: the dialog is non-blocking, so
+        # the user can switch games while it's open -- the stale closure
+        # must not delete a macro belonging to whatever game is no longer
+        # current.
+        macro = self._put_macro(game_id="minecraft")
+        self.ui._confirm_delete_macro(macro)
+        self.ui._select("global")
+        _find_button(self.ui._confirm_dialog, "Delete").event_generate("<Button-1>")
+        self.root.update()
+        self.assertEqual(self.ui.store.game("minecraft")["macros"], [macro])
 
 
 class ExportedGames(UITestCase):
