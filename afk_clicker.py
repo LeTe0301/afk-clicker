@@ -2145,14 +2145,25 @@ def foreground_title():
     return (titles[0] if sys.platform == "win32" else titles[-1]) if titles else None
 
 
+def _truncated_dialog_name(name, limit=40):
+    """G#63/GH#111: the delete-confirm dialog's heading names the item
+    verbatim, but an unbounded name could blow out the dialog's fixed
+    wraplength -- truncated to the first 39 chars plus an ellipsis past
+    `limit` characters (docs/design.md "Copy rules"), same shape as the
+    existing `expected[:12]}…` truncation elsewhere in this file."""
+    return name[:limit - 1] + "…" if len(name) > limit else name
+
+
 class Button(tk.Canvas):
     """Canvas button, because tk.Button cannot do rounded corners or hover."""
 
-    def __init__(self, parent, text, command, s, primary=False, width=120, height=34):
+    def __init__(self, parent, text, command, s, primary=False, danger=False,
+                 width=120, height=34):
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0,
                          width=int(width * s), height=int(height * s), cursor="hand2")
         self.command = command
         self.primary = primary
+        self.danger = danger
         self._enabled = True
         self.s = s
         w, h = int(width * s), int(height * s)
@@ -2167,6 +2178,13 @@ class Button(tk.Canvas):
     def _colors(self, hover):
         if not self._enabled:
             return CARD, LINE, MUTED
+        if self.danger:
+            # G#63/GH#111: the one destructive button in the app (the
+            # delete-confirm dialog's "Delete") -- reuses BAD the same way
+            # `primary` reuses ACCENT above, just lightened with the same
+            # _lighten() helper instead of a new hand-picked hover hex.
+            return (_lighten(BAD, 0.18), _lighten(BAD, 0.18), ACCENT_INK) if hover \
+                else (BAD, BAD, ACCENT_INK)
         if self.primary:
             return (ACCENT_HI, ACCENT_HI, ACCENT_INK) if hover else (ACCENT, ACCENT, ACCENT_INK)
         return (CARD_HI if hover else CARD), LINE, INK
@@ -2637,8 +2655,26 @@ class GameItem(tk.Canvas):
                           lambda e: (on_delete(self.profile["id"]), "break")[1])
         self.bind("<Enter>", lambda e: self._paint(hover=True))
         self.bind("<Leave>", lambda e: self._paint())
-        self.bind("<Button-1>", lambda e: self.on_click(self.profile["id"]))
+        self.bind("<Button-1>", self._on_click)
         self._paint()
+
+    def _on_click(self, _event):
+        # G#63/GH#111: the delete glyph's own tag_bind above returns
+        # "break", but that only suppresses further CANVAS ITEM bindings --
+        # it is a separate Tk dispatch stage from this widget-level
+        # <Button-1> binding, confirmed directly (a minimal two-binding
+        # canvas firing both callbacks on one click). This never showed up
+        # before because on_delete (_delete_game) always destroyed this
+        # widget synchronously, before Tk reached this second stage; now
+        # that deleting opens a non-blocking confirm dialog first instead,
+        # this widget survives the click and this stage still runs, so a
+        # delete-glyph click would otherwise also reselect the row it just
+        # opened a delete confirmation for. find_withtag("current") is the
+        # same "which item is under the pointer" query Tk itself used to
+        # decide whether to fire the glyph's own tag_bind.
+        if self.delete_glyph is not None and self.delete_glyph in self.find_withtag("current"):
+            return
+        self.on_click(self.profile["id"])
 
     def set_state(self, selected=None, running=None):
         if selected is not None:
@@ -3051,6 +3087,16 @@ class AfkAutoclicker:
                                         # reference an unrelated .set() call
                                         # (or, eventually, cyclic GC running
                                         # on any thread) can fire into.
+        self._confirm_dialog = None    # G#63/GH#111: the delete-confirm
+                                        # Toplevel, if one is open, else
+                                        # None -- a plain reference, no
+                                        # Variable/trace like the log
+                                        # dialog's own ctx, since this one
+                                        # has no state to restore across a
+                                        # rebuild (_rebuild_ui() just closes
+                                        # it, same as it closes the log
+                                        # dialog, see that method's own
+                                        # comment).
         self._log_report_after_id = None   # the one after_idle(self._
                                         # maybe_offer_log_report) job
                                         # scheduled at this __init__'s own
@@ -3739,6 +3785,14 @@ class AfkAutoclicker:
             log_dialog_restore = self._capture_log_dialog_restore_state()
             if log_dialog_restore is not None:
                 self._close_log_dialog()
+            # G#63/GH#111: same reasoning, simpler fix -- the delete-confirm
+            # dialog (if open) is also a genuine child of root and would
+            # otherwise be silently destroyed by the teardown loop below,
+            # leaving self._confirm_dialog dangling and its closure pointed
+            # at a game/macro from the old tree. Unlike the log dialog it
+            # has no state worth restoring (docs/design.md "Rebuild"), so
+            # it's just closed, not rebuilt.
+            self._close_confirm_dialog()
             for job in self._timers.values():
                 try:
                     self.root.after_cancel(job)
@@ -4401,7 +4455,7 @@ class AfkAutoclicker:
         self.items = {}
         for profile in self.profiles:
             item = GameItem(self.list_frame, profile, self._select, self.s,
-                            collapsed=self._rail_collapsed, on_delete=self._delete_game)
+                            collapsed=self._rail_collapsed, on_delete=self._confirm_delete_game)
             item.pack(fill="x", pady=int(1 * self.s))
             self.items[profile["id"]] = item
         self.count_label.config(text=f"GAMES   {len(self.profiles)}")
@@ -5161,6 +5215,130 @@ class AfkAutoclicker:
         self._mark_log_reported()
         self._close_log_dialog()
 
+    # ---------- delete-confirm dialog (G#63/GH#111) ----------
+
+    def _open_confirm_dialog(self, title, heading, body, on_confirm):
+        """One shared themed Toplevel for both delete confirmations (the
+        sidebar game glyph and a macro row's Delete), same non-blocking
+        shape as _show_update_log_dialog -- no wait_window(). `on_confirm`
+        runs only if Delete is clicked, and only after the dialog is
+        already destroyed (docs/design.md "Confirm (Delete button)" step
+        1), so a failure inside it never leaves a stale dialog on screen.
+
+        Single open slot: closes any dialog already open first, so a
+        double-click on the glyph/button can't stack two (docs/design.md
+        "Single open slot")."""
+        self._close_confirm_dialog()
+        s = self.s
+        top = tk.Toplevel(self.root, bg=BG)
+        top.title(title)
+        top.transient(self.root)
+        top.resizable(False, False)
+        self._confirm_dialog = top
+
+        def _cancel(_event=None):
+            self._close_confirm_dialog()
+
+        def _confirm():
+            self._close_confirm_dialog()
+            on_confirm()
+
+        top.protocol("WM_DELETE_WINDOW", _cancel)
+        top.bind("<Escape>", _cancel)
+        # Return is bound to cancel, not confirm -- the opposite of the
+        # update-log dialog's own Return=Send -- because Delete must never
+        # be the reflexive-Enter action (docs/design.md "Return is the
+        # safe default").
+        top.bind("<Return>", _cancel)
+
+        frame = tk.Frame(top, bg=BG)
+        frame.pack(fill="both", expand=True,
+                   padx=int(CONTENT_PAD * s), pady=int(CONTENT_PAD * s))
+
+        wraplength = int(368 * s)
+        tk.Label(frame, text=heading, bg=BG, fg=INK, anchor="w", justify="left",
+                wraplength=wraplength, font=("Segoe UI", fs(14, s), "bold")
+                ).pack(fill="x", pady=(0, int(8 * s)))
+        tk.Label(frame, text=body, bg=BG, fg=MUTED, anchor="w", justify="left",
+                wraplength=wraplength, font=("Segoe UI", fs(9.5, s))
+                ).pack(fill="x", pady=(0, int(16 * s)))
+
+        button_row = tk.Frame(frame, bg=BG)
+        button_row.pack(fill="x")
+        # Packed Delete first, then Cancel, both side="right": Delete lands
+        # at the far right, Cancel just left of it -- Windows convention,
+        # safe action on the left (docs/design.md "Gap between buttons").
+        Button(button_row, "Delete", _confirm, s, danger=True, width=100).pack(side="right")
+        Button(button_row, "Cancel", _cancel, s, width=100).pack(
+            side="right", padx=(0, int(8 * s)))
+
+        # Content-driven size only -- no top.geometry("WxH") -- per
+        # _fit_log_dialog_to_content's own comment, an explicit size switches
+        # this Toplevel to fixed size. Position only, centered over root.
+        top.update_idletasks()
+        root = self.root
+        x = root.winfo_rootx() + (root.winfo_width() - top.winfo_reqwidth()) // 2
+        y = root.winfo_rooty() + (root.winfo_height() - top.winfo_reqheight()) // 2
+        top.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        top.focus_force()
+
+    def _close_confirm_dialog(self):
+        """Cancel, Escape, Return, the close box, and a fresh
+        _open_confirm_dialog() call (replacing a stacked dialog) all funnel
+        here. Same try/except TclError shape as _close_log_dialog -- no
+        Variable/trace to clear, this dialog has none."""
+        if self._confirm_dialog is not None:
+            try:
+                self._confirm_dialog.destroy()
+            except tk.TclError:
+                pass
+        self._confirm_dialog = None
+
+    def _confirm_delete_game(self, game_id):
+        """Wired from GameItem's delete glyph in place of self._delete_game
+        directly (docs/design.md "Triggers / Profile"). _delete_game itself
+        already re-checks game_id against self.by_id/"custom" at call time
+        (GH#96), which doubles as this wrapper's stale-target guard -- the
+        dialog is non-blocking, so the profile could be gone by the time
+        Delete is clicked, and that existing guard already covers it."""
+        profile = self.by_id.get(game_id)
+        if profile is None or not profile.get("custom"):
+            return
+        name = profile.get("name") or ""
+        heading = f'Delete "{_truncated_dialog_name(name)}"?' if name else "Delete this game?"
+        self._open_confirm_dialog(
+            title="Delete game", heading=heading,
+            body="This removes its settings, macros, and hotkey. It can't be undone.",
+            on_confirm=lambda: self._delete_game(game_id))
+
+    def _confirm_delete_macro(self, macro):
+        """Wired from the macro row's Delete button in place of
+        self._delete_macro directly. Unlike _delete_game, _delete_macro has
+        no re-check of its own -- it always acts on self.current -- so this
+        wrapper captures the game the macro belongs to at open time and the
+        closure re-checks both self.current and that the macro is still in
+        that game's list before calling it (docs/design.md "Confirm" step
+        3), since the user can switch games or edit/delete it again while
+        this non-blocking dialog is still open."""
+        game_id = self.current
+        macro_id = macro.get("id")
+        name = macro.get("name") or ""
+        heading = (f'Delete macro "{_truncated_dialog_name(name)}"?' if name
+                  else "Delete this macro?")
+
+        def _on_confirm():
+            if self.current != game_id:
+                return
+            if not any(m["id"] == macro_id
+                      for m in self.store.game(game_id).get("macros", [])):
+                return
+            self._delete_macro(macro)
+
+        self._open_confirm_dialog(
+            title="Delete macro", heading=heading,
+            body="This removes its steps and hotkey. It can't be undone.",
+            on_confirm=_on_confirm)
+
     def _on_log_open_folder(self):
         """Deliberately does not mark the log as seen (docs/spec.md
         acceptance criteria) -- the person can still Send/Dismiss the same
@@ -5715,7 +5893,7 @@ class AfkAutoclicker:
             row = tk.Frame(self.macros_list, bg=CARD)
             row.pack(fill="x", pady=(0 if i == 0 else int(8 * s), 0))
             hotkey = Hotkey.from_json(macro["hotkey"]) if macro["hotkey"] else None
-            Button(row, "Delete", lambda m=macro: self._delete_macro(m), s,
+            Button(row, "Delete", lambda m=macro: self._confirm_delete_macro(m), s,
                   width=70).pack(side="right")
             Button(row, "Edit", lambda m=macro: self._open_macro_editor(m), s,
                   width=60).pack(side="right", padx=(0, int(6 * s)))
