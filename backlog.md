@@ -598,6 +598,11 @@ Two follow-ups from its review are below.
       Counts only the click loop's own clicks (left/right/middle), never a macro's; resets on each
       `start()`, frozen (not reset) on every exit path via `loop()`'s own `finally`.
 
+- [ ] G#63 / GH#111 — github: true — Confirm before deleting a custom game profile or
+      macro (Leo, approved 2026-10-10). Both `_delete_game` (`afk_clicker.py:4619`) and
+      `_delete_macro` (`afk_clicker.py:5733`) are instant, one-click, irreversible. See
+      `docs/spec.md`.
+
 Housekeeping:
 - [ ] G#59 / GH#105 — github: true — Follow-up from G#57's cycle review (Finding #2): verify the
       new Hotkey-tab subtitle string ("Hotkey · this game only", `afk_clicker.py:3676`) on a real
