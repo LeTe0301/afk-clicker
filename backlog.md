@@ -598,10 +598,15 @@ Two follow-ups from its review are below.
       Counts only the click loop's own clicks (left/right/middle), never a macro's; resets on each
       `start()`, frozen (not reset) on every exit path via `loop()`'s own `finally`.
 
-- [ ] G#63 / GH#111 — github: true — Confirm before deleting a custom game profile or
-      macro (Leo, approved 2026-10-10). Both `_delete_game` (`afk_clicker.py:4619`) and
-      `_delete_macro` (`afk_clicker.py:5733`) are instant, one-click, irreversible. See
-      `docs/spec.md`.
+- [x] **Done, PR #112 (merged 2026-10-10, `e03e544`).** G#63 / GH#111 — github: true — Confirm
+      before deleting a custom game profile or macro, proposed and signed off this session
+      (Leo, 2026-10-10). A shared non-blocking themed confirm dialog gates both `_delete_game`
+      and `_delete_macro`, neither of which changed. Found and fixed a real pre-existing Tk bug
+      along the way: a canvas `tag_bind(..., "break")` doesn't suppress the row's own separate
+      widget-level `<Button-1>` bind, previously invisible because the old synchronous delete
+      destroyed the row first. One Windows-only CI round: new tests needed a `self.root.update()`
+      pump before a synthetic click on the freshly-built dialog, a test-timing fix, not a
+      production change. Full account: `docs/history/ac-63-*.md`.
 
 Housekeeping:
 - [ ] G#59 / GH#105 — github: true — Follow-up from G#57's cycle review (Finding #2): verify the
