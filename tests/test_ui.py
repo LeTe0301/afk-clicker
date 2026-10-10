@@ -510,6 +510,7 @@ class DeleteConfirmDialogs(UITestCase):
     def test_game_dialog_confirm_deletes_exactly_like_delete_game(self):
         self.ui._add_game("Some Other Game")   # _add_game() selects it
         self.ui._confirm_delete_game("custom:some other game")
+        self.root.update()
         _find_button(self.ui._confirm_dialog, "Delete").event_generate("<Button-1>")
         self.root.update()
         self.assertNotIn("custom:some other game", self.ui.items)
@@ -523,6 +524,7 @@ class DeleteConfirmDialogs(UITestCase):
     def test_game_dialog_cancel_leaves_the_profile_untouched(self):
         self.ui._add_game("Some Other Game")
         self.ui._confirm_delete_game("custom:some other game")
+        self.root.update()
         _find_button(self.ui._confirm_dialog, "Cancel").event_generate("<Button-1>")
         self.root.update()
         self.assertIsNone(self.ui._confirm_dialog)
@@ -607,6 +609,7 @@ class DeleteConfirmDialogs(UITestCase):
     def test_macro_dialog_confirm_deletes_exactly_like_delete_macro(self):
         macro = self._put_macro()
         self.ui._confirm_delete_macro(macro)
+        self.root.update()
         _find_button(self.ui._confirm_dialog, "Delete").event_generate("<Button-1>")
         self.root.update()
         self.assertEqual(self.ui.store.game("minecraft")["macros"], [])
@@ -614,6 +617,7 @@ class DeleteConfirmDialogs(UITestCase):
     def test_macro_dialog_cancel_leaves_the_macro_untouched(self):
         macro = self._put_macro()
         self.ui._confirm_delete_macro(macro)
+        self.root.update()
         _find_button(self.ui._confirm_dialog, "Cancel").event_generate("<Button-1>")
         self.root.update()
         self.assertIsNone(self.ui._confirm_dialog)
