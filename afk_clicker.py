@@ -2154,6 +2154,16 @@ def _truncated_dialog_name(name, limit=40):
     return name[:limit - 1] + "…" if len(name) > limit else name
 
 
+def _truncated_row_name(name, limit=40):
+    """G#64/GH#113: the macro row's name label, display-only (the stored
+    macro["name"] is never touched). Unlike _truncated_dialog_name above,
+    this keeps a middle ellipsis rather than a trailing one -- a Duplicate's
+    name always ends " (copy)" (7 chars), and dropping the tail (as the
+    dialog helper does) would hide the one suffix that proves the click
+    worked. Head 31 chars + "…" + tail 8 chars == exactly `limit` chars."""
+    return name if len(name) <= limit else name[:limit - 9] + "…" + name[-8:]
+
+
 class Button(tk.Canvas):
     """Canvas button, because tk.Button cannot do rounded corners or hover."""
 
@@ -5892,21 +5902,46 @@ class AfkAutoclicker:
         for i, macro in enumerate(macros):
             row = tk.Frame(self.macros_list, bg=CARD)
             row.pack(fill="x", pady=(0 if i == 0 else int(8 * s), 0))
+            # G#64/GH#113: two lines, not one -- a single line has no room
+            # left for the name once a fourth (Duplicate) button joins
+            # Run/Edit/Delete (docs/design.md "Why the single-line row
+            # cannot take the button"). Line 1 is name + hotkey, line 2 is
+            # interval + the four buttons.
+            row_top = tk.Frame(row, bg=CARD)
+            row_top.pack(fill="x")
+            row_bottom = tk.Frame(row, bg=CARD)
+            row_bottom.pack(fill="x", pady=(int(6 * s), 0))
             hotkey = Hotkey.from_json(macro["hotkey"]) if macro["hotkey"] else None
-            Button(row, "Delete", lambda m=macro: self._confirm_delete_macro(m), s,
+            Button(row_bottom, "Delete", lambda m=macro: self._confirm_delete_macro(m), s,
                   width=70).pack(side="right")
-            Button(row, "Edit", lambda m=macro: self._open_macro_editor(m), s,
+            Button(row_bottom, "Edit", lambda m=macro: self._open_macro_editor(m), s,
                   width=60).pack(side="right", padx=(0, int(6 * s)))
-            Button(row, "Run", lambda m=macro: self._run_macro(m), s,
+            Button(row_bottom, "Duplicate", lambda m=macro: self._duplicate_macro(m), s,
+                  width=80).pack(side="right", padx=(0, int(6 * s)))
+            Button(row_bottom, "Run", lambda m=macro: self._run_macro(m), s,
                   width=60).pack(side="right", padx=(0, int(6 * s)))
-            tk.Label(row, text=hotkey.label() if hotkey else "No hotkey",
+            tk.Label(row_top, text=hotkey.label() if hotkey else "No hotkey",
                     bg=CARD, fg=(INK if hotkey else MUTED),
                     font=("Consolas", fs(9, s))).pack(side="right", padx=(0, int(12 * s)))
             if macro.get("interval_ms"):
-                tk.Label(row, text=f"every {macro['interval_ms']} ms", bg=CARD, fg=MUTED,
-                        font=("Segoe UI", fs(9, s))).pack(side="right", padx=(0, int(12 * s)))
-            tk.Label(row, text=macro["name"], bg=CARD, fg=INK, anchor="w",
-                    font=("Segoe UI", fs(9.5, s))).pack(side="left", fill="x", expand=True)
+                tk.Label(row_bottom, text=f"every {macro['interval_ms']} ms", bg=CARD, fg=MUTED,
+                        font=("Segoe UI", fs(9, s))).pack(side="left")
+            tk.Label(row_top, text=_truncated_row_name(macro["name"]), bg=CARD, fg=INK,
+                    anchor="w", font=("Segoe UI", fs(9.5, s))).pack(
+                    side="left", fill="x", expand=True)
+
+    def _duplicate_macro(self, macro):
+        """G#64/GH#113: clones name (plus " (copy)"), hotkey, steps and
+        interval into a brand new macro in the same game -- reuses
+        _save_macro(game_id, macro_id=None, ...) exactly like the editor's
+        own "new macro" save does, so persistence, re-validation, and
+        hotkey/interval re-arming all come for free. No confirm dialog
+        (spec decision: additive/reversible, unlike delete) and no
+        collision handling on a repeat name or a shared hotkey (spec
+        non-goals -- the app has neither check anywhere else today)."""
+        hotkey = Hotkey.from_json(macro["hotkey"]) if macro["hotkey"] else None
+        self._save_macro(self.current, None, f'{macro["name"]} (copy)', hotkey,
+                         macro["steps"], macro.get("interval_ms"))
 
     def _delete_macro(self, macro):
         game = self.store.game(self.current)

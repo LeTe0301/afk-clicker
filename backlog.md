@@ -480,6 +480,7 @@ Bugs and residue:
       underline lands at the right y.
 
 Features:
+- [ ] G#64 / GH#113 — github: true — Duplicate a macro (Leo, 2026-10-11, approved in chat). Macro rows had Edit/Delete but no clone action; a "Duplicate" button copies a macro's name, hotkey, steps, and interval into a new entry (`"{name} (copy)"`) so a timing variant doesn't need rebuilding by hand. Spec: docs/spec.md.
 - [x] **Done, PR #110 (merged 2026-10-09, `3ec41d5`).** G#62 / GH#109 — github: true — Reuse the
       Xlib connection in `detect_running()`, picked from `docs/ROADMAP.md`'s "Detection cost" item
       (the low-risk fix: connection reuse, not a full event-driven rearchitecture, which would
