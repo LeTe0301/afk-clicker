@@ -11,9 +11,7 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
-**G#65/GH#115 — Macro recording with real timings** — github: true — proposed by product-manager
-(prior triage, flagged as bigger than G#63/G#64), signed off by Leo 2026-10-11. Spec written:
-`docs/spec.md`. Next: ux-designer → developer → reviewer.
+Nothing in flight. G#65 (macro recording) shipped and merged — see Features below.
 
 ## Session handoff — 2026-10-10 (continued)
 
@@ -481,7 +479,7 @@ Bugs and residue:
       underline lands at the right y.
 
 Features:
-- [ ] **In progress — spec written, not yet built.** G#65 / GH#115 — github: true — Macro
+- [x] **Done, PR #116 (merged 2026-10-11, `2186cff`).** G#65 / GH#115 — github: true — Macro
       recording with real timings, proposed by product-manager (flagged by prior triage as
       bigger than G#63/G#64), signed off by Leo 2026-10-11. A Record/Stop toggle in the macro
       editor dialog's Steps card captures real key down/up and mouse-click events via the
@@ -489,7 +487,11 @@ Features:
       dependency), converting real inter-event gaps into `wait` steps and appending the result
       to `ctx["steps"]` through the same `_validate_macro_step` schema manual steps already use
       -- no schema, persistence, or `MacroRunner` change. Closes `docs/ROADMAP.md`'s own
-      "Recording with real timings... stays open for later" line. Full spec: `docs/spec.md`.
+      "Recording with real timings... stays open for later" line. Testing+review: BLOCKED round
+      1 (a captured pair whose event half failed schema validation silently kept its `wait` half
+      alone instead of dropping the whole pair, plus a missing lock across the two concurrent
+      listener threads) → fixed → APPROVE round 2. Independent PR review: MERGE. Full account:
+      `docs/history/ac-65-*.md`.
 - [x] **Done, PR #114 (merged 2026-10-11, `f38f680`).** G#64 / GH#113 — github: true — Duplicate
       a macro, proposed and signed off this session (Leo, 2026-10-11). Macro rows had Edit/Delete
       but no clone action; a "Duplicate" button copies a macro's name, hotkey, steps, and interval
