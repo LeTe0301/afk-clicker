@@ -647,11 +647,15 @@ Two follow-ups from its review are below.
       production change. Full account: `docs/history/ac-63-*.md`.
 
 Housekeeping:
-- [ ] **In progress — spec written.** G#66 / GH#117 — github: true — `Button`'s default/disabled
-      outline uses `LINE` on `CARD`, which measures ~1.6:1 in both themes, below WCAG 1.4.11's 3:1
-      non-text minimum. `ToggleCheckbox` already solved the identical problem (outline `MUTED`, not
-      `LINE`) — swap `Button._colors()` to match. Flagged non-blocking in G#63/G#64's reviews, no
-      ticket existed until this session's idle-iteration proposal. Spec: `docs/spec.md`.
+- [x] **Done, PR #119 (merged 2026-10-11, `c1d78a1`).** G#66 / GH#117 — github: true — `Button`'s
+      default/disabled outline used `LINE` on `CARD` (~1.6:1 in both themes, below WCAG 1.4.11's
+      3:1 non-text minimum). Swapped to `MUTED` (5.76:1 dark, 6.23:1 light), matching
+      `ToggleCheckbox`'s own established precedent for the identical problem. Testing+review:
+      BLOCKED round 1 (the first regression test asserted contrast against the theme dict
+      directly, never actually exercising `Button._colors()` — tautological, proven by reverting
+      the fix and watching it still pass) → fixed (build a real `Button`, read back its rendered
+      outline) → APPROVE round 2. Independent PR review: MERGE. Full account:
+      `docs/history/ac-66-*.md`.
 - [ ] G#67 / GH#118 — github: true — `Themes::test_module_globals_still_ship_dark_only` fails
       depending on test execution order: some test calls `set_active_theme("light")`/`"system"`
       without restoring `"dark"` afterward. Confirmed pre-existing (not a regression) independently
