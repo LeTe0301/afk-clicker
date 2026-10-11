@@ -2272,7 +2272,7 @@ class Button(tk.Canvas):
 
     def _colors(self, hover):
         if not self._enabled:
-            return CARD, LINE, MUTED
+            return CARD, MUTED, MUTED
         if self.danger:
             # G#63/GH#111: the one destructive button in the app (the
             # delete-confirm dialog's "Delete") -- reuses BAD the same way
@@ -2282,7 +2282,7 @@ class Button(tk.Canvas):
                 else (BAD, BAD, ACCENT_INK)
         if self.primary:
             return (ACCENT_HI, ACCENT_HI, ACCENT_INK) if hover else (ACCENT, ACCENT, ACCENT_INK)
-        return (CARD_HI if hover else CARD), LINE, INK
+        return (CARD_HI if hover else CARD), MUTED, INK
 
     def _paint(self, hover=False):
         fill, outline, ink = self._colors(hover)

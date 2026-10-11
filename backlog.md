@@ -647,6 +647,17 @@ Two follow-ups from its review are below.
       production change. Full account: `docs/history/ac-63-*.md`.
 
 Housekeeping:
+- [ ] **In progress — spec written.** G#66 / GH#117 — github: true — `Button`'s default/disabled
+      outline uses `LINE` on `CARD`, which measures ~1.6:1 in both themes, below WCAG 1.4.11's 3:1
+      non-text minimum. `ToggleCheckbox` already solved the identical problem (outline `MUTED`, not
+      `LINE`) — swap `Button._colors()` to match. Flagged non-blocking in G#63/G#64's reviews, no
+      ticket existed until this session's idle-iteration proposal. Spec: `docs/spec.md`.
+- [ ] G#67 / GH#118 — github: true — `Themes::test_module_globals_still_ship_dark_only` fails
+      depending on test execution order: some test calls `set_active_theme("light")`/`"system"`
+      without restoring `"dark"` afterward. Confirmed pre-existing (not a regression) independently
+      across G#63/G#64/G#65's reviews via `git stash` isolation — same 11 subtest failures every
+      time. Needs real test isolation instead of re-verifying it's benign every cycle. Queued next
+      after G#66.
 - [ ] G#59 / GH#105 — github: true — Follow-up from G#57's cycle review (Finding #2): verify the
       new Hotkey-tab subtitle string ("Hotkey · this game only", `afk_clicker.py:3676`) on a real
       Windows render — the ux-designer's width estimate was a metric calculation on a Linux sandbox
