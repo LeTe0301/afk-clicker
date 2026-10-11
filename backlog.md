@@ -656,12 +656,12 @@ Housekeeping:
       the fix and watching it still pass) → fixed (build a real `Button`, read back its rendered
       outline) → APPROVE round 2. Independent PR review: MERGE. Full account:
       `docs/history/ac-66-*.md`.
-- [ ] G#67 / GH#118 — github: true — `Themes::test_module_globals_still_ship_dark_only` fails
-      depending on test execution order: some test calls `set_active_theme("light")`/`"system"`
-      without restoring `"dark"` afterward. Confirmed pre-existing (not a regression) independently
-      across G#63/G#64/G#65's reviews via `git stash` isolation — same 11 subtest failures every
-      time. Needs real test isolation instead of re-verifying it's benign every cycle. Queued next
-      after G#66.
+- [ ] **In progress — spec written.** G#67 / GH#118 — github: true —
+      `Themes::test_module_globals_still_ship_dark_only` fails depending on test execution order:
+      some test calls `set_active_theme("light")`/`"system"` without restoring `"dark"` afterward.
+      Confirmed pre-existing (not a regression) independently across G#63/G#64/G#65's reviews via
+      `git stash` isolation — same 11 subtest failures every time. Needs real test isolation
+      instead of re-verifying it's benign every cycle. Spec: `docs/spec.md`.
 - [ ] G#59 / GH#105 — github: true — Follow-up from G#57's cycle review (Finding #2): verify the
       new Hotkey-tab subtitle string ("Hotkey · this game only", `afk_clicker.py:3676`) on a real
       Windows render — the ux-designer's width estimate was a metric calculation on a Linux sandbox
