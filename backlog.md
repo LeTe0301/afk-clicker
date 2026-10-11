@@ -11,7 +11,39 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
-Nothing in flight. G#65 (macro recording) shipped and merged — see Features below.
+Nothing in flight. All five cycles this continuation (G#63–G#67) shipped and merged — see Features
+and Housekeeping below. `main`'s own post-merge CI (run `38147634023`) is still finishing
+`ubuntu-latest` as of this writing; `macos-latest`/`windows-latest` already passed. Check
+`gh run view 38147634023 --repo LeTe0301/afk-clicker` for the final state before assuming green.
+
+## Session handoff — 2026-10-11 (continued further)
+
+**Where things stand:** five more cycles shipped and merged on top of the 2026-10-10 handoff below,
+all proposed via the idle-iteration sign-off flow (nothing externally queued) and all small/single-
+layer: **G#64** (duplicate a macro, PR #114, one macOS-only missing-`@needs_input_permission`-
+decorator round), **G#65** (macro recording with real timings, PR #116, the session's biggest cycle
+— a real must-fix found in testing: a captured event pair whose event half failed schema validation
+silently kept its `wait` half alone instead of dropping the whole pair; also added a lock across the
+two concurrent listener threads; one CI oddity, a genuinely stuck/unresponsive `ubuntu-latest`
+runner, resolved by an empty-commit retrigger, not a code issue), **G#66** (fix `Button`'s outline
+contrast to clear WCAG 1.4.11, PR #119, one BLOCKED round — the first regression test was
+tautological, asserted against the theme dict directly rather than actually calling
+`Button._colors()`), **G#67** (fix the `Themes` test-order pollution leak, PR #120, no production
+code touched — root-caused via real systematic debugging to `AppIcon` missing a `tearDown()`, after
+three earlier cycles had each independently re-verified the same symptom as "pre-existing, benign"
+without ever finding the actual leak). G#66 and G#67 themselves came from findings G#63/G#64's own
+reviews had already surfaced but left unticketed — worth checking a review's non-blocking footnotes
+for backlog-worthy follow-ups, not just its blocking findings.
+
+**Pattern confirmed again:** CI flakiness clusters right after a burst of same-day volume (G#64 hit
+the same `UpdateLogPrompt`/`LiveRepository` flake classes already documented in the 2026-10-10
+handoff below) — retriggered via empty commit each time, never a real regression. The `ubuntu-latest`
+hang on G#65's PR was a new variant of this (a genuinely stuck runner, not a test failure) — confirmed
+not a real deadlock by reproducing the full suite locally under both a warm and a cold Xvfb before
+retriggering, rather than assuming the diff's new threading/lock code was at fault.
+
+**Backlog now:** G#59/GH#105, G#39/GH#69, G#46/GH#85, G#47/GH#86 remain, all still blocked on Leo's
+decision or real hardware (see the "What's left" list below, unchanged by this continuation's work).
 
 ## Session handoff — 2026-10-10 (continued)
 
