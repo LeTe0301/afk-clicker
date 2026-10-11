@@ -8982,6 +8982,104 @@ class MacroIntervals(UITestCase):
         self.ui.on_close()   # must not raise or hang
         self.assertEqual(self.ui._macro_interval_after_ids, {})
 
+
+class DuplicateMacro(UITestCase):
+    """G#64/GH#113: the Macros tab's "Duplicate" row button -- clones name
+    (plus " (copy)" suffix), hotkey, steps and interval into a brand new
+    macro via _save_macro(game_id, None, ...), same reuse MacrosTab's own
+    tests exercise for the editor's save path."""
+
+    needs_input_permission = unittest.skipIf(
+        app is not None and app.sys.platform == "darwin",
+        "starting a listener aborts the process on macOS -- see issue #7")
+
+    @needs_input_permission
+    def test_duplicate_copies_name_suffix_hotkey_steps_and_interval(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        steps = [{"type": "wait", "ms": 10}]
+        self.ui._save_macro("minecraft", None, "Original", hotkey, steps,
+                            app.MACRO_MIN_INTERVAL_MS)
+        original = self.ui.store.game("minecraft")["macros"][0]
+        self.ui._duplicate_macro(original)
+        macros = self.ui.store.game("minecraft")["macros"]
+        self.assertEqual(len(macros), 2)
+        duplicate = macros[1]
+        self.assertEqual(duplicate["name"], "Original (copy)")
+        self.assertNotEqual(duplicate["id"], original["id"])
+        self.assertEqual(duplicate["hotkey"], original["hotkey"])
+        self.assertEqual(duplicate["steps"], original["steps"])
+        self.assertEqual(duplicate["interval_ms"], original["interval_ms"])
+
+    def test_duplicate_with_no_hotkey_or_interval_matches_the_original(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "Plain", None,
+                            [{"type": "wait", "ms": 1}])
+        original = self.ui.store.game("minecraft")["macros"][0]
+        self.ui._duplicate_macro(original)
+        duplicate = self.ui.store.game("minecraft")["macros"][1]
+        self.assertEqual(duplicate["name"], "Plain (copy)")
+        self.assertIsNone(duplicate["hotkey"])
+        self.assertIsNone(duplicate.get("interval_ms"))
+
+    @needs_input_permission
+    def test_original_and_duplicate_both_arm_the_shared_hotkey_independently(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        self.ui._save_macro("minecraft", None, "Shared", hotkey,
+                            [{"type": "wait", "ms": 1}])
+        original = self.ui.store.game("minecraft")["macros"][0]
+        self.ui._duplicate_macro(original)
+        # _save_macro's own re-arm already rebuilt the watcher list to
+        # include both macros -- same no-collision-guard behavior
+        # _arm_macro_hotkeys documents (one watcher per macro, no dedup).
+        self.assertEqual(len(self.ui._macro_hotkey_watchers), 2)
+
+    def test_duplicates_own_interval_timer_fires_independently(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "Ticking", None,
+                            [{"type": "wait", "ms": 1}], app.MACRO_MIN_INTERVAL_MS)
+        original = self.ui.store.game("minecraft")["macros"][0]
+        self.ui._duplicate_macro(original)
+        duplicate = self.ui.store.game("minecraft")["macros"][1]
+        self.assertIn(duplicate["id"], self.ui._macro_interval_after_ids)
+        calls = []
+        original_run = self.ui._run_macro
+        self.ui._run_macro = lambda m: (calls.append(m["id"]), original_run(m))[1]
+        self.pump_until(lambda: duplicate["id"] in calls,
+                        timeout=app.MACRO_MIN_INTERVAL_MS / 1000 + 2.0)
+        self.assertIn(duplicate["id"], calls,
+                     "the duplicate's own armed interval timer never fired it")
+
+    @needs_input_permission
+    def test_duplicating_does_not_alter_or_remove_the_original(self):
+        self.ui._select("minecraft")
+        hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
+        steps = [{"type": "wait", "ms": 5}]
+        self.ui._save_macro("minecraft", None, "Keep me", hotkey, steps, 500)
+        original = dict(self.ui.store.game("minecraft")["macros"][0])
+        self.ui._duplicate_macro(original)
+        still_there = self.ui.store.game("minecraft")["macros"][0]
+        self.assertEqual(still_there, original)
+
+    def test_duplicate_persists_across_a_game_switch_away_and_back(self):
+        self.ui._select("minecraft")
+        self.ui._save_macro("minecraft", None, "Persisted", None,
+                            [{"type": "wait", "ms": 1}])
+        original = self.ui.store.game("minecraft")["macros"][0]
+        self.ui._duplicate_macro(original)
+        self.ui._select("global")
+        self.ui._select("minecraft")
+        macros = self.ui.store.game("minecraft")["macros"]
+        self.assertEqual(len(macros), 2)
+        self.assertEqual(macros[1]["name"], "Persisted (copy)")
+        # Reads from the real store, not just in-memory state.
+        reloaded = app.Store(self.config)
+        reloaded_macros = reloaded.data["games"]["minecraft"]["macros"]
+        self.assertEqual(len(reloaded_macros), 2)
+        self.assertEqual(reloaded_macros[1]["name"], "Persisted (copy)")
+
+
 def tearDownModule():
     # See GcAutomaticCollectionStaysDisabled above (G#31/GH#54). Checked
     # once per module run, not per-test: the symptom this counts is
