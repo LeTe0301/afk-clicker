@@ -480,7 +480,15 @@ Bugs and residue:
       underline lands at the right y.
 
 Features:
-- [ ] G#64 / GH#113 — github: true — Duplicate a macro (Leo, 2026-10-11, approved in chat). Macro rows had Edit/Delete but no clone action; a "Duplicate" button copies a macro's name, hotkey, steps, and interval into a new entry (`"{name} (copy)"`) so a timing variant doesn't need rebuilding by hand. Spec: docs/spec.md.
+- [x] **Done, PR #114 (merged 2026-10-11, `f38f680`).** G#64 / GH#113 — github: true — Duplicate
+      a macro, proposed and signed off this session (Leo, 2026-10-11). Macro rows had Edit/Delete
+      but no clone action; a "Duplicate" button copies a macro's name, hotkey, steps, and interval
+      into a new entry (`"{name} (copy)"`, fixed suffix, no collision counter), reusing the
+      existing `_save_macro()` append path. The row couldn't fit a fourth button on one line at
+      default scale, so it moved to a two-line layout. One macOS-only CI round: a new test built a
+      real-hotkey macro without the `@needs_input_permission` guard its siblings already had,
+      SIGTRAPping the runner — a missing-decorator fix, not a production bug. Full account:
+      `docs/history/ac-64-*.md`.
 - [x] **Done, PR #110 (merged 2026-10-09, `3ec41d5`).** G#62 / GH#109 — github: true — Reuse the
       Xlib connection in `detect_running()`, picked from `docs/ROADMAP.md`'s "Detection cost" item
       (the low-risk fix: connection reuse, not a full event-driven rearchitecture, which would
