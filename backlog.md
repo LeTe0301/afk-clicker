@@ -11,8 +11,9 @@ GitHub number. Shown below as **G#** / **GH#**.
 
 ## In progress
 
-Nothing in flight. All code-actionable backlog items are closed out; everything remaining needs
-Leo's decision or real hardware — see Housekeeping below (G#39, G#46, G#47) and Features (G#59).
+**G#65/GH#115 — Macro recording with real timings** — github: true — proposed by product-manager
+(prior triage, flagged as bigger than G#63/G#64), signed off by Leo 2026-10-11. Spec written:
+`docs/spec.md`. Next: ux-designer → developer → reviewer.
 
 ## Session handoff — 2026-10-10 (continued)
 
@@ -480,6 +481,15 @@ Bugs and residue:
       underline lands at the right y.
 
 Features:
+- [ ] **In progress — spec written, not yet built.** G#65 / GH#115 — github: true — Macro
+      recording with real timings, proposed by product-manager (flagged by prior triage as
+      bigger than G#63/G#64), signed off by Leo 2026-10-11. A Record/Stop toggle in the macro
+      editor dialog's Steps card captures real key down/up and mouse-click events via the
+      existing pynput listener stack (`kb.Listener` + `pynput.mouse.Listener`, no new
+      dependency), converting real inter-event gaps into `wait` steps and appending the result
+      to `ctx["steps"]` through the same `_validate_macro_step` schema manual steps already use
+      -- no schema, persistence, or `MacroRunner` change. Closes `docs/ROADMAP.md`'s own
+      "Recording with real timings... stays open for later" line. Full spec: `docs/spec.md`.
 - [x] **Done, PR #114 (merged 2026-10-11, `f38f680`).** G#64 / GH#113 — github: true — Duplicate
       a macro, proposed and signed off this session (Leo, 2026-10-11). Macro rows had Edit/Delete
       but no clone action; a "Duplicate" button copies a macro's name, hotkey, steps, and interval

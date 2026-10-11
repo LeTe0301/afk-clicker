@@ -367,6 +367,42 @@ def _dialog_label_containing(root_widget, substring):
     return found
 
 
+class _FakeListener:
+    """G#65/GH#115: stands in for pynput's kb.Listener/MouseListener in
+    MacroRecording's tests below -- captures the on_press/on_release/
+    on_click callbacks a real Listener would otherwise wire to a real
+    OS-level thread, so a test can fire a synthetic event by calling them
+    directly: deterministic, no Xvfb/XTest dependency, no flake risk. Same
+    "stub what would start a real listener" convention
+    test_register_hotkey_on_a_new_game_is_not_blocked_by_the_old_games_capture
+    already uses for capture_hotkey()."""
+
+    instances = []
+
+    def __init__(self, **callbacks):
+        self.__dict__.update(callbacks)
+        self.started = False
+        self.stopped = False
+        _FakeListener.instances.append(self)
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+    def join(self, timeout=None):
+        pass
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop()
+        return False
+
+
 class DeletedGames(UITestCase):
     """GH#96: deleting a custom game profile -- from self.profiles/by_id,
     from the sidebar, and from the persisted store, with the built-in
@@ -8556,6 +8592,104 @@ class MacroValidation(unittest.TestCase):
         self.assertIsNone(app._validate_macro(self._valid_blob(interval_ms=True)))
 
 
+class MacroRecorderLogic(unittest.TestCase):
+    """G#65/GH#115: MacroRecorder's gap/clamp/cap state machine, in
+    isolation from pynput and Tk -- see its own docstring in
+    afk_clicker.py. Every `now` is passed explicitly, so these are
+    deterministic and need no real clock, listener or display."""
+
+    def _rec(self, name):
+        return (name, None, None)   # same shape _record() returns for a
+                                     # named key
+
+    def test_the_first_event_ever_has_no_leading_wait(self):
+        # Spec open question 2: the reaction time between clicking Record
+        # and the first real action is not part of "what the user did".
+        recorder = app.MacroRecorder(0)
+        recorder.key_down(self._rec("f1"), now=100.0)
+        self.assertEqual(recorder.steps, [{"type": "key_down", "key": ["f1", None, None]}])
+
+    def test_a_key_press_and_release_with_a_pause_produces_wait_key_down_key_up(self):
+        recorder = app.MacroRecorder(0)
+        recorder.click("left", now=0.0)              # establishes t_prev
+        recorder.key_down(self._rec("f2"), now=1.5)  # 1500ms real pause before it
+        recorder.key_up(self._rec("f2"), now=1.5)    # released immediately -- no gap
+        self.assertEqual(recorder.steps, [
+            {"type": "click", "button": "left"},
+            {"type": "wait", "ms": 1500},
+            {"type": "key_down", "key": ["f2", None, None]},
+            {"type": "key_up", "key": ["f2", None, None]},
+        ])
+
+    def test_a_click_is_preceded_by_its_own_wait_and_every_button_maps(self):
+        for button in ("left", "right", "middle"):
+            with self.subTest(button=button):
+                recorder = app.MacroRecorder(0)
+                recorder.key_down(self._rec("f1"), now=0.0)
+                recorder.click(button, now=0.25)
+                self.assertEqual(recorder.steps[-2:], [
+                    {"type": "wait", "ms": 250},
+                    {"type": "click", "button": button},
+                ])
+
+    def test_an_unrecognised_button_is_ignored_and_does_not_advance_the_clock(self):
+        recorder = app.MacroRecorder(0)
+        recorder.key_down(self._rec("f1"), now=0.0)
+        self.assertTrue(recorder.click("x1", now=5.0))   # ignored, not an error
+        recorder.key_up(self._rec("f1"), now=5.0)
+        # the ignored click never touched t_prev, so the gap is still from
+        # the key_down at t=0 to this key_up at t=5 -- 5000ms, not 0.
+        self.assertEqual(recorder.steps[-1], {"type": "key_up", "key": ["f1", None, None]})
+        self.assertEqual(recorder.steps[1], {"type": "wait", "ms": 5000})
+
+    def test_a_gap_longer_than_the_cap_is_clamped_not_rejected(self):
+        recorder = app.MacroRecorder(0)
+        recorder.key_down(self._rec("f1"), now=0.0)
+        recorder.key_up(self._rec("f1"), now=(app.MACRO_MAX_WAIT_MS / 1000) + 30)
+        self.assertEqual(recorder.steps[1], {"type": "wait", "ms": app.MACRO_MAX_WAIT_MS})
+
+    def test_hitting_the_cap_auto_stops_and_keeps_everything_captured_so_far(self):
+        # existing_step_count close enough to MACRO_MAX_STEPS that the next
+        # wait+click pair (2 steps) does not fit.
+        recorder = app.MacroRecorder(app.MACRO_MAX_STEPS - 2)
+        self.assertTrue(recorder.key_down(self._rec("f1"), now=0.0))   # fits: existing+1
+        self.assertIsNone(recorder.stopped_reason)
+        self.assertFalse(recorder.click("left", now=1.0))    # wait+click -- does not fit
+        self.assertEqual(recorder.stopped_reason, "cap")
+        self.assertEqual(len(recorder.steps), 1,
+                         "the half-fitting pair must not be appended")
+        # once stopped, further events are refused outright
+        self.assertFalse(recorder.key_up(self._rec("f1"), now=2.0))
+        self.assertEqual(len(recorder.steps), 1)
+
+    def test_an_event_record_too_broken_to_validate_drops_its_wait_too(self):
+        # Review Defect #1: _record() can hand back (None, None, None) for a
+        # key pynput can't name/vk/char at all; _validate_key_record rejects
+        # that. The whole pair -- including its otherwise-valid wait -- must
+        # be dropped, never a lone wait with no event after it.
+        recorder = app.MacroRecorder(0)
+        recorder.key_down((None, None, "a"), now=0.0)
+        self.assertTrue(recorder.key_up((None, None, None), now=1.0))
+        self.assertEqual(recorder.steps, [{"type": "key_down", "key": [None, None, "a"]}],
+                         "an unvalidatable event must drop its wait too, not leave it dangling")
+
+
+class RecordingStoppedStatusText(unittest.TestCase):
+    """G#65/GH#115: _recording_stopped_text()'s exact copy (design S5/S6) --
+    a pure function, no dialog or listener needed to cover the wording."""
+
+    def test_the_cap_reason_names_the_limit(self):
+        self.assertEqual(app._recording_stopped_text("cap", 5),
+                         f"Stopped · {app.MACRO_MAX_STEPS}-step limit reached")
+
+    def test_zero_steps_captured(self):
+        self.assertEqual(app._recording_stopped_text(None, 0), "Stopped · no input captured")
+
+    def test_steps_captured_pluralizes(self):
+        self.assertEqual(app._recording_stopped_text(None, 1), "Stopped · 1 step added")
+        self.assertEqual(app._recording_stopped_text(None, 2), "Stopped · 2 steps added")
+
+
 class FakeKeyboard:
     """Records what MacroRunner asked for instead of sending real key
     events -- same style as FakeMouse above."""
@@ -8910,6 +9044,231 @@ class MacrosTab(UITestCase):
         self.assertTrue(thread.is_alive())
         self.ui.on_close()   # must not raise or hang
         self.assertFalse(thread.is_alive())
+
+
+class MacroRecording(UITestCase):
+    """G#65/GH#115: the macro editor's Record/Stop control
+    (_open_macro_editor's _toggle_recording/worker). kb.Listener and
+    MouseListener are stubbed with _FakeListener for every test here (see
+    its own docstring above) -- the on_press/on_release/on_click callbacks
+    are real, exercised directly, just never wired to a real OS listener."""
+
+    def setUp(self):
+        super().setUp()
+        self._original_kb_listener = kb.Listener
+        self._original_mouse_listener = app.MouseListener
+        kb.Listener = _FakeListener
+        app.MouseListener = _FakeListener
+        _FakeListener.instances = []
+
+    def tearDown(self):
+        kb.Listener = self._original_kb_listener
+        app.MouseListener = self._original_mouse_listener
+        super().tearDown()
+
+    def _open(self, macro=None):
+        self.ui._select("minecraft")
+        before = set(self.root.winfo_children())
+        self.ui._open_macro_editor(macro)
+        self.root.update()
+        new = [w for w in self.root.winfo_children()
+              if w not in before and isinstance(w, tk.Toplevel)]
+        return new[-1]
+
+    def _fakes(self):
+        """The kl, ml pair the worker just started."""
+        kl, ml = _FakeListener.instances[-2:]
+        return kl, ml
+
+    def _start_recording(self, dialog):
+        _find_button(dialog, "● Record").event_generate("<Button-1>")
+        self.pump_until(lambda: len(_FakeListener.instances) >= 2)
+        return self._fakes()
+
+    def _stop_recording(self, dialog):
+        # pump_until, not a direct self.ui._drain_ui() call: _drain_ui()
+        # unconditionally reschedules its own self.root.after(40, ...) job
+        # on every call (afk_clicker.py's own real, production behaviour),
+        # so an extra manual call here would overwrite self._timers["drain"]
+        # with a second, untracked job -- orphaned the moment this test's
+        # tearDown destroys root, firing "invalid command name" into a dead
+        # interpreter. Polling via root.update() lets the one job this
+        # dialog's own teardown already knows about do the draining.
+        _find_button(dialog, "■ Stop").event_generate("<Button-1>")
+        self.ui._macro_capture_thread.join(timeout=1.0)
+        self.pump_until(lambda: _dialog_label_containing(dialog, "Stopped"))
+
+    def test_a_key_press_and_release_with_a_pause_live_appends_wait_key_down_key_up(self):
+        dialog = self._open()
+        kl, ml = self._start_recording(dialog)
+        self.assertTrue(kl.started and ml.started)
+
+        kl.on_press(kb.Key.f6)
+        time.sleep(0.05)
+        kl.on_release(kb.Key.f6)
+        self.pump_until(lambda: _dialog_label_containing(dialog, "Key up: F6"))
+
+        self.assertTrue(_dialog_label_containing(dialog, "Key down: F6"))
+        self.assertTrue(_dialog_label_containing(dialog, "Key up: F6"))
+        self.assertTrue(_dialog_label_containing(dialog, "Wait"),
+                        "the real pause before release must show as its own wait step")
+
+        self._stop_recording(dialog)
+        dialog.destroy()
+
+    def test_a_left_click_appends_its_own_wait_and_click_step(self):
+        dialog = self._open()
+        kl, ml = self._start_recording(dialog)
+        # G#65 design "Stop-click suppression": a click within 0.3s of the
+        # Record press is dropped as a ceiling case -- see the dedicated
+        # suppression test below. Clear that window before this click.
+        time.sleep(0.35)
+        ml.on_click(0, 0, app.MouseButton.left, True)
+        ml.on_click(0, 0, app.MouseButton.left, False)   # release -- no `pressed`, ignored
+        self.pump_until(lambda: _dialog_label_containing(dialog, "Click: left"))
+
+        self.assertTrue(_dialog_label_containing(dialog, "Click: left"))
+        self._stop_recording(dialog)
+        dialog.destroy()
+
+    def test_right_and_middle_clicks_map_to_their_own_names(self):
+        for button, label in ((app.MouseButton.right, "right"), (app.MouseButton.middle, "middle")):
+            with self.subTest(button=label):
+                dialog = self._open()
+                kl, ml = self._start_recording(dialog)
+                time.sleep(0.35)
+                ml.on_click(0, 0, button, True)
+                self.pump_until(lambda: _dialog_label_containing(dialog, f"Click: {label}"))
+                self.assertTrue(_dialog_label_containing(dialog, f"Click: {label}"))
+                self._stop_recording(dialog)
+                dialog.destroy()
+
+    def test_a_click_right_after_toggling_record_is_suppressed(self):
+        # The Stop/Record press is itself real mouse input this same
+        # listener sees -- design "Stop-click suppression".
+        dialog = self._open()
+        kl, ml = self._start_recording(dialog)
+        ml.on_click(0, 0, app.MouseButton.left, True)   # fired right after Record
+        self.pump(0.1)   # nothing should land -- no predicate to pump_until on
+        self.assertFalse(_dialog_label_containing(dialog, "Click: left"))
+        self._stop_recording(dialog)
+        dialog.destroy()
+
+    def test_hitting_the_cap_mid_recording_auto_stops_with_visible_feedback(self):
+        filler = [{"type": "wait", "ms": 1} for _ in range(app.MACRO_MAX_STEPS - 1)]
+        macro = {"id": "full", "name": "Nearly full", "hotkey": None, "steps": filler}
+        dialog = self._open(macro)
+        kl, ml = self._start_recording(dialog)
+        kl.on_press(kb.Key.f6)          # 1 more step -- fits exactly at MACRO_MAX_STEPS
+        self.pump_until(lambda: _dialog_label_containing(dialog, "Key down: F6"))
+        kl.on_release(kb.Key.f6)        # wait+key_up (2 more) does not fit -- auto-stop
+        self.pump_until(lambda: _dialog_label_containing(
+            dialog, f"Stopped · {app.MACRO_MAX_STEPS}-step limit reached"))
+        self.assertTrue(_dialog_label_containing(
+            dialog, f"Stopped · {app.MACRO_MAX_STEPS}-step limit reached"))
+        self.assertEqual(self.ui.store.game("minecraft").get("macros", []), [],
+                         "nothing is saved until Save is clicked")
+        dialog.destroy()
+
+    def test_record_is_refused_when_the_step_list_is_already_full(self):
+        filler = [{"type": "wait", "ms": 1} for _ in range(app.MACRO_MAX_STEPS)]
+        macro = {"id": "full", "name": "Already full", "hotkey": None, "steps": filler}
+        dialog = self._open(macro)
+        _find_button(dialog, "● Record").event_generate("<Button-1>")
+        self.root.update()
+        self.assertEqual(_FakeListener.instances, [],
+                         "no listener may start when there's no room left to capture into")
+        self.assertTrue(_dialog_label_containing(
+            dialog, f"Step list is full ({app.MACRO_MAX_STEPS} of {app.MACRO_MAX_STEPS})"))
+        self.assertTrue(_find_button(dialog, "● Record")._enabled,
+                        "Record stays usable, it just refuses to start")
+        dialog.destroy()
+
+    def test_permission_denied_shows_the_message_and_starts_no_listener(self):
+        dialog = self._open()
+        original = app.macos_input_permitted
+        app.macos_input_permitted = lambda: False
+        try:
+            record_btn = _find_button(dialog, "● Record")
+            record_btn.event_generate("<Button-1>")
+            self.pump_until(lambda: _dialog_label_containing(
+                dialog, "Accessibility permission not granted"))
+        finally:
+            app.macos_input_permitted = original
+        self.assertEqual(_FakeListener.instances, [], "no listener must be constructed")
+        self.assertTrue(_dialog_label_containing(dialog, "Accessibility permission not granted"))
+        self.assertTrue(_find_button(dialog, "● Record")._enabled,
+                        "the optimistic Starting state must revert")
+        dialog.destroy()
+
+    def test_recording_is_blocked_while_another_capture_is_mid_flight(self):
+        dialog = self._open()
+        hold = threading.Event()
+        self.ui._macro_capture_thread = threading.Thread(target=hold.wait, daemon=True)
+        self.ui._macro_capture_thread.start()
+        try:
+            _find_button(dialog, "● Record").event_generate("<Button-1>")
+            self.root.update()
+            self.assertEqual(_FakeListener.instances, [],
+                             "recording must not start while another capture is busy")
+            self.assertTrue(_dialog_label_containing(dialog, "Record real keys and clicks"),
+                            "the idle hint must still be showing, unchanged")
+        finally:
+            hold.set()
+            self.ui._macro_capture_thread.join(timeout=1.0)
+        dialog.destroy()
+
+    def test_other_capture_flows_are_blocked_while_recording_is_active(self):
+        dialog = self._open()
+        self._start_recording(dialog)
+        recording_thread = self.ui._macro_capture_thread
+        self.assertTrue(recording_thread.is_alive())
+
+        _find_button(dialog, "Record").event_generate("<Button-1>")   # the hotkey row's own
+        self.root.update()
+        self.assertIs(self.ui._macro_capture_thread, recording_thread,
+                      "hotkey capture must not replace the live recording thread")
+
+        _find_button(dialog, "Capture").event_generate("<Button-1>")  # the step-key capture
+        self.root.update()
+        self.assertIs(self.ui._macro_capture_thread, recording_thread,
+                      "key capture must not replace the live recording thread either")
+
+        self._stop_recording(dialog)
+        dialog.destroy()
+
+    def test_cancel_mid_recording_stops_the_thread_and_discards_nothing_yet_saved(self):
+        before = list(self.ui.store.game("minecraft").get("macros", []))
+        dialog = self._open()
+        kl, ml = self._start_recording(dialog)
+        kl.on_press(kb.Key.f6)
+        kl.on_release(kb.Key.f6)
+        self.pump_until(lambda: _dialog_label_containing(dialog, "Key down: F6"))
+        self.assertTrue(_dialog_label_containing(dialog, "Key down: F6"),
+                        "setup: the key pair should have live-appended")
+        thread = self.ui._macro_capture_thread
+        self.assertTrue(thread.is_alive())
+
+        _find_button(dialog, "Cancel").event_generate("<Button-1>")
+        self.root.update()
+        thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive(), "the capture thread must be stopped by Cancel")
+        self.assertEqual(self.ui.store.game("minecraft").get("macros", []), before,
+                         "nothing captured during a cancelled recording reaches the store")
+
+    def test_closing_the_window_mid_recording_stops_the_thread(self):
+        dialog = self._open()
+        self._start_recording(dialog)
+        thread = self.ui._macro_capture_thread
+        self.assertTrue(thread.is_alive())
+        # Simulates a real window manager's close button: WM_DELETE_WINDOW's
+        # bound handler is a Tcl command under the hood, so invoking it by
+        # name is how a test (no WM under Xvfb) reaches it without destroy()
+        # bypassing the hook this test exists to exercise.
+        dialog.tk.call(dialog.protocol("WM_DELETE_WINDOW"))
+        self.root.update()
+        thread.join(timeout=1.0)
+        self.assertFalse(thread.is_alive(), "window-close must stop the capture thread")
 
 
 class MacroIntervals(UITestCase):

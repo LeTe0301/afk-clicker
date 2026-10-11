@@ -43,7 +43,7 @@ from tkinter import font as tkfont
 from pynput import keyboard as kb
 # Imported under a different name: the Tk widget class below is also called
 # Button, and the shadowing turned every mouse action into an AttributeError.
-from pynput.mouse import Button as MouseButton, Controller
+from pynput.mouse import Button as MouseButton, Controller, Listener as MouseListener
 
 # ── palette ───────────────────────────────────────────────────────────────
 # Two named palettes (ticket #17 / mock "Chosen": Deepslate for dark, Quartz
@@ -828,6 +828,91 @@ def _key_from_record(rec):
     if vk is not None:
         return kb.KeyCode(vk=vk)
     return None
+
+
+class MacroRecorder:
+    """Turns a stream of real key/mouse events into the macro editor's
+    Record control (G#65): the same wait/key_down/key_up/click step shape
+    _add_step() already builds, with the real gap since the previous
+    captured event as a clamped `wait`. Pure -- no pynput/Tk import, no
+    listener -- so _open_macro_editor()'s worker thread is the only place
+    that touches a real Listener, and this gap/clamp/cap state machine can
+    be tested directly by calling its methods, with an explicit `now`
+    instead of a real clock.
+
+    `existing_step_count` is the macro's step count *before* this recording
+    session, so MACRO_MAX_STEPS accounts for steps already in the dialog's
+    list, not just what this session captures.
+    """
+
+    def __init__(self, existing_step_count):
+        self._existing = existing_step_count
+        self._t_prev = None          # None until the first event -- the
+                                      # reaction time before it is not part
+                                      # of "what the user did" (spec open Q2)
+        self.steps = []
+        self.stopped_reason = None   # None while active, else "cap"
+        # kb.Listener and MouseListener each call in from their own OS
+        # thread -- guards the check-then-append sequence below so a real
+        # concurrent key+click can't interleave mid-mutation.
+        self._lock = threading.Lock()
+
+    @property
+    def total_count(self):
+        return self._existing + len(self.steps)
+
+    def _gap_step(self, now):
+        if self._t_prev is None:
+            self._t_prev = now
+            return None
+        ms = max(0, min(MACRO_MAX_WAIT_MS, int(round((now - self._t_prev) * 1000))))
+        self._t_prev = now
+        return {"type": "wait", "ms": ms} if ms > 0 else None
+
+    def _append_pair(self, event_step, now):
+        """Appends [gap?, event_step] as one unit if it fits under
+        MACRO_MAX_STEPS and both steps validate, else drops the whole pair
+        -- never a lone wait with its event missing."""
+        with self._lock:
+            if self.stopped_reason is not None:
+                return False
+            gap_step = self._gap_step(now)
+            pair = ([gap_step] if gap_step else []) + [event_step]
+            if self.total_count + len(pair) > MACRO_MAX_STEPS:
+                self.stopped_reason = "cap"
+                return False
+            validated = [_validate_macro_step(step) for step in pair]
+            if any(v is None for v in validated):
+                return True   # not a cap/stop condition -- just drop silently
+            self.steps.extend(validated)
+            return True
+
+    def key_down(self, rec, now=None):
+        return self._append_pair({"type": "key_down", "key": list(rec)},
+                                 now if now is not None else time.monotonic())
+
+    def key_up(self, rec, now=None):
+        return self._append_pair({"type": "key_up", "key": list(rec)},
+                                 now if now is not None else time.monotonic())
+
+    def click(self, button, now=None):
+        if button not in MACRO_BUTTONS:
+            return True      # e.g. Button.x1 -- ignored, not an error, and
+                              # the clock does not advance for it either
+        return self._append_pair({"type": "click", "button": button},
+                                 now if now is not None else time.monotonic())
+
+
+def _recording_stopped_text(reason, captured_n):
+    """Status copy shown once recording stops (design S5/S6) -- a pure
+    function so the exact wording is covered by a test without an open
+    dialog or a real listener."""
+    if reason == "cap":
+        return f"Stopped · {MACRO_MAX_STEPS}-step limit reached"
+    if captured_n:
+        plural = "" if captured_n == 1 else "s"
+        return f"Stopped · {captured_n} step{plural} added"
+    return "Stopped · no input captured"
 
 
 class MacroRunner:
@@ -6075,8 +6160,171 @@ class AfkAutoclicker:
         tk.Label(body, text="Steps", bg=BG, fg=INK, anchor="w",
                 font=("Segoe UI", fs(9.5, s))).pack(fill="x", pady=(int(14 * s), 0))
         steps_card = card(body, s)
+
+        # G#65: Record/Stop toggle, above steps_list so it stays visible as
+        # the list grows (docs/design.md "Layout"). `recording` is this
+        # dialog's one mutable record of the active session, mirroring how
+        # `ctx` is this dialog's one record of the macro being edited:
+        # `token` guards a stale worker callback from touching a widget
+        # after Cancel/close bumps it (design "Session guard"); `start_len`
+        # is where this session's own captured steps begin in ctx["steps"],
+        # so the status line can show this session's own count.
+        recording = {"stop_event": None, "token": 0, "start_len": 0,
+                     "last_toggle_at": 0.0}
+        record_row = tk.Frame(steps_card, bg=CARD)
+        record_row.pack(fill="x")
+
+        def _stop_recording():
+            """Cancel/close mid-recording (design "Save and Cancel"): stops
+            the worker and bumps the session token first, so any event
+            already queued in self._ui_queue is a no-op once drained.
+            Cancel's existing "discards it all" contract is untouched --
+            Cancel still never calls _save_macro."""
+            stop_event = recording["stop_event"]
+            if stop_event is None:
+                return
+            stop_event.set()
+            recording["token"] += 1
+            if self._macro_capture_thread is not None:
+                self._macro_capture_thread.join(timeout=1.0)
+            recording["stop_event"] = None
+
+        def _apply_capture(token, recorder):
+            if token != recording["token"]:
+                return    # stale -- the dialog cancelled/closed since this
+                          # was queued (design "Session guard")
+            ctx["steps"][recording["start_len"]:] = recorder.steps
+            _render_steps()
+            n = len(recorder.steps)
+            if n:
+                record_status.config(
+                    text=f"● Recording · {n} step{'' if n == 1 else 's'}", fg=ACCENT)
+
+        def _apply_refusal(token, message):
+            if token != recording["token"]:
+                return
+            recording["stop_event"] = None
+            record_btn.set_text("● Record")
+            record_btn.set_primary(False)
+            record_btn.set_enabled(True)
+            add_btn.set_enabled(True)
+            save_btn.set_enabled(True)
+            record_status.config(text=message, fg=BAD)
+
+        def _apply_done(token, reason, recorder):
+            if token != recording["token"]:
+                return
+            ctx["steps"][recording["start_len"]:] = recorder.steps
+            _render_steps()
+            recording["stop_event"] = None
+            record_btn.set_text("● Record")
+            record_btn.set_primary(False)
+            record_btn.set_enabled(True)
+            add_btn.set_enabled(True)
+            save_btn.set_enabled(True)
+            record_status.config(
+                text=_recording_stopped_text(reason, len(recorder.steps)), fg=INK)
+
+        def _toggle_recording():
+            recording["last_toggle_at"] = time.monotonic()
+            if recording["stop_event"] is not None:
+                # Stop: checked before the busy-check below, which would
+                # otherwise block Stop itself -- the recording thread it
+                # guards against is this one (design "Busy-check vs Stop").
+                recording["stop_event"].set()
+                record_btn.set_enabled(False)
+                record_status.config(text="Stopping…", fg=MUTED)
+                return
+            if self._macro_capture_thread and self._macro_capture_thread.is_alive():
+                return    # a hotkey/single-key capture is mid-flight
+            if len(ctx["steps"]) >= MACRO_MAX_STEPS:
+                record_status.config(
+                    text=f"Step list is full ({MACRO_MAX_STEPS} of {MACRO_MAX_STEPS})",
+                    fg=BAD)
+                return
+            recording["token"] += 1
+            token = recording["token"]
+            recording["start_len"] = len(ctx["steps"])
+            stop_event = threading.Event()
+            recording["stop_event"] = stop_event
+            record_btn.set_text("■ Stop")
+            record_btn.set_primary(True)
+            add_btn.set_enabled(False)
+            save_btn.set_enabled(False)
+            record_status.config(text="● Recording · waiting for input", fg=ACCENT)
+
+            def worker():
+                if not macos_input_permitted():
+                    self._ui(lambda: _apply_refusal(
+                        token, "Accessibility permission not granted"))
+                    return
+                recorder = MacroRecorder(recording["start_len"])
+
+                def on_press(key):
+                    if stop_event.is_set():
+                        return False
+                    recorder.key_down(_record(key))
+                    self._ui(lambda: _apply_capture(token, recorder))
+                    if recorder.stopped_reason:
+                        stop_event.set()
+                        return False
+
+                def on_release(key):
+                    if stop_event.is_set():
+                        return False
+                    recorder.key_up(_record(key))
+                    self._ui(lambda: _apply_capture(token, recorder))
+                    if recorder.stopped_reason:
+                        stop_event.set()
+                        return False
+
+                def on_click(x, y, button, pressed):
+                    if not pressed or stop_event.is_set():
+                        return
+                    # G#65 ponytail: Stop's own click is seen by this same
+                    # listener. 0.3s is a ceiling, not a precise fix -- a
+                    # real click thrown within 0.3s of Stop is the one case
+                    # this also drops; a click-origin check is the upgrade
+                    # if that ever matters.
+                    if time.monotonic() - recording["last_toggle_at"] < 0.3:
+                        return
+                    name = {MouseButton.left: "left", MouseButton.right: "right",
+                           MouseButton.middle: "middle"}.get(button)
+                    if name is None:
+                        return    # e.g. Button.x1 -- not in MACRO_BUTTONS
+                    recorder.click(name)
+                    self._ui(lambda: _apply_capture(token, recorder))
+                    if recorder.stopped_reason:
+                        stop_event.set()
+                        return False
+
+                try:
+                    kl = kb.Listener(on_press=on_press, on_release=on_release)
+                    ml = MouseListener(on_click=on_click)
+                    kl.start()
+                    ml.start()
+                except Exception as exc:
+                    self._ui(lambda: _apply_refusal(token, str(exc)))
+                    return
+                try:
+                    stop_event.wait()
+                finally:
+                    kl.stop()
+                    ml.stop()
+                    kl.join()
+                    ml.join()
+                self._ui(lambda: _apply_done(token, recorder.stopped_reason, recorder))
+            self._macro_capture_thread = threading.Thread(target=worker, daemon=True)
+            self._macro_capture_thread.start()
+
+        record_btn = Button(record_row, "● Record", _toggle_recording, s, width=100)
+        record_btn.pack(side="left")
+        record_status = tk.Label(record_row, text="Record real keys and clicks", bg=CARD,
+                                 fg=MUTED, anchor="w", font=("Segoe UI", fs(9, s)))
+        record_status.pack(side="left", padx=(int(10 * s), 0))
+
         steps_list = tk.Frame(steps_card, bg=CARD)
-        steps_list.pack(fill="x")
+        steps_list.pack(fill="x", pady=(int(10 * s), 0))
 
         def _render_steps():
             for child in steps_list.winfo_children():
@@ -6188,8 +6436,8 @@ class AfkAutoclicker:
             captured_key["rec"] = None
             key_status.config(text="(no key)", fg=MUTED)
             _render_steps()
-        Button(add_row, "+ Add step", _add_step, s, width=100
-              ).pack(side="right")
+        add_btn = Button(add_row, "+ Add step", _add_step, s, width=100)
+        add_btn.pack(side="right")
 
         error_label = tk.Label(body, text="", bg=BG, fg=BAD,
                                font=("Segoe UI", fs(9, s)))
@@ -6199,7 +6447,9 @@ class AfkAutoclicker:
         btns.pack(fill="x", pady=(int(12 * s), 0))
 
         def _cancel():
+            _stop_recording()
             dialog.destroy()
+        dialog.protocol("WM_DELETE_WINDOW", _cancel)
 
         def _save():
             name = name_var.get().strip()
@@ -6218,7 +6468,8 @@ class AfkAutoclicker:
                 return
             dialog.destroy()
         Button(btns, "Cancel", _cancel, s, width=100).pack(side="left")
-        Button(btns, "Save", _save, s, width=100, primary=True).pack(side="right")
+        save_btn = Button(btns, "Save", _save, s, width=100, primary=True)
+        save_btn.pack(side="right")
 
     # ---------- run control ----------
 
