@@ -4867,6 +4867,68 @@ class PrimaryButtonTheme(unittest.TestCase):
         self.assertEqual(b.itemcget(b.label, "fill"), app.ACCENT_INK)
 
 
+def _contrast(hex_a, hex_b):
+    """WCAG 2.x contrast ratio between two '#rrggbb' hex colors -- relative
+    luminance with sRGB linearization (0.03928 threshold), same formula
+    docs/history/ac-64-design.md computed by hand for LINE-on-CARD."""
+
+    def luminance(hexval):
+        r, g, b = (int(hexval[i:i + 2], 16) / 255 for i in (1, 3, 5))
+
+        def lin(c):
+            return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+        r, g, b = lin(r), lin(g), lin(b)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    l_a, l_b = luminance(hex_a), luminance(hex_b)
+    lighter, darker = max(l_a, l_b), min(l_a, l_b)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+@needs_display
+class ButtonOutlineContrast(unittest.TestCase):
+    """G#66/GH#117: Button's outline (MUTED) must clear WCAG 1.4.11's 3:1
+    non-text-contrast floor against CARD in both themes -- LINE (the old
+    outline) measured 1.58:1/1.43:1 and failed it. Builds a real Button and
+    reads back its actual rendered outline (the instantiate-and-inspect
+    pattern PrimaryButtonTheme above already uses), instead of asserting on
+    THEMES["MUTED"] directly -- asserting the dict value alone can't catch
+    Button still painting with LINE if that regresses."""
+
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.update()
+
+    def tearDown(self):
+        self.root.destroy()
+        # Unconditional: no later test in the suite may inherit light/dark.
+        app.set_active_theme("dark")
+
+    def _outline(self, theme_name, enabled):
+        app.set_active_theme(theme_name)
+        b = app.Button(self.root, "Go", lambda: None, 1.0)
+        if not enabled:
+            b.set_enabled(False)
+        return b.itemcget(b.shape, "outline")
+
+    def test_dark_enabled_clears_3_to_1(self):
+        outline = self._outline("dark", enabled=True)
+        self.assertGreaterEqual(_contrast(outline, app.THEMES["dark"]["CARD"]), 3.0)
+
+    def test_dark_disabled_clears_3_to_1(self):
+        outline = self._outline("dark", enabled=False)
+        self.assertGreaterEqual(_contrast(outline, app.THEMES["dark"]["CARD"]), 3.0)
+
+    def test_light_enabled_clears_3_to_1(self):
+        outline = self._outline("light", enabled=True)
+        self.assertGreaterEqual(_contrast(outline, app.THEMES["light"]["CARD"]), 3.0)
+
+    def test_light_disabled_clears_3_to_1(self):
+        outline = self._outline("light", enabled=False)
+        self.assertGreaterEqual(_contrast(outline, app.THEMES["light"]["CARD"]), 3.0)
+
+
 @needs_display
 class CardShell(CapturesCallbackExceptions, unittest.TestCase):
     """card() becomes a borderless canvas hosting the returned Frame."""
