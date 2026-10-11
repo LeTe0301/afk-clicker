@@ -9051,6 +9051,7 @@ class DuplicateMacro(UITestCase):
         self.assertIn(duplicate["id"], calls,
                      "the duplicate's own armed interval timer never fired it")
 
+    @needs_input_permission
     def test_duplicating_does_not_alter_or_remove_the_original(self):
         self.ui._select("minecraft")
         hotkey = app.Hotkey({"ctrl"}, [(None, None, "m")])
