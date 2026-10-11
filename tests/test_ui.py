@@ -4092,6 +4092,15 @@ class AssetDir(unittest.TestCase):
 class AppIcon(UITestCase):
     """root.iconphoto(), wired near root.title() in AfkAutoclicker.__init__."""
 
+    def tearDown(self):
+        super().tearDown()
+        # Unconditional: no later test in the suite may inherit Quartz.
+        # (G#67/GH#118: test_icon_reference_survives_a_rebuild below flips
+        # to "light" and this class had nothing restoring "dark" -- that
+        # leak is what Themes::test_module_globals_still_ship_dark_only
+        # was catching whenever it ran after this class.)
+        app.set_active_theme("dark")
+
     def test_icon_images_are_loaded_non_empty(self):
         self.assertTrue(self.ui._icon_imgs)
         for img in self.ui._icon_imgs:
@@ -4305,6 +4314,26 @@ class Themes(unittest.TestCase):
         self.assertEqual(app.CARD_INNER_W,
                          app.CONTENT_W - 2 * app.CONTENT_PAD - 2 * app.CARD_PAD)
         self.assertEqual(app.CARD_INNER_W, 396)
+
+
+class ThemeDoesNotLeakBetweenTestClasses(unittest.TestCase):
+    """G#67/GH#118 regression: AppIcon had no tearDown restoring the theme,
+    so test_icon_reference_survives_a_rebuild's _apply_appearance("light")
+    leaked into whatever ran next -- Themes::test_module_globals_still_ship_
+    dark_only failed whenever it ran straight after AppIcon (confirmed via
+    `python -m unittest tests.test_ui.AppIcon tests.test_ui.Themes -v`
+    pre-fix). Runs that exact pair as its own sub-suite so a future class
+    that forgets the same reset fails loudly here too, regardless of where
+    either class lands in the module's own alphabetical discovery order."""
+
+    def test_app_icon_then_themes_leaves_dark_restored(self):
+        suite = unittest.TestSuite()
+        suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(AppIcon))
+        suite.addTest(unittest.defaultTestLoader.loadTestsFromTestCase(Themes))
+        result = unittest.TestResult()
+        suite.run(result)
+        self.assertTrue(result.wasSuccessful(),
+                        f"failures={result.failures!r} errors={result.errors!r}")
 
 
 @needs_display
