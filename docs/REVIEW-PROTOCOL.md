@@ -1,10 +1,10 @@
-# Review protocol — one in-depth pass
+# Review protocol — one pass, in depth
 
-The review agent runs every pull request through **one** review, in depth,
-before anything is merged. The ten sections below are the lenses that review
-covers, in order — not ten separate reviews. Each is a different way of looking
-at the same diff; a change that survives one can still fail the next, which is
-why they are listed separately rather than blurred into "review the code".
+Every pull request gets **one** in-depth review before merge, by the `reviewer`
+agent in PR mode. The lenses below are the checklist for that single pass — not
+separate reviews. Each is a different way of looking at the same diff; a change
+that survives one can still fail the next, which is why they are listed
+separately rather than blurred into "review the code".
 
 Depth is the point. One lens examined properly, with something actually run,
 beats ten passes that each re-read the diff. The ten-round loop this document
@@ -38,11 +38,14 @@ reference document disagree, the reference document wins:
 
 Does the change do what the ticket says, and only that?
 
-Read the linked issue first. Flag work that exceeds the ticket as much as work
-that falls short of it: an unrelated refactor riding along in a bug-fix PR
-makes both harder to review and impossible to revert cleanly. Check the branch
-name matches `feature/{ab}-{ticket}/{description}` or
-`hotfix/{ab}-{ticket}/{description}`, and that the ticket number is real.
+Read the linked Gitea issue (`admin/afk-clicker#n`) and its GitHub mirror
+first — the two numbers differ (`backlog.md` writes them **G#** / **GH#**).
+Flag work that exceeds the ticket as much as work that falls short of it: an
+unrelated refactor riding along in a bug-fix PR makes both harder to review and
+impossible to revert cleanly. Check the branch name matches
+`feature/afk-{ticket}/{description}` or `hotfix/afk-{ticket}/{description}` —
+or an older `ac-{ticket}` name opened before 2026-10-20 — and that the ticket
+number is real.
 
 ## 2. Correctness
 
@@ -54,29 +57,31 @@ inputs and the wrong result — not a category of concern. If you cannot name a
 failing case, the finding is speculation, and speculation is a `CONCERN` at
 most.
 
-## 3. Threading and Tk safety
+## 3. Security and access
 
-`CODING-GUIDELINES.md`: **only the main thread may touch Tk.** Not a widget,
-not a `StringVar`, not `root.after()`.
+There is no server and no account here. The boundary is what the program
+downloads and executes, and the one write token in the release pipeline.
 
-Check every new or moved line that runs off the main thread:
-- Does it read a widget or a Tk variable? It must read the settings snapshot.
-- Does it schedule UI work? It must go through `_ui()`.
-- Does a new repeating `after()` job get cancelled in `on_close`?
-- Can two workers exist at once? `start()` joins the old one for a reason.
+- **The updater** downloads a release archive over HTTPS and then executes it.
+  Does the change keep the `SHA256SUMS` check before anything is extracted, the
+  refusal of a release that publishes no checksums, and the refusal of archive
+  entries that escape the staging directory (`ROADMAP.md`, "Update integrity")?
+- **Anything from the network that reaches `write_swap_script`** is validated
+  at the source, not escaped downstream. A GitHub release tag once flowed
+  unvalidated into the generated swap script — a command injection
+  (`docs/history/README.md`, G#36).
+- **Workflows:** an `${{ }}` expression inside a `run:` script is pasted in as
+  text before the shell parses it, so inputs go through `env:`. Permissions are
+  declared per job and only `publish` holds `contents: write`; an action that
+  holds a write token is **pinned to a full commit SHA** — a tag can be moved.
+  `release.yml` currently pins `softprops/action-gh-release@v2.0.8`, a tag,
+  although its comment says "pinned to a commit" (G#70 / GH#124).
+- Secrets in code, logs, the bundle or a URL are a `BLOCKER`.
 
-This round has caught a silent worker-thread death before. Treat a violation as
-a `BLOCKER` even when the code appears to work.
+Is there a test proving the *refusal* — a tampered archive, an escaping entry,
+a hostile tag — and not only the success?
 
-## 4. Naming and shadowing
-
-Does any new name shadow an import, a builtin, or an existing class?
-
-The Tk widget class `Button` once shadowed `pynput.mouse.Button` and turned
-every `Button.right` in the click loop into a latent `AttributeError` that only
-the eating path reached. Check the module namespace, not just the diff.
-
-## 5. Untrusted input
+## 4. Untrusted input and failure behaviour
 
 Anything from disk, the network, or a text field is untrusted.
 
@@ -87,28 +92,14 @@ Anything from disk, the network, or a text field is untrusted.
 - Does a numeric field get clamped at the point of use, not at entry?
 - Does downloaded content get executed without a check?
 
-## 6. Tech stack conformance
+Then the failure path (`CODING-GUIDELINES.md`, "Failure behaviour"): does a
+failure say what went wrong and what would fix it — "GitHub unreachable" and
+"no release published" are different problems? Does every exit path leave
+nothing half-done: no mouse button or key still held (`_release_right()` and
+`MacroRunner` release in a `finally`), no `settings.json.tmp` left behind
+(G#41)?
 
-`TECHSTACK.md` is not a list of preferences.
-
-- A new third-party dependency is a `BLOCKER` unless the PR argues it and the
-  ticket agreed to it beforehand.
-- Build flags: no `--onefile`, no UPX, every pynput backend in
-  `--hidden-import`, `--selftest` still exercised.
-- Anything resolved at import time needs a matching hidden import.
-
-## 7. Cross-platform behaviour
-
-The project ships Windows, Linux and macOS from one source file.
-
-For each changed code path, ask what it does on the other two. Path
-separators, `%APPDATA%` versus `~/.config`, the `.app` bundle nesting, X11
-versus Wayland, `ditto` versus `zip`. A platform branch with no `else` is a
-finding. macOS is the least verified target — changes touching it deserve
-scepticism, and say so plainly rather than implying coverage that does not
-exist.
-
-## 8. Tests
+## 5. Tests
 
 **First, mechanically: is there a test at all?** Name the file and the test, or
 write `no test`. This question comes first because the calibration run showed
@@ -123,45 +114,112 @@ Then: every fix lands with a test that fails without it.
   delivers every synthetic press **twice** — exact fire counts across several
   presses measure the harness.
 - Do network tests skip cleanly offline rather than failing?
-- Is a slow test in the right place — the release suite, not the PR suite?
+- Is a slow test in the right place — the release suite (`AFK_SLOW_TESTS=1`),
+  not the PR suite?
+- Did you run the suite (the commands are in `AGENTS.md`), and what was the
+  result? Say which platforms the evidence covers — a local Linux run is not
+  the Windows or macOS result; the PR's CI matrix is.
 
-## 9. Comments and documentation
+## 6. Tech stack conformance
+
+`TECHSTACK.md` is not a list of preferences.
+
+- A new third-party dependency is a `BLOCKER` unless the PR argues it and the
+  ticket agreed to it beforehand.
+- Build flags: no `--onefile`, no UPX, every pynput backend in
+  `--hidden-import`, `--selftest` still exercised.
+- Anything resolved at import time needs a matching hidden import.
+- The PyInstaller `--name "AFK Farm Clicker"` stays: every installed copy's
+  swap script relaunches that exact path (`release.yml`,
+  `docs/history/ac-33-implementation.md`).
+
+## 7. Comments and documentation
 
 `CODING-GUIDELINES.md`: comment the **why**, never the what.
 
 - Does every non-obvious constant carry its reason?
 - Is there a comment that merely restates the code? That is noise; flag it.
-- Did behaviour change without the README changing?
+- Did behaviour change without the README or `AGENTS.md` changing?
 - If a constraint was discovered here, is it written down where the next person
   will look — or only in this PR's description, where it will be lost?
+- Does a comment cite a per-cycle doc (`docs/spec.md`, `docs/test-review.md`,
+  …)? Those are never committed; the citation must point at the archived copy
+  in `docs/history/` (`docs/history/README.md`).
 
-## 10. Roadmap and release readiness
+## 8. Scope, roadmap and release readiness
 
 - Does this move something on `ROADMAP.md`? Update it if so.
 - Does it do something the roadmap explicitly rules out? That is a `BLOCKER`
   regardless of quality.
 - Versioning: below `1.0.0`, minor and patch only. A fix to a released version
-  is a patch on its own tag.
-- Does the settings format change? Without a schema version there is no
-  migration path, and users lose their per-game values silently.
+  is a patch on its own tag. The version source is `afk_clicker.py`'s
+  `__version__`, which must match the `release/{version}` branch.
+- Does the settings format change? Without a `SETTINGS_VERSION` bump and a
+  migration in `_SETTINGS_MIGRATIONS` there is no migration path, and users
+  lose their per-game values silently.
+
+## Simplicity (ponytail-review)
+
+Run `ponytail:ponytail-review` on the diff and fold its findings into one
+verdict here: reinvented standard library, unneeded dependencies, speculative
+abstraction, dead flexibility. Judge each finding yourself — a cut that would
+break a test convention or an acceptance criterion is not a finding.
+
+## Domain lenses
+
+### Threading and Tk safety
+
+`CODING-GUIDELINES.md`: **only the main thread may touch Tk.** Not a widget,
+not a `StringVar`, not `root.after()`.
+
+Check every new or moved line that runs off the main thread:
+- Does it read a widget or a Tk variable? It must read the settings snapshot.
+- Does it schedule UI work? It must go through `_ui()`.
+- Does a new repeating `after()` job get cancelled in `on_close`?
+- Can two workers exist at once? `start()` joins the old one for a reason.
+
+This lens has caught a silent worker-thread death before. Treat a violation as
+a `BLOCKER` even when the code appears to work.
+
+### Naming and shadowing
+
+Does any new name shadow an import, a builtin, or an existing class?
+
+The Tk widget class `Button` once shadowed `pynput.mouse.Button` and turned
+every `Button.right` in the click loop into a latent `AttributeError` that only
+the eating path reached. Check the module namespace, not just the diff.
+
+### Cross-platform behaviour
+
+The project ships Windows, Linux and macOS from one source file.
+
+For each changed code path, ask what it does on the other two. Path
+separators, `%APPDATA%` versus `~/.config`, the `.app` bundle nesting, X11
+versus Wayland, `ditto` versus `zip`. A platform branch with no `else` is a
+finding. macOS is the least verified target — changes touching it deserve
+scepticism, and say so plainly rather than implying coverage that does not
+exist.
 
 ---
 
 ## Reporting
 
-Post one comment on the pull request containing all ten lenses, in order, each
-with its verdict and evidence. Then a closing block:
+Post **one** comment on the pull request: every lens in order, each with its
+verdict and evidence, then:
 
 ```
 VERDICT: MERGE | ANOTHER ROUND
 BLOCKERS: <count>
 CONCERNS: <count>
+MOST IMPORTANT: <one sentence>
 ```
 
 `ANOTHER ROUND` whenever there is at least one `BLOCKER`. It means **this pull
-request needs more work, and then a fresh review of the new diff** — never
-re-reviewing the same diff a second time. With only concerns, recommend `MERGE`
-and list them — the product manager decides whether they wait.
+request needs more work, and then a fresh review of what changed** — never
+re-reviewing the same diff a second time. When the fix lands, review the
+changed code in depth and say explicitly which lenses the change could not have
+affected. With only concerns, recommend `MERGE` and list them — the product
+manager decides whether they wait.
 
 **Say where you were uncertain.** A finding you are sure of and a finding you
 are guessing at look identical in a list, and the difference is what tells the
@@ -175,5 +233,5 @@ even where it costs you. A review whose provenance is unclear is worth less
 than a shorter one that is clean, and the first calibration run was salvaged
 only because the agent volunteered two such disclosures unprompted.
 
-Then notify the product manager with the verdict and the single most important
-finding. The decision to merge is theirs, not the review agent's.
+Then notify the product manager (Leo) with the verdict and the single most
+important finding. The decision to merge is his, not the review agent's.
