@@ -23,10 +23,15 @@ on real hardware or on a decision by Leo (`backlog.md`). Earlier session handoff
 | Command | Result |
 |---|---|
 | `python afk_clicker.py --selftest` (CT110, Xvfb) | exit 0 |
-| Unit and slow test suites (CT110, Xvfb) | in the PR body for #68 |
+| `unittest -v tests.test_hotkey` / `tests.test_updater` / `tests.test_ui` (CT110, each on its own Xvfb) | 39 OK / 78 OK (5 skipped) / 483 OK |
+| `AFK_SLOW_TESTS=1 unittest -v tests.test_chords_slow` (CT110, own Xvfb) | 5 OK |
 
 ## Not verified and why
 
+- The combined `unittest discover -s tests -t .` in one process fails on CT110 from
+  `test_ui.SettingsNavigation` onward and then hangs; each module passes alone, and CI is
+  green. Not attributed (pynput 1.8.2 in the CT110 venv vs the pinned 1.7.7 is one
+  candidate). `xvfb-run` does not work on CT110 (`xauth` missing).
 - PyInstaller builds — not installed on CT110, and Windows and macOS builds exist only on
   their own CI runners.
 
