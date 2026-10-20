@@ -112,12 +112,11 @@ The PR suite (`.github/workflows/ci.yml`) runs on every pull request and every p
   approved (`docs/history/README.md`). Untracked copies in a working tree are that
   convention, not lost work. Archived files keep the `ac-<n>-…` names for new tickets too
   (Leo, 2026-10-20).
-- **Pushing `main` to `origin` touches the shared checkout.** The bare repo's
-  post-receive hook runs `/usr/local/bin/dev-project-sync.sh afk-clicker`, which fetches
-  in `~/projects/afk-clicker` and runs `git reset --hard origin/main` there — since
-  2026-10-20 only when that checkout is on `main` with no uncommitted changes to tracked
-  files; otherwise it only fetches and prints a warning. The merge recipe pushes `main` to
-  every remote, so the merging agent sets this off: check the shared checkout first.
+- **Pushing `main` to `origin` touches the shared checkout.** Pushing main to origin runs
+  post-receive → `/usr/local/bin/dev-project-sync.sh`, which only fast-forwards
+  `~/projects/afk-clicker` (`git merge --ff-only origin/main`) when it is on main with no
+  tracked changes; otherwise it leaves it alone and warns (hardened 2026-10-20). The merge
+  recipe pushes `main` to every remote, so the merging agent sets this off.
 - **Linux means X11.** Wayland cannot observe keys sent to other windows; the hotkey does not
   work there.
 
