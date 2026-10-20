@@ -3,12 +3,14 @@
 Ordered by what a user notices, not by what is interesting to build. Nothing
 here promises a date.
 
-## Before 1.0.0
-
 `1.0.0` means the UI and the on-disk settings format have stopped moving.
-Until both are settled, the version stays in `0.x`.
+Until both are settled, the version stays in `0.x`. Items marked
+**(before 1.0.0)** are the ones that have to be settled first; the rest are
+"later".
 
-- [x] **Settings schema version.** `settings.json` now carries a `"version"`
+## Done
+
+- [x] **Settings schema version** (before 1.0.0). `settings.json` now carries a `"version"`
       key (`SETTINGS_VERSION` in `afk_clicker.py`). A file with no version key
       at all -- every one written before this change -- is treated as version
       0; `_run_settings_migrations()` carries it forward through
@@ -21,28 +23,13 @@ Until both are settled, the version stays in `0.x`.
       design: an older file simply lacks the key, and an unreadable blob
       degrades to no hotkey through `Hotkey.from_json` either way, with
       nothing a version number would add. Unblocks the macros tab below.
-- [x] **Update integrity.** The updater downloads over HTTPS and executes the
+- [x] **Update integrity** (before 1.0.0). The updater downloads over HTTPS and executes the
       result. It now verifies the archive against the release's `SHA256SUMS`
       before extracting anything, refuses a release that publishes none, and
       refuses archive entries that escape the staging directory (#3, #11).
       Digests from the same release catch a corrupt or swapped asset, not a
       compromised release — that would need signing.
-- [ ] **macOS verification.** Built and smoke-tested in CI, never run by a
-      human. Accessibility permission, the unsigned-app first launch and the
-      hotkey listener are all unverified on real hardware.
-- [ ] **Game catalogue.** Minecraft is the only profile with grounded tuning.
-      Others should come from measurement or from the user via "Add current
-      game" — not from plausible-sounding guesses.
-- [ ] **Detection cost.** The X11 path still walks the window tree every
-      five seconds -- fine on a desktop, wasteful on a laptop battery.
-      **Partially addressed (G#62):** the connection-setup cost (opening
-      and closing a fresh Xlib connection on every single poll) is gone --
-      one connection is now reused across calls. The walk itself, and its
-      5s cadence, are unchanged; a full fix (event-driven detection instead
-      of polling) was considered and deliberately deferred, since it would
-      depend on window-manager cooperation Xvfb doesn't provide and would
-      likely be untestable in this project's own CI.
-- [x] **A Macros tab, configurable per game** (#15). A third tab beside
+- [x] **A Macros tab, configurable per game** (#15) (before 1.0.0). A third tab beside
       Hotkey/Clicking, holding an ordered list of steps -- key down, key up,
       click, wait -- stored per game exactly as the clicker settings are
       (`Store`'s per-game `"macros"` list, schema-versioned per the bullet
@@ -55,7 +42,7 @@ Until both are settled, the version stays in `0.x`.
       right-mouse-button release; sabotage-verified (`MacroRunnerReleases
       HeldKeys.test_a_deleted_finally_fails_this_test`). Deterministic
       only: no jitter presets, no randomised step ordering -- see
-      "Explicitly not planned" below. Runs once per trigger, refusing a
+      "Not planned" below. Runs once per trigger, refusing a
       retrigger while the same macro is still running; does not pause the
       clicker -- the two run on independent threads sending input through
       the same `pynput` controllers, with no coordination between them
@@ -64,12 +51,10 @@ Until both are settled, the version stays in `0.x`.
       the same thing at the same instant can interleave in ways nothing
       here accounts for; revisit if that proves to matter in practice
       rather than guessing at a coordination scheme now. Recording with
-      real timings, not just an authored step list, stays open for later.
+      real timings, not just an authored step list, stays open for later
+      (since shipped: G#65, PR #116).
       Blocked on macOS by the same unresolved listener abort as the hotkey
       system itself.
-
-## Later
-
 - [x] **Per-game hotkeys** (G#57). The one global toggle hotkey became an
       optional, per-game value, stored on each game's own settings entry
       (`Store.game(id)["hotkey"]`) and re-armed on every real game switch
@@ -102,10 +87,46 @@ Until both are settled, the version stays in `0.x`.
       path. Importing preserves `eat_mode` as a key but not its value (the
       existing per-game `_select()`/`_persist()` coercion forces it to
       `"off"` for any non-eating profile) -- deliberate, not a gap.
+
+Smaller fixes and features shipped since are recorded per cycle in
+`docs/history/` and in `backlog.md`.
+
+## Next
+
+- [ ] **macOS verification** (before 1.0.0). Built and smoke-tested in CI, never run by a
+      human. Accessibility permission, the unsigned-app first launch and the
+      hotkey listener are all unverified on real hardware.
+- [ ] **Game catalogue** (before 1.0.0). Minecraft is the only profile with grounded tuning.
+      Others should come from measurement or from the user via "Add current
+      game" — not from plausible-sounding guesses.
+- [ ] **Detection cost** (before 1.0.0). The X11 path still walks the window tree every
+      five seconds -- fine on a desktop, wasteful on a laptop battery.
+      **Partially addressed (G#62):** the connection-setup cost (opening
+      and closing a fresh Xlib connection on every single poll) is gone --
+      one connection is now reused across calls. The walk itself, and its
+      5s cadence, are unchanged; a full fix (event-driven detection instead
+      of polling) was considered and deliberately deferred, since it would
+      depend on window-manager cooperation Xvfb doesn't provide and would
+      likely be untestable in this project's own CI.
 - [ ] Linux Wayland: not solvable in-process. Would need a portal-based
       global-shortcut integration, and only on compositors that implement it.
 
-## Explicitly not planned
+Open tickets (Gitea `admin/afk-clicker`, mirrored on GitHub), as of
+2026-10-20 — all waiting on real hardware or on a decision by Leo
+(`backlog.md`):
+
+- [ ] Verify the per-game-hotkey subtitle string on a real Windows render
+      (G#59 / GH#105).
+- [ ] macOS flake in `QueuedNonResyncedUpdatesSurviveARebuild` is back after
+      PR #58 (G#39 / GH#69).
+- [ ] Delete merged remote branches (G#46 / GH#85).
+- [ ] The GitHub token lacks `actions: write` (G#47 / GH#86).
+
+## Not planned
+
+Explicit decisions not to build something. A PR that does one of these is a
+`BLOCKER` in review regardless of quality. Who decided each, and when, is not
+recorded; the reasons are as originally written.
 
 - **Randomised human-like movement paths.** The point of this tool is an AFK
   farm on a private server, not defeating anti-cheat on someone else's.
