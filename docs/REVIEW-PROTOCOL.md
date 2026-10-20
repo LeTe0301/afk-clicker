@@ -73,7 +73,9 @@ downloads and executes, and the one write token in the release pipeline.
 - **Workflows:** an `${{ }}` expression inside a `run:` script is pasted in as
   text before the shell parses it, so inputs go through `env:`. Permissions are
   declared per job and only `publish` holds `contents: write`; an action that
-  holds a write token is pinned (`release.yml`).
+  holds a write token is **pinned to a full commit SHA** — a tag can be moved.
+  `release.yml` currently pins `softprops/action-gh-release@v2.0.8`, a tag,
+  although its comment says "pinned to a commit" (G#70 / GH#124).
 - Secrets in code, logs, the bundle or a URL are a `BLOCKER`.
 
 Is there a test proving the *refusal* — a tampered archive, an escaping entry,

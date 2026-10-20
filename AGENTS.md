@@ -21,10 +21,10 @@ update themselves from there · version `0.9.0` (below 1.0.0 until Leo says othe
 | | |
 |---|---|
 | Branch code | `afk` — `feature/afk-{n}/{description}` (open 2-letter `ac-{n}` branches keep their names) |
-| Ticket repo | Gitea `admin/afk-clicker` (issues only — its git repo holds just a placeholder README, not the code) |
+| Ticket repo | Gitea `admin/afk-clicker` (issues only — its git repo holds just a placeholder README, not the code, and stays that way: Leo, 2026-10-20) |
 | GitHub mirror | `LeTe0301/afk-clicker` — mirror every ticket (`ghr`). Gitea and GitHub numbers differ; `backlog.md` writes them **G#** / **GH#**, and `Closes #X` in a PR takes the GitHub number |
 | PRs on | GitHub |
-| Remotes | `github` = `git@github-afk:LeTe0301/afk-clicker.git` (deploy key; the code of record and the PRs); `origin` = `/srv/git/repos/afk-clicker.git` on CT110 (toggle-app mirror) |
+| Remotes | `github` = `git@github-afk:LeTe0301/afk-clicker.git` (deploy key; the code of record and the PRs); `origin` = `/srv/git/repos/afk-clicker.git` on CT110 (toggle-app mirror; a push of `main` there updates the shared checkout — see Guardrails) |
 
 ## Stack
 
@@ -41,13 +41,13 @@ Python 3.11.2, venv `~/.venvs/afk-clicker-test` (it has pynput **1.8.2**, not th
 | What | Command |
 |---|---|
 | Install / env setup | `pip install "pynput==1.7.7"`; Linux also needs `python3-tk` and Xvfb. Not run: no installs on CT110 (the existing venv was used) |
-| Unit tests (PR suite) | CI: `xvfb-run -a --server-args="-screen 0 1280x1024x24 -maxclients 2048" python -m unittest discover -s tests -t . -v`. **On CT110 `xvfb-run` fails (`xauth command not found`)** — start `Xvfb :N -screen 0 1280x1024x24 -maxclients 2048 &` on a free display and run `DISPLAY=:N python -m unittest discover -s tests -t .`. Verified per module (2026-10-20): `tests.test_hotkey` 39 OK, `tests.test_updater` 78 OK, `tests.test_ui` 483 OK. **The combined `discover` in one process fails on CT110** from `test_ui.SettingsNavigation` onward and then hangs (cause not found; CI is green), so run the modules separately there |
-| Slow / full tests (release gate) | `AFK_SLOW_TESTS=1` + the unit-test command above (the synthetic key-press sweep in `tests/test_chords_slow.py`). Verified: `AFK_SLOW_TESTS=1 python -m unittest tests.test_chords_slow` 5 OK in 65 s |
+| Unit tests (PR suite) | CI: `xvfb-run -a --server-args="-screen 0 1280x1024x24 -maxclients 2048" python -m unittest discover -s tests -t . -v`. **On CT110 `xvfb-run` fails (`xauth command not found`)** — start `Xvfb :N -screen 0 1280x1024x24 -maxclients 2048 &` on a free display and run `DISPLAY=:N python -m unittest discover -s tests -t .`. Verified per module (2026-10-20): `tests.test_hotkey` 39 OK, `tests.test_updater` 78 OK, `tests.test_ui` 483 OK. **The combined `discover` in one process intermittently wedges on CT110** (2 of 2 author runs, 1 of 3 review runs; the others passed all 605). The cause is a lock wedge in the game-scan path (`_x11_display_lock`), not pynput — G#69 / GH#123. Workaround: run the modules separately |
+| Slow / full tests (release gate) | `release.yml` runs `AFK_SLOW_TESTS=1 xvfb-run -a python -m unittest discover -s tests -t . -v` — plain `xvfb-run -a`, **without** ci.yml's `-maxclients 2048` (aligning the two is G#70 / GH#124). Locally: `AFK_SLOW_TESTS=1` with the unit-test command above. The flag adds the synthetic key-press sweep in `tests/test_chords_slow.py`. Verified: `AFK_SLOW_TESTS=1 python -m unittest tests.test_chords_slow` 5 OK in 65 s |
 | Type-check / lint | none configured |
 | Build | Windows: `build.bat` (local, pins the same versions as CI). Linux/macOS: the per-OS `pyinstaller ...` step in `.github/workflows/release.yml`. Not run: PyInstaller is not installed on CT110, and it cannot cross-compile — Windows and macOS builds exist only on their own runners |
 | Smoke test | `python afk_clicker.py --selftest` (exit 0 = every lazily resolved backend loads). Verified from source on CT110 under Xvfb, exit 0. CI runs it against each built binary |
 | Run locally | `python afk_clicker.py` (needs a display; on Linux an X11 session) |
-| Deploy to test | none — a desktop app with no server. The release pipeline's three builds and their smoke tests run before the approval gate |
+| Deploy to test | none — a desktop app with no server. The release pipeline's three builds and their smoke tests run before the approval gate, and **before approving that gate, click through the CI-built Windows artifact by hand** (Leo, 2026-10-20) |
 | Deploy to production | push `release/{version}` to `github`; the pipeline stops at the `release` environment gate until Leo approves in the Actions tab. Not run |
 | Version source | `afk_clicker.py:__version__` — must match `release/{version}` |
 
@@ -63,7 +63,8 @@ publishes nothing. In order:
    the branch's version: a binary reporting the wrong version breaks the in-app updater's
    comparison quietly and permanently.
 3. **Full suite** on `ubuntu-latest` with `AFK_SLOW_TESTS=1`, i.e. including the slow
-   synthetic-key-press sweep that the PR suite skips.
+   synthetic-key-press sweep that the PR suite skips. It runs under plain `xvfb-run -a`,
+   without ci.yml's `-maxclients 2048` (G#70 / GH#124).
 4. **Three builds**, `fail-fast: false`: `windows-latest`, `ubuntu-22.04` (oldest runner,
    because PyInstaller links the build host's glibc) and `macos-latest`, each followed by a
    **smoke test** that runs the built binary with `--selftest`; then packaged
@@ -71,7 +72,8 @@ publishes nothing. In order:
    `Clickwork-macos-arm64.zip` — macOS with `ditto`, not `zip`).
 5. **Manual approval gate** — the `publish` job runs in GitHub Environment `release`,
    which requires a reviewer (LeTe0301; checked via the API 2026-10-20, environment
-   created 2026-09-10, `can_admins_bypass: true`).
+   created 2026-09-10, `can_admins_bypass: true`). Before approving, click through the
+   CI-built Windows artifact by hand (Leo, 2026-10-20) — there is no test server.
 6. **Publication** — `SHA256SUMS` over the assets, then a GitHub Release `v{version}`
    tagged on the tested commit (`target_commitish: github.sha`). This is the only job
    with `contents: write`.
@@ -94,8 +96,9 @@ The PR suite (`.github/workflows/ci.yml`) runs on every pull request and every p
 - **Only the main thread touches Tk** (`docs/CODING-GUIDELINES.md`).
 - **Tests on Linux need an X display.** pynput resolves its backend at import time; with
   `CI` set and no `DISPLAY` the suite raises instead of reporting `OK (skipped=…)`
-  (`tests/context.py`). Start Xvfb with `-maxclients 2048` — the suite exceeds the default
-  256 clients (`ci.yml`).
+  (`tests/context.py`). `ci.yml` starts Xvfb with `-maxclients 2048`, after a run hit the
+  default 256-client cap; `release.yml` runs plain `xvfb-run -a` without it (0.9.0's
+  release run passed that way; aligning it is G#70 / GH#124). Use the cap locally.
 - **One suite per Xvfb display.** Two Tk processes on one window-manager-less Xvfb display
   contend for X input focus and produce focus-test flakes that belong to the harness
   (`docs/history/README.md`, ac-24-f2); give each run its own display number.
@@ -107,7 +110,14 @@ The PR suite (`.github/workflows/ci.yml`) runs on every pull request and every p
   `docs/implementation.md`, `docs/test-review.md` (and `docs/story.md`) live only in a
   worktree; the reviewer archives them verbatim into `docs/history/` when the cycle is
   approved (`docs/history/README.md`). Untracked copies in a working tree are that
-  convention, not lost work.
+  convention, not lost work. Archived files keep the `ac-<n>-…` names for new tickets too
+  (Leo, 2026-10-20).
+- **Pushing `main` to `origin` touches the shared checkout.** The bare repo's
+  post-receive hook runs `/usr/local/bin/dev-project-sync.sh afk-clicker`, which fetches
+  in `~/projects/afk-clicker` and runs `git reset --hard origin/main` there — since
+  2026-10-20 only when that checkout is on `main` with no uncommitted changes to tracked
+  files; otherwise it only fetches and prints a warning. The merge recipe pushes `main` to
+  every remote, so the merging agent sets this off: check the shared checkout first.
 - **Linux means X11.** Wayland cannot observe keys sent to other windows; the hotkey does not
   work there.
 

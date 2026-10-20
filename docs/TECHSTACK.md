@@ -78,7 +78,8 @@ HTTP library" above.
 
 Every build input is pinned to an exact version — `pynput` (1.7.7),
 `pyinstaller` (6.11.1), and the release action, which holds the only write
-token in the pipeline. A floating dependency can change what ships without a
+token in the pipeline (pinned to the tag `v2.0.8`, not yet to a full commit
+SHA — G#70 / GH#124). A floating dependency can change what ships without a
 single commit here, and for a program whose whole job is synthesising input, a
 changed input backend is not a detail. `build.bat` pins the same versions CI
 does, so a local build cannot quietly differ from the published one.
@@ -93,8 +94,10 @@ does, so a local build cannot quietly differ from the published one.
   `APPDATA` / `XDG_CONFIG_HOME` to find its config directory.
 - **Xvfb client cap:** the suite opens far more X clients than Xvfb's default
   256 (a fresh `tk.Tk()` per test plus pynput controllers, with `gc.disable()`
-  for the whole run), so CI starts it with `-maxclients 2048`; without it the
-  run dies with "Maximum number of clients reached" (`ci.yml`).
+  for the whole run), so `ci.yml` starts it with `-maxclients 2048`; without it
+  the run died with "Maximum number of clients reached" (`ci.yml`). The release
+  pipeline (`release.yml`) runs plain `xvfb-run -a` without the cap; aligning
+  it is G#70 / GH#124.
 
 ## Platform limits worth stating plainly
 
